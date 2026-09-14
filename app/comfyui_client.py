@@ -157,10 +157,18 @@ class ComfyUIClient:
         resp.raise_for_status()
         return resp.json()
 
-    def get_status(self) -> dict:
+    def get_status(self, timeout: int = 3) -> dict:
+        """探测 ComfyUI 在线状态。
+
+        注意：这是高频调用的状态接口（前端每次刷新都会打），
+        因此**必须用短超时**——默认 3 秒。用 requests 的 (connect, read) 元组形式，
+        保证「主机不可达时快速失败」而不是干等 30 秒（Windows 上防火墙丢包会更久）。
+        """
         try:
-            stats = self._get("/system_stats")
-            return {"status": "online", "stats": stats}
+            resp = requests.get(f"{self.base_url}/system_stats",
+                                timeout=(min(2, timeout), timeout))
+            resp.raise_for_status()
+            return {"status": "online", "stats": resp.json()}
         except Exception as e:
             return {"status": "offline", "error": str(e)}
 

@@ -25,7 +25,8 @@ from config import (
     UPSCALE_DIR, UPSCALE_DEFAULT_PARAMS, COMFYUI_OUTPUT_DIR,
     TE_UPSCALE_DEFAULT_PARAMS, TE_UPSCALE_LOWVRAM_PARAMS, UPSCALE_ENGINE,
     DUB_DIR, TTS_DEFAULT_PARAMS, H3_STRIP_AUDIO,
-    DUB_MIX_DIR, MIX_DEFAULT_PARAMS, CONTINUITY_DIR
+    DUB_MIX_DIR, MIX_DEFAULT_PARAMS, CONTINUITY_DIR,
+    TASKS_DB_PATH, TASK_QUEUE_CONCURRENCY, TASK_UNIT_MIN_BYTES
 )
 from script_generator import ScriptGenerator
 from comfyui_client import ComfyUIClient
@@ -46,6 +47,7 @@ import continuity
 import coverage
 import project_store
 import qc_client
+import task_store
 import video_watermark
 import watermark_cleanup
 import upscale_client
@@ -84,6 +86,16 @@ WATERMARK_CLEANUP_BACKUP_DIR = os.path.join(QC_DIR, "_watermark_backup")
 # 全局状态
 generation_state = {}
 lock = threading.Lock()
+
+# P0-4 持久化任务队列：任务全生命周期落盘（SQLite），支持重启后查询与断点续跑
+task_db = task_store.get_store(TASKS_DB_PATH)
+task_queue = task_store.get_queue(TASKS_DB_PATH)
+try:
+    # 启动时把上次残留的 running 任务标记为 interrupted（可供前端提示「可继续」）
+    _interrupted = task_db.recycle_interrupted()
+except Exception as _e:  # noqa: BLE001  不得因任务库异常导致启动失败
+    _interrupted = 0
+    app.logger.warning(f"任务库中断恢复失败（不影响启动）：{_e}")
 
 # 初始化组件
 script_gen = ScriptGenerator()
@@ -467,8 +479,77 @@ def api_status():
             "scenes": sum(
                 len(files) for _, _, files in os.walk(SCENES_DIR)
             ) if os.path.exists(SCENES_DIR) else 0,
-        }
+        },
+        "task_queue": task_queue.status(),
+        "interrupted_tasks": _interrupted,
     })
+
+
+# ===== P0-4 持久化任务队列查询 =====
+
+@app.route('/api/tasks', methods=['GET'])
+def api_tasks_list():
+    """查询任务列表（可按项目 / 状态 / 类型过滤），用于重启后查看进度与续跑提示"""
+    project = (request.args.get('project') or '').strip()
+    status = (request.args.get('status') or '').strip()
+    kind = (request.args.get('kind') or '').strip()
+    try:
+        limit = max(1, min(500, int(request.args.get('limit') or 100)))
+    except (TypeError, ValueError):
+        limit = 100
+    try:
+        items = task_db.list(project=project or None, status=status or None,
+                             kind=kind or None, limit=limit)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"success": False, "error": f"任务查询失败：{e}"}), 500
+    return jsonify({"success": True, "count": len(items), "items": items,
+                    "queue": task_queue.status()})
+
+
+@app.route('/api/tasks/<task_id>', methods=['GET'])
+def api_task_detail(task_id):
+    """查询单个任务详情（含单元级进度，用于展示断点续跑可跳过的部分）"""
+    try:
+        t = task_db.get(task_id)
+        if not t:
+            return jsonify({"success": False, "error": "任务不存在"}), 404
+        units = task_db.list_units(task_id)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"success": False, "error": f"任务查询失败：{e}"}), 500
+    done = [u for u in units if u.get("status") == task_store.ST_DONE]
+    t["units"] = units
+    t["unit_summary"] = {"total": len(units), "done": len(done),
+                         "pending": len(units) - len(done)}
+    return jsonify({"success": True, "task": t})
+
+
+@app.route('/api/tasks/<task_id>/resume-preview', methods=['GET'])
+def api_task_resume_preview(task_id):
+    """断点续跑预检：给出该任务「已完成 / 待重跑」的单元清单
+
+    判据以磁盘产物为准（产物存在且非空即视为已完成），
+    因此即使任务状态表丢失，也能正确识别可跳过的部分。
+    """
+    try:
+        t = task_db.get(task_id)
+        if not t:
+            return jsonify({"success": False, "error": "任务不存在"}), 404
+        units = task_db.list_units(task_id)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"success": False, "error": f"查询失败：{e}"}), 500
+
+    done_units, pending_units = [], []
+    for u in units:
+        path = u.get("result_path") or ""
+        if path and task_store.is_unit_done(path, min_bytes=TASK_UNIT_MIN_BYTES):
+            done_units.append(u.get("unit_key"))
+        else:
+            pending_units.append(u.get("unit_key"))
+    return jsonify({"success": True, "task_id": task_id,
+                    "status": t.get("status"),
+                    "done_units": done_units, "pending_units": pending_units,
+                    "resumable": t.get("status") in (task_store.ST_INTERRUPTED,
+                                                     task_store.ST_FAILED)})
 
 
 # ===== 步骤1：剧本生成 =====

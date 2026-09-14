@@ -154,6 +154,11 @@ QC_CHECK_INTERVAL = 3          # 生成任务状态里质检阶段的轮询提�
 WATERMARK_CONFIG_PATH = os.path.join(PROJECT_ROOT_DIR, "watermark_config.json")
 WATERMARK_DIR = os.path.join(PROJECT_OUTPUT_DIR, "watermark")   # 带水印视频产物目录
 
+# P0-4 持久化任务队列（SQLite）：任务全生命周期落盘，支持断点续跑
+TASKS_DB_PATH = os.path.join(PROJECT_OUTPUT_DIR, "tasks.db")
+TASK_QUEUE_CONCURRENCY = _env_int("TASK_QUEUE_CONCURRENCY", 1)   # 单 GPU 建议保持 1
+TASK_UNIT_MIN_BYTES = _env_int("TASK_UNIT_MIN_BYTES", 1024)      # 单元产物视为有效的最小字节数
+
 # 统一「AI 设置」：文本分析 / 质检 / 对话总控 三个相互独立的模型模块（各自 base_url / api_key / model）
 AI_CONFIG_PATH = os.path.join(PROJECT_ROOT_DIR, "ai_config.json")
 AI_MODULES = ("text", "qc", "chat")
