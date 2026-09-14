@@ -33,6 +33,9 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# 项目根目录（定位加密密钥库 output/secrets.enc 与主密钥 .secret_key）
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
 # ===================== 默认配置 =====================
 
 # 质检判定口径：水印 / 角标 / 字幕 / 「AI 生成」标识一律不计为质量缺陷（B 项⑥）
@@ -198,8 +201,36 @@ def load_config(config_path: str) -> dict:
                 if k in data and data[k] is not None:
                     cfg[k] = data[k]
             cfg["endpoint_override"] = _normalize_override(data.get("endpoint_override"))
+            # P0-3：明文密钥自动迁移到加密库并清空 json 字段（只做一次）
+            if data.get("api_key"):
+                try:
+                    import secret_store
+                    _root = _PROJECT_ROOT
+                    if secret_store.get_store(_root).set_api_key("qc", str(data["api_key"]).strip()):
+                        data["api_key"] = ""
+                        tmp = config_path + ".tmp"
+                        with open(tmp, "w", encoding="utf-8") as f:
+                            json.dump(data, f, ensure_ascii=False, indent=2)
+                        os.replace(tmp, config_path)
+                        logger.info("质检配置中的明文密钥已迁移至加密库")
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"质检密钥迁移失败（暂不阻断）：{e}")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"质检配置读取失败（按默认值处理）：{e}")
+    # 密钥取值：环境变量 > 加密库 > json（迁移后应为空）
+    try:
+        import secret_store
+        secure = secret_store.get_store(_PROJECT_ROOT).get_api_key("qc")
+        if secure:
+            cfg["api_key"] = secure
+        env_base = secret_store.SecretStore.env_base_url("qc")
+        env_model = secret_store.SecretStore.env_model("qc")
+        if env_base:
+            cfg["base_url"] = env_base
+        if env_model:
+            cfg["model"] = env_model
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"质检密钥读取异常（回退 json）：{e}")
     # 类型兜底
     cfg["enabled"] = bool(cfg.get("enabled"))
     cfg["image_enabled"] = bool(cfg.get("image_enabled", True))
@@ -253,7 +284,18 @@ def save_config(config_path: str, patch: dict, keep_key_if_blank: bool = True) -
                 continue          # 误提交脱敏值，按不改动处理
             if v and "*" in v:
                 continue          # 脱敏回显值（如 sk-a******wxyz），按不改动处理
-            cfg["api_key"] = v
+            # P0-3：有效新密钥写入加密库，json 中不落明文
+            try:
+                import secret_store
+                if not secret_store.get_store(_PROJECT_ROOT).set_api_key("qc", v):
+                    raise RuntimeError("密钥加密存储不可用")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"质检密钥加密保存失败：{e}")
+                raise ValueError(
+                    "质检密钥加密存储不可用（缺少 cryptography 或主密钥），已拒绝明文落盘。"
+                    f"请安装 cryptography 后重试，或改用环境变量 "
+                    f"{secret_store.ENV_KEY_MAP.get('qc', 'MJSCXT_API_KEY_QC')} 配置密钥。")
+            cfg["api_key"] = ""
             continue
         if k in ("enabled", "image_enabled", "video_enabled"):
             cfg[k] = bool(v)

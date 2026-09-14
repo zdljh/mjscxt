@@ -1,22 +1,125 @@
 """
 漫剧生成系统配置
+
+配置来源（优先级从高到低）：
+1. 环境变量（含项目根目录 .env，由 _load_dotenv 自动加载）
+2. 代码内默认值
+
+P0-2 改造：原先硬编码的 ComfyUI / 模型路径已全部改为环境变量驱动，
+换机只需修改 .env（见项目根目录 .env.example），无需改代码。
 """
+import logging
 import os
 
-# ComfyUI 配置
-COMFYUI_URL = os.getenv("COMFYUI_URL", "http://127.0.0.1:8188")
-COMFYUI_WORKFLOWS_DIR = r"D:\ComfyUI_portable_TE_v260619\ComfyUI\ComfyUI\user\default\workflows"
-COMFYUI_INPUT_DIR = r"D:\ComfyUI_portable_TE_v260619\ComfyUI\ComfyUI\input"
-COMFYUI_OUTPUT_DIR = r"D:\ComfyUI_portable_TE_v260619\ComfyUI\ComfyUI\output"
+logger = logging.getLogger(__name__)
+
+# 项目根目录（供各模块复用；不依赖任何外部配置）
+PROJECT_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _load_dotenv() -> None:
+    """加载项目根目录 .env（存在则加载；未安装 python-dotenv 时静默跳过）
+
+    只做「不覆盖已有环境变量」的加载，保证系统环境变量优先级更高。
+    """
+    env_path = os.path.join(PROJECT_ROOT_DIR, ".env")
+    if not os.path.isfile(env_path):
+        return
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(env_path, override=False)
+        logger.debug(f"已加载环境配置：{env_path}")
+    except ImportError:
+        # 未安装 python-dotenv：手工解析最简 KEY=VALUE，避免因此无法启动
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k, v = k.strip(), v.strip().strip('"').strip("'")
+                    if k and k not in os.environ:
+                        os.environ[k] = v
+            logger.debug(f"已加载环境配置（内置解析器）：{env_path}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f".env 解析失败（忽略，按默认值启动）：{e}")
+
+
+_load_dotenv()
+
+
+def _env(key: str, default: str = "") -> str:
+    """取环境变量（去空白）；空串视为未设置，回退默认值"""
+    val = (os.getenv(key) or "").strip()
+    return val if val else default
+
+
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(_env(key, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _norm_path(p: str) -> str:
+    """规范化路径：统一分隔符，兼容 Windows / Linux 写法"""
+    return os.path.normpath(p) if p else ""
+
+
+# ===================== ComfyUI 配置 =====================
+COMFYUI_URL = _env("COMFYUI_URL", "http://127.0.0.1:8188")
+
+# ComfyUI 安装根目录：其余路径默认基于此推导，只需配置这一项即可换机
+COMFYUI_ROOT = _env("COMFYUI_ROOT", "")
+
+# 是否启用路径推导（未显式配置各路径时，按 ComfyUI 根目录推导）
+# 支持两种常见目录结构：
+#   A) COMFYUI_ROOT/ComfyUI/ComfyUI/{workflows,input,output,models}   （portable 版）
+#   B) COMFYUI_ROOT/{user/default/workflows,input,output,models}       （标准安装）
+def _derive_comfyui_paths(root: str) -> dict:
+    if not root:
+        return {"workflows": "", "input": "", "output": "", "models": ""}
+    candidates = [
+        root,
+        os.path.join(root, "ComfyUI", "ComfyUI"),
+        os.path.join(root, "ComfyUI"),
+    ]
+    for base in candidates:
+        if os.path.isdir(os.path.join(base, "models")):
+            return {
+                "workflows": os.path.join(base, "user", "default", "workflows"),
+                "input": os.path.join(base, "input"),
+                "output": os.path.join(base, "output"),
+                "models": os.path.join(base, "models"),
+            }
+    # 无法探测时按 portable 结构兜底
+    base = os.path.join(root, "ComfyUI", "ComfyUI")
+    return {
+        "workflows": os.path.join(base, "user", "default", "workflows"),
+        "input": os.path.join(base, "input"),
+        "output": os.path.join(base, "output"),
+        "models": os.path.join(base, "models"),
+    }
+
+
+_DERIVED = _derive_comfyui_paths(COMFYUI_ROOT)
+
+COMFYUI_WORKFLOWS_DIR = _norm_path(_env("COMFYUI_WORKFLOWS_DIR", _DERIVED["workflows"]))
+COMFYUI_INPUT_DIR = _norm_path(_env("COMFYUI_INPUT_DIR", _DERIVED["input"]))
+COMFYUI_OUTPUT_DIR = _norm_path(_env("COMFYUI_OUTPUT_DIR", _DERIVED["output"]))
 
 # 模型路径
-MODELS_DIR = r"D:\ComfyUI_portable_TE_v260619\ComfyUI\ComfyUI\models"
-QWEN_IMAGE_MODEL = f"{MODELS_DIR}/diffusion_models/qwen-image-2512/qwen_image_2512_fp8_e4m3fn.safetensors"
-H3_MODEL = f"{MODELS_DIR}/diffusion_models/minimax-h3/minimax_h3_ref2va_pruned_int8_convrot.safetensors"
-FLASHVSR_MODEL = f"{MODELS_DIR}/FlashVSR-v1.1/diffusion_pytorch_model_streaming_dmd.safetensors"
+MODELS_DIR = _norm_path(_env("MODELS_DIR", _DERIVED["models"]))
+QWEN_IMAGE_MODEL = os.path.join(MODELS_DIR, "diffusion_models", "qwen-image-2512",
+                                "qwen_image_2512_fp8_e4m3fn.safetensors") if MODELS_DIR else ""
+H3_MODEL = os.path.join(MODELS_DIR, "diffusion_models", "minimax-h3",
+                        "minimax_h3_ref2va_pruned_int8_convrot.safetensors") if MODELS_DIR else ""
+FLASHVSR_MODEL = os.path.join(MODELS_DIR, "FlashVSR-v1.1",
+                              "diffusion_pytorch_model_streaming_dmd.safetensors") if MODELS_DIR else ""
 
 # FlashVSR 超分模型目录（ComfyUI-FlashVSR_Ultra_Fast 约定：models/FlashVSR-v1.1）
-FLASHVSR_MODEL_DIR = f"{MODELS_DIR}/FlashVSR-v1.1"
+FLASHVSR_MODEL_DIR = os.path.join(MODELS_DIR, "FlashVSR-v1.1") if MODELS_DIR else ""
 FLASHVSR_REQUIRED_FILES = [
     "diffusion_pytorch_model_streaming_dmd.safetensors",   # DiT 主权重
     "Wan2.1_VAE.pth",                                      # VAE
@@ -24,14 +127,18 @@ FLASHVSR_REQUIRED_FILES = [
     "TCDecoder.ckpt",                                      # 时序解码器
 ]
 
-# LLM 配置
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-WORKBUDDY_API_KEY = os.getenv("WORKBUDDY_API_KEY", "")
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic")  # anthropic or workbuddy
+# LLM 配置（P0-3：密钥推荐走环境变量，代码内不保存明文）
+ANTHROPIC_API_KEY = _env("ANTHROPIC_API_KEY")
+WORKBUDDY_API_KEY = _env("WORKBUDDY_API_KEY")
+LLM_PROVIDER = _env("LLM_PROVIDER", "anthropic")  # anthropic or workbuddy
 
-# 项目根目录
-PROJECT_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+# 部署档案（8G / 16G / server）：影响超分与视频生成的默认档位
+DEPLOY_PROFILE = _env("DEPLOY_PROFILE", "16G")
 
+# ===================== 输出目录（须先于各产物子目录定义） =====================
+PROJECT_OUTPUT_DIR = os.path.join(PROJECT_ROOT_DIR, "output")
+
+# ===================== 小说上传与 LLM 配置路径 =====================
 # 小说上传目录（原始文件 + 解析后的标准化文本 + 元数据索引）
 NOVELS_DIR = os.path.join(PROJECT_ROOT_DIR, "novels")
 
@@ -40,12 +147,12 @@ LLM_CONFIG_PATH = os.path.join(PROJECT_ROOT_DIR, "llm_config.json")
 
 # AI 质检配置（总开关 / 图片·视频独立开关 / 模型 / 判定标准 / 最大重试次数）
 QC_CONFIG_PATH = os.path.join(PROJECT_ROOT_DIR, "qc_config.json")
-QC_DIR = os.path.join(PROJECT_ROOT_DIR, "output", "qc")   # 质检与重试历史 + 视频抽帧
+QC_DIR = os.path.join(PROJECT_OUTPUT_DIR, "qc")   # 质检与重试历史 + 视频抽帧
 QC_CHECK_INTERVAL = 3          # 生成任务状态里质检阶段的轮询提示间隔（秒，仅前端用）
 
 # 视频水印配置（C 项：默认关闭；支持文案/图片、位置、字号、透明度、边距、全视频移动模式）
 WATERMARK_CONFIG_PATH = os.path.join(PROJECT_ROOT_DIR, "watermark_config.json")
-WATERMARK_DIR = os.path.join(PROJECT_ROOT_DIR, "output", "watermark")   # 带水印视频产物目录
+WATERMARK_DIR = os.path.join(PROJECT_OUTPUT_DIR, "watermark")   # 带水印视频产物目录
 
 # 统一「AI 设置」：文本分析 / 质检 / 对话总控 三个相互独立的模型模块（各自 base_url / api_key / model）
 AI_CONFIG_PATH = os.path.join(PROJECT_ROOT_DIR, "ai_config.json")
@@ -61,7 +168,7 @@ LLM_REQUEST_TIMEOUT = 240       # 单次 LLM 请求超时（秒）
 # ===================== 项目级隔离（每部小说 = 一个独立项目） =====================
 # 注册表与每项目配置/隔离目录；各产物仍落在既有 output/<kind>/<项目键>/ 下，
 # 由「项目键（dir_key）」实现物理隔离，注册表负责把项目键与小说/剧本绑定起来。
-PROJECTS_DIR = os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "output")), "projects")
+PROJECTS_DIR = os.path.join(PROJECT_OUTPUT_DIR, "projects")
 PROJECT_INDEX_PATH = os.path.join(PROJECTS_DIR, "index.json")           # 项目列表（注册表）
 PROJECT_TRASH_DIR = os.path.join(PROJECTS_DIR, "_trash")               # 删除项目的回收站（可恢复）
 PROJECT_MIGRATE_REPORT = os.path.join(PROJECTS_DIR, "migration_report.json")   # 历史数据归属迁移报告
@@ -79,9 +186,6 @@ PROJECT_DEFAULT_CONFIG = {
     "voice_map": {},                    # 角色→音色映射（按项目隔离）
     "qc_enabled": False,                # 质检开关（按项目隔离）
 }
-
-# 输出目录
-PROJECT_OUTPUT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "output"))
 
 # ===================== 跨集连贯性（相邻两章转剧本改进 A/B/C/D） =====================
 # 项目级设定库 / 风格指南 / 金句清单 / 口吻词典 / 运镜术语表 / 各集 state 与校验结果

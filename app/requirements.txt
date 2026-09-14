@@ -12,3 +12,7 @@ pypdf>=4.0.0
 EbookLib>=0.18
 charset-normalizer>=3.3.0
 （内容由AI生成，仅供参考）
+
+# 配置外置与密钥加密（P0-2 / P0-3）
+python-dotenv>=1.0.0
+cryptography>=42.0.0

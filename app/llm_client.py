@@ -55,6 +55,10 @@ class LLMTruncatedError(LLMError):
 
 # ===================== 配置持久化 =====================
 
+# 项目根目录（定位加密密钥库 output/secrets.enc 与主密钥 .secret_key）
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
 def _empty_config() -> dict:
     return {"base_url": "", "api_key": "", "model": "", "updated_at": None}
 
@@ -68,22 +72,66 @@ def load_config(config_path: str) -> dict:
             for k in ("base_url", "api_key", "model", "updated_at"):
                 if data.get(k) is not None:
                     cfg[k] = str(data[k])
+            # P0-3：明文密钥自动迁移到加密库并清空 json 字段（只做一次）
+            if data.get("api_key"):
+                try:
+                    import secret_store
+                    if secret_store.get_store(_PROJECT_ROOT).set_api_key("llm", str(data["api_key"]).strip()):
+                        data["api_key"] = ""
+                        tmp = config_path + ".tmp"
+                        with open(tmp, "w", encoding="utf-8") as f:
+                            json.dump(data, f, ensure_ascii=False, indent=2)
+                        os.replace(tmp, config_path)
+                        cfg["api_key"] = ""
+                        logger.info("LLM 配置中的明文密钥已迁移至加密库")
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"LLM 密钥迁移失败（暂不阻断）：{e}")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"LLM 配置读取失败（按未配置处理）：{e}")
+    # 密钥取值：环境变量 > 加密库 > json（迁移后应为空）
+    try:
+        import secret_store
+        secure = secret_store.get_store(_PROJECT_ROOT).get_api_key("llm")
+        if secure:
+            cfg["api_key"] = secure
+        env_base = secret_store.SecretStore.env_base_url("llm")
+        env_model = secret_store.SecretStore.env_model("llm")
+        if env_base:
+            cfg["base_url"] = env_base
+        if env_model:
+            cfg["model"] = env_model
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"LLM 密钥读取异常（回退 json）：{e}")
     return cfg
 
 
 def save_config(config_path: str, base_url: str, api_key: str = None,
                 model: str = None, keep_key_if_blank: bool = True) -> dict:
+    """保存配置。P0-3：有效密钥写入加密库，json 中不落明文。"""
     cfg = load_config(config_path)
     if base_url is not None:
         cfg["base_url"] = (base_url or "").strip()
     if model is not None:
         cfg["model"] = (model or "").strip()
     if api_key is not None and api_key.strip():
-        cfg["api_key"] = api_key.strip()
+        key = api_key.strip()
+        if "*" not in key:
+            try:
+                import secret_store
+                if not secret_store.get_store(_PROJECT_ROOT).set_api_key("llm", key):
+                    raise RuntimeError("密钥加密存储不可用")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"LLM 密钥加密保存失败：{e}")
+                raise ValueError(
+                    "LLM 密钥加密存储不可用（缺少 cryptography 或主密钥），已拒绝明文落盘。"
+                    "请安装 cryptography 后重试，或改用环境变量 MJSCXT_API_KEY 配置密钥。")
     elif api_key is not None and not keep_key_if_blank:
-        cfg["api_key"] = ""
+        try:
+            import secret_store
+            secret_store.get_store(_PROJECT_ROOT).clear_api_key("llm")
+        except Exception:  # noqa: BLE001
+            pass
+    cfg["api_key"] = ""
     cfg["updated_at"] = datetime.now().isoformat(timespec="seconds")
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
     tmp = config_path + ".tmp"
@@ -95,6 +143,11 @@ def save_config(config_path: str, base_url: str, api_key: str = None,
 
 def clear_config(config_path: str) -> dict:
     cfg = _empty_config()
+    try:
+        import secret_store
+        secret_store.get_store(_PROJECT_ROOT).clear_api_key("llm")
+    except Exception:  # noqa: BLE001
+        pass
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)

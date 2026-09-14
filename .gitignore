@@ -5,6 +5,11 @@ llm_config.json
 qc_config.json
 watermark_config.json
 ref_img_path.txt
+
+# P0-3 密钥加密：主密钥与加密密钥库
+.secret_key
+output/secrets.enc
+secrets.enc
 .env
 .env.*
 !.env.example

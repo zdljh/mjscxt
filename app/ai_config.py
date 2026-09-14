@@ -29,8 +29,16 @@ from datetime import datetime
 
 from llm_client import build_chat_url, mask_key
 from llm_client import load_config as _load_legacy_config
+import secret_store
 
 logger = logging.getLogger(__name__)
+
+# 项目根目录（用于定位加密密钥库 output/secrets.enc 与主密钥 .secret_key）
+_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _store():
+    return secret_store.get_store(_ROOT_DIR)
 
 # 三个独立模块的键（顺序即前端展示顺序）
 MODULES = ("text", "qc", "chat")
@@ -138,6 +146,19 @@ def load_config(config_path: str, legacy_path: str = None) -> dict:
     cfg["version"] = int(raw.get("version") or 1)
     cfg["updated_at"] = raw.get("updated_at")
 
+    # P0-3：若 json 中仍残留明文密钥，自动迁移到加密库并清空 json 字段（只做一次）
+    if _has_plaintext_key(raw):
+        try:
+            secret_store.scrub_plaintext_key(config_path, "llm", _ROOT_DIR)
+            raw2 = _read_file(config_path)
+            modules2 = raw2.get("modules") if isinstance(raw2.get("modules"), dict) else {}
+            for m in MODULES:
+                cfg["modules"][m] = _normalize_module(modules2.get(m))
+            cfg["updated_at"] = raw2.get("updated_at") or cfg["updated_at"]
+            logger.info(f"{os.path.basename(config_path)} 中的明文密钥已迁移至加密库")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"明文密钥迁移失败（暂不阻断）：{e}")
+
     text = cfg["modules"]["text"]
     if not (text.get("base_url") and text.get("model")):
         legacy = _legacy_migratable(legacy_path)
@@ -157,16 +178,40 @@ def load_config(config_path: str, legacy_path: str = None) -> dict:
 
 
 def get_module(cfg: dict, module: str) -> dict:
-    """取某个模块的配置（含明文 api_key，仅供后端调用使用，切勿直接回传前端）"""
+    """取某个模块的配置（含明文 api_key，仅供后端调用使用，切勿直接回传前端）
+
+    密钥取值优先级：环境变量（MJSCXT_API_KEY_TEXT/QC/CHAT）> 本地加密库 > json 明文（遗留）。
+    base_url / model 同样支持环境变量覆盖（MJSCXT_BASE_URL_* / MJSCXT_MODEL_*）。
+    """
     if module not in MODULES:
         raise ValueError(f"未知的 AI 模块：{module}")
     modules = (cfg or {}).get("modules") or {}
-    return _normalize_module(modules.get(module))
+    ep = _normalize_module(modules.get(module))
+    ns = f"ai.{module}"
+    # 非密钥字段：环境变量优先
+    env_base = secret_store.SecretStore.env_base_url(ns)
+    env_model = secret_store.SecretStore.env_model(ns)
+    if env_base:
+        ep["base_url"] = env_base
+    if env_model:
+        ep["model"] = env_model
+    # 密钥：环境变量 > 加密库 > json 明文
+    secure = _store().get_api_key(ns)
+    if secure:
+        ep["api_key"] = secure
+    return ep
 
 
 def save_module(config_path: str, module: str, base_url: str = None, model: str = None,
                 api_key: str = None, legacy_path: str = None) -> dict:
-    """保存单个模块：api_key 为 None / 空 / 含 * 的脱敏值时视为「不改动原密钥」"""
+    """保存单个模块。
+
+    密钥处理（P0-3 加固）：
+    - api_key 为 None / 空 / 含 * 的脱敏值时，视为「不改动原密钥」；
+    - 有效新密钥写入**加密库**（output/secrets.enc），json 中该字段恒为空字符串；
+    - 加密不可用时（未装 cryptography），拒绝保存明文并抛 ValueError，
+      提示改用环境变量 MJSCXT_API_KEY_TEXT/QC/CHAT。
+    """
     if module not in MODULES:
         raise ValueError(f"未知的 AI 模块：{module}")
     cfg = load_config(config_path, legacy_path)
@@ -177,22 +222,45 @@ def save_module(config_path: str, module: str, base_url: str = None, model: str 
         ep["model"] = (model or "").strip()
     key = "" if api_key is None else str(api_key).strip()
     if key and "*" not in key:
-        ep["api_key"] = key
+        if not _store().set_api_key(f"ai.{module}", key):
+            raise ValueError(
+                "密钥加密存储不可用（缺少 cryptography 或主密钥），已拒绝明文落盘。"
+                "请安装 cryptography 后重试，或改用环境变量 "
+                f"{secret_store.ENV_KEY_MAP.get(f'ai.{module}')} 配置密钥。")
+    # json 中恒不保存明文密钥
+    ep["api_key"] = ""
     ep["updated_at"] = _now()
     cfg["updated_at"] = _now()
     _write_file(config_path, cfg)
     return cfg
 
 
+def _has_plaintext_key(raw: dict) -> bool:
+    """判断配置里是否残留明文密钥（用于触发一次性迁移）"""
+    if not isinstance(raw, dict):
+        return False
+    if isinstance(raw.get("api_key"), str) and raw["api_key"].strip():
+        return True
+    modules = raw.get("modules")
+    if isinstance(modules, dict):
+        for cfg in modules.values():
+            if isinstance(cfg, dict) and isinstance(cfg.get("api_key"), str) and cfg["api_key"].strip():
+                return True
+    return False
+
+
 def clear_module(config_path: str, module: str = None, legacy_path: str = None) -> dict:
-    """清空单个模块；module 为空则清空全部三个模块（整体重置）"""
+    """清空单个模块；module 为空则清空全部三个模块（整体重置）。同步清除加密库中的密钥。"""
     cfg = load_config(config_path, legacy_path)
     if module:
         if module not in MODULES:
             raise ValueError(f"未知的 AI 模块：{module}")
         cfg["modules"][module] = _empty_module()
+        _store().clear_api_key(f"ai.{module}")
     else:
         cfg = _empty_config()
+        for m in MODULES:
+            _store().clear_api_key(f"ai.{m}")
     cfg["updated_at"] = _now()
     _write_file(config_path, cfg)
     return cfg
