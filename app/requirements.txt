@@ -16,3 +16,7 @@ charset-normalizer>=3.3.0
 # 配置外置与密钥加密（P0-2 / P0-3）
 python-dotenv>=1.0.0
 cryptography>=42.0.0
+
+# 生产级 WSGI 服务器（无人值守必需：Flask 开发服务器无法可靠处理文件上传）
+waitress>=3.0.0
+

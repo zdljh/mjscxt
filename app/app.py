@@ -120,8 +120,26 @@ video_processor = VideoPostProcessor()
 
 # 无人值守托管：若存在已启用的托管计划，服务启动后自动接着生产（断点续跑）
 # 用一个短延时线程延后启动，避免拖慢 Flask 首次响应；失败不影响服务可用性。
+# 注意：若上次是用户「主动暂停」的，启动时尊重该状态，不擅自恢复生产。
+def autopilot_boot_enabled() -> bool:
+    """是否允许「随进程启动自动恢复生产」
+
+    默认开启 —— 24/7 无人值守是本系统的主场景。
+    但必须留一个逃生口：任何 `import app` 的短命脚本（单元验证、数据迁移、
+    一次性批处理）都会触发 boot，从而与正在挂机的服务**抢同一块 GPU**。
+    实测踩过这个坑：一条用于取路由列表的 `python -c "import app"` 直接
+    启动了守护进程并开始跑图。需要这类脚本时设置 MJSCXT_AUTOPILOT=0 即可。
+    """
+    val = (os.getenv("MJSCXT_AUTOPILOT") or "").strip().lower()
+    return val not in ("0", "false", "no", "off")
+
+
 def _autopilot_boot():
     try:
+        autopilot._restore_runtime()
+        if autopilot.is_paused():
+            app.logger.info("托管：上次为「已暂停」状态，启动后保持暂停（可在控制台恢复）")
+            return
         enabled = autopilot.enabled_projects()
         if not enabled:
             app.logger.info("托管：没有已启用的项目，守护进程待命（可在控制台一键开启）")
@@ -132,8 +150,17 @@ def _autopilot_boot():
         app.logger.warning(f"托管自动恢复失败（不影响服务）：{e}")
 
 
+def _schedule_autopilot_boot(delay: float = 3.0):
+    """按开关决定是否调度自动恢复（关闭时给出显式提示，避免误以为已托管）"""
+    if not autopilot_boot_enabled():
+        app.logger.info("托管：MJSCXT_AUTOPILOT=0，本次启动不自动恢复生产"
+                        "（如需 24/7 托管请移除该环境变量）")
+        return
+    threading.Timer(delay, _autopilot_boot).start()
+
+
 try:
-    threading.Timer(3.0, _autopilot_boot).start()
+    _schedule_autopilot_boot()
 except Exception as _e:  # noqa: BLE001
     app.logger.warning(f"托管启动调度失败：{_e}")
 
@@ -237,6 +264,35 @@ def api_projects_create():
     )
     return jsonify({"success": True, "project": project_store.summarize(rec["id"]),
                     "created": True})
+
+
+@app.route('/api/projects/ensure-for-novel', methods=['POST'])
+def api_projects_ensure_for_novel():
+    """确保某部小说有对应项目（有则复用，无则创建），并绑定小说
+
+    自动生产控制台的第 1 步：用户上传小说后，前端立刻调用本接口把项目建好并选中，
+    避免「小说传上来了但托管没项目可生产」的断档。名称取小说标题（清洗后）。
+    """
+    data = request.json or {}
+    novel_id = str(data.get('novel_id') or '').strip()
+    if not novel_id:
+        return jsonify({"success": False, "error": "缺少 novel_id"}), 400
+    meta = {}
+    try:
+        meta = get_novel(NOVELS_DIR, novel_id) or {}
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"success": False, "error": f"小说读取失败：{e}"}), 400
+    if not meta:
+        return jsonify({"success": False, "error": f"小说不存在：{novel_id}"}), 404
+    raw_name = (data.get('name') or meta.get('title') or meta.get('name')
+                or novel_id)
+    name = re.sub(r"[《》〈〉【】「」『』\s]+", "", str(raw_name)).strip() or novel_id
+    rec = project_store.ensure_project_for_novel(novel_id, name)
+    if not rec:
+        return jsonify({"success": False, "error": "项目创建失败"}), 500
+    return jsonify({"success": True, "project": project_store.summarize(rec["id"]),
+                    "novel_id": novel_id,
+                    "project_key": rec.get("dir_key") or rec.get("name")})
 
 
 @app.route('/api/projects/<path:pid>', methods=['GET'])
@@ -3644,7 +3700,7 @@ def _chat_state(project: str = "") -> dict:
     model_view = ai_config.module_public_view(ai_config.get_module(cfg, "chat"))
     return {
         "project_name": project,
-        "messages": history.get("messages") or [],
+        "messages": ai_chat.project_messages(history, project),
         "draft": ai_chat.get_draft(history, project),
         "settings": ai_chat.settings_view(AI_SETTINGS_PATH, project),
         "fields": ai_chat.fields_meta(),
@@ -3665,9 +3721,11 @@ def api_ai_chat_history():
 def api_ai_chat_clear():
     """清空会话（默认保留创作设定草稿与已生效设定）"""
     data = request.json or {}
-    history = ai_chat.clear_history(AI_CHAT_HISTORY_PATH,
-                                    keep_settings=bool(data.get("keep_settings", True)))
+    history = ai_chat.load_history(AI_CHAT_HISTORY_PATH)
     project = _chat_project(data, history)
+    history = ai_chat.clear_history(AI_CHAT_HISTORY_PATH,
+                                    keep_settings=bool(data.get("keep_settings", True)),
+                                    project=project)
     ai_chat.save_history(AI_CHAT_HISTORY_PATH, history)
     return jsonify({"success": True, "message": "会话已清空", "state": _chat_state(project)})
 
@@ -3685,7 +3743,7 @@ def api_ai_chat():
     history = ai_chat.load_history(AI_CHAT_HISTORY_PATH)
     project = _chat_project(data, history)
     history["active_project"] = project
-    ai_chat.append_message(history, "user", message)
+    ai_chat.append_message(history, "user", message, project)
 
     draft = ai_chat.get_draft(history, project)
     if isinstance(data.get("draft"), dict) and data["draft"]:
@@ -3694,7 +3752,7 @@ def api_ai_chat():
     cfg = ai_config.load_config(AI_CONFIG_PATH, LLM_CONFIG_PATH)
     ep = ai_config.get_module(cfg, "chat")
     if not (ep.get("base_url") and ep.get("api_key") and ep.get("model")):
-        history["messages"] = history["messages"][:-1]             # 未配置则不落用户消息，避免脏历史
+        ai_chat.drop_last_message(history, project)               # 未配置则不落用户消息，避免脏历史
         ai_chat.save_history(AI_CHAT_HISTORY_PATH, history)
         return jsonify({
             "success": False,
@@ -3709,12 +3767,12 @@ def api_ai_chat():
         client = LLMClient(AI_CONFIG_PATH, config=ep, timeout=LLM_REQUEST_TIMEOUT)
         reply = client.chat(messages, temperature=0.7, max_tokens=2048)
     except LLMError as e:
-        history["messages"] = history["messages"][:-1]
+        ai_chat.drop_last_message(history, project)
         ai_chat.save_history(AI_CHAT_HISTORY_PATH, history)
         return jsonify({"success": False, "error": f"对话总控模型调用失败：{e}",
                         "state": _chat_state(project)}), 400
     except Exception as e:  # noqa: BLE001
-        history["messages"] = history["messages"][:-1]
+        ai_chat.drop_last_message(history, project)
         ai_chat.save_history(AI_CHAT_HISTORY_PATH, history)
         return jsonify({"success": False, "error": f"对话总控模型调用异常：{e}",
                         "state": _chat_state(project)}), 500
@@ -3724,7 +3782,7 @@ def api_ai_chat():
         draft = ai_chat.merge_settings(draft, new_settings)
         ai_chat.set_draft(history, project, draft)
     display = ai_chat.strip_json_block(reply)
-    ai_chat.append_message(history, "assistant", display)
+    ai_chat.append_message(history, "assistant", display, project)
     ai_chat.save_history(AI_CHAT_HISTORY_PATH, history)
 
     state = _chat_state(project)
@@ -4178,6 +4236,10 @@ def api_upload_novels():
     pref = (request.form.get('project_id') or request.args.get('project_id')
             or request.form.get('project_name') or '').strip()
     proj = project_store.get_project(pref) if pref else None
+    # 无人值守生产要求「上传即建好项目」：未显式指定项目时，按小说自动建立独立项目，
+    # 这样上传完成后即可直接进入「总控 AI 定风格 → 开启托管」，不需要用户手工建项目。
+    auto_project = (request.form.get('auto_project') or request.args.get('auto_project')
+                    or '1').strip() not in ('0', 'false', 'no')
     results, ok_count = [], 0
     for f in files:
         raw_name = _safe_upload_name(f.filename)
@@ -4193,16 +4255,25 @@ def api_upload_novels():
             f.save(tmp_path)
             meta = ingest_novel(tmp_path, raw_name, NOVELS_DIR)
             ok_count += 1
-            if proj:
-                proj = project_store.update_project(
-                    proj["id"], novel_id=meta.get("novel_id") or "",
-                    novel_name=meta.get("name") or raw_name) or proj
+            item_proj = proj
+            if item_proj is None and auto_project:
+                try:
+                    item_proj = _resolve_novel_project({}, meta) or None
+                except Exception as e:  # noqa: BLE001  建项目失败不该让上传整体失败
+                    app.logger.warning(f"自动建项目失败（小说已入库）：{e}")
+            if item_proj:
+                item_proj = project_store.update_project(
+                    item_proj["id"], novel_id=meta.get("novel_id") or "",
+                    novel_name=meta.get("name") or raw_name) or item_proj
+                proj = proj or item_proj
             results.append({
                 "filename": raw_name, "success": True,
                 "novel": {k: v for k, v in meta.items() if k != "chapters"},
                 "chapter_preview": (meta.get("chapters") or [])[:5],
-                "project_id": (proj or {}).get("id", ""),
-                "project_key": (proj or {}).get("dir_key", ""),
+                "project_id": (item_proj or {}).get("id", ""),
+                "project_key": (item_proj or {}).get("dir_key", ""),
+                "project": {k: (item_proj or {}).get(k) for k in
+                            ("id", "name", "dir_key", "novel_id")} if item_proj else None,
             })
         except NovelParseError as e:
             results.append({"filename": raw_name, "success": False, "error": str(e)})
@@ -4210,11 +4281,18 @@ def api_upload_novels():
             app.logger.error(f"小说解析失败 {raw_name}: {e}")
             results.append({"filename": raw_name, "success": False, "error": f"解析失败：{e}"})
         finally:
-            if os.path.isfile(tmp_path):
-                try:
+            # 清理临时文件属于「收尾」，绝不能因为它失败而让一个已经成功的上传变成
+            # 无响应。除 OSError（Windows 杀软占用、共享冲突）外，某些运行环境注入的
+            # 安全守卫会直接抛 SystemExit —— 它继承自 BaseException 而非 Exception，
+            # Flask 不会把它转成 500，而是会掐断这次请求（客户端表现为挂起后空响应）。
+            # 这里放宽到 BaseException，但保留 KeyboardInterrupt 的语义。
+            try:
+                if os.path.isfile(tmp_path):
                     os.remove(tmp_path)
-                except OSError:
-                    pass
+            except KeyboardInterrupt:
+                raise
+            except BaseException as _e:  # noqa: BLE001
+                app.logger.warning(f"上传临时文件清理失败（忽略，不影响本次上传）：{_e!r}")
 
     return jsonify({
         "success": ok_count > 0,

@@ -258,6 +258,7 @@
     },
     "curveSummary": "合计 {n} 集 · 平均 {avg} · 最后 {last}",
     "epOthers": "其它项目还有 {n} 集待生产",
-    "planProgress": "已完成 {a}/{b} 集"
+    "planProgress": "已完成 {a}/{b} 集",
+    "upHint": "上传后系统会自动建立同名项目并选中它，接着就能用总控 AI 谈风格、开托管。支持 txt / docx / pdf / epub / html，自动切分章节。"
   }
 }

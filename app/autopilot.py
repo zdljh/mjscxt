@@ -50,6 +50,7 @@ _LOCK = threading.RLock()          # 保护 _STATE（可重入：内部函数会
 _THREAD = None                     # 守护线程
 _WAKE = threading.Event()          # 立即唤醒（新任务 / 启停时）
 _STOP = threading.Event()          # 进程退出信号
+_RUNTIME_RESTORED = False          # 运行时状态（暂停标记）是否已从磁盘恢复
 
 #: 托管运行态（内存；供前端高频读取）
 _STATE = {
@@ -143,6 +144,51 @@ def _read_json(path: str, default):
             return json.load(f) or default
     except Exception:  # noqa: BLE001
         return default
+
+
+# ===================== 运行时状态持久化（暂停状态跨重启保持） =====================
+# 为什么需要：托管会在服务启动时自动恢复生产（24/7 的核心诉求）。但如果用户是
+# 主动「暂停」的（例如要检修 ComfyUI、腾出显存做别的事），重启后若无条件恢复，
+# 就会在用户没预期的情况下立刻启动重任务。因此把「是否暂停」落盘，启动时尊重它。
+
+def runtime_path() -> str:
+    return os.path.join(_autopilot_dir(), "runtime.json")
+
+
+def _persist_runtime() -> None:
+    with _LOCK:
+        data = {"paused": bool(_STATE.get("paused")),
+                "pause_reason": _STATE.get("pause_reason") or "",
+                "updated_at": _now()}
+    try:
+        _write_json(runtime_path(), data)
+    except Exception as e:  # noqa: BLE001  落盘失败不得影响主流程
+        logger.warning("托管运行时状态落盘失败（不影响本次运行）：%s", e)
+
+
+def _restore_runtime() -> dict:
+    """把上次的暂停状态读回内存；无记录则保持默认（未暂停）"""
+    global _RUNTIME_RESTORED
+    data = _read_json(runtime_path(), {}) or {}
+    paused = bool(data.get("paused"))
+    with _LOCK:
+        _STATE["paused"] = paused
+        _STATE["pause_reason"] = str(data.get("pause_reason") or "") if paused else ""
+    _RUNTIME_RESTORED = True
+    if paused:
+        logger.info("托管：恢复上次的暂停状态（%s）", _STATE.get("pause_reason") or "无原因")
+    return {"paused": paused, "pause_reason": _STATE.get("pause_reason") or ""}
+
+
+def _restore_once() -> None:
+    """懒加载式恢复（只做一次）：让 status()/is_paused() 在重启后立即反映上次的暂停状态"""
+    if _RUNTIME_RESTORED:
+        return
+    try:
+        _restore_runtime()
+    except Exception as e:  # noqa: BLE001  读取失败不得影响服务
+        logger.debug("托管运行时状态恢复失败（按未暂停处理）：%s", e)
+        globals()["_RUNTIME_RESTORED"] = True
 
 
 # ===================== 托管计划（每个项目一份） =====================
@@ -448,6 +494,7 @@ def pause(reason: str = "") -> dict:
     with _LOCK:
         _STATE["paused"] = True
         _STATE["pause_reason"] = reason
+    _persist_runtime()
     logger.info("托管已暂停：%s", reason or "手动暂停")
     return status()
 
@@ -459,12 +506,14 @@ def resume() -> dict:
     with _LOCK:
         _STATE["paused"] = False
         _STATE["pause_reason"] = ""
+    _persist_runtime()
     _ensure_thread()
     wake()
     return status()
 
 
 def is_paused() -> bool:
+    _restore_once()
     with _LOCK:
         return bool(_STATE["paused"])
 
@@ -737,6 +786,7 @@ def _produce(project: str, plan: dict, pick: dict) -> None:
 
 def status() -> dict:
     """托管总览（前端主视图据此渲染）"""
+    _restore_once()
     with _LOCK:
         st = json.loads(json.dumps(_STATE, ensure_ascii=False, default=str))
     plans = list_plans()

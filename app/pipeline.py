@@ -829,6 +829,23 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
     """
     A = _A()
     started = time.time()
+    # 进度单调化：各步骤内部回报的百分比（如剧本步骤的 4%~18%）与整体锚点百分比
+    # 来源不同，直接透传会让进度条回退（实测出现 18% → 16% → 17%）。无人值守界面里
+    # 「进度倒退」非常误导，这里统一钳住只增不减。
+    _cb_user = progress_cb or (lambda *a, **k: None)
+    _pct_seen = {"v": 0}
+
+    def _progress(message, percent=None, phase=None):
+        try:
+            p = int(percent or 0)
+        except (TypeError, ValueError):
+            p = 0
+        if p < _pct_seen["v"]:
+            p = _pct_seen["v"]
+        else:
+            _pct_seen["v"] = p
+        _cb_user(message, p, phase=phase)
+
     ctx = {
         "config": config, "project_name": project_name,
         "project_key": config.get("project_key") or project_name,
@@ -836,7 +853,7 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
         "novel_meta": novel_meta or {}, "chapter": chapter or {},
         "timeout_per_segment": int(config.get("timeout_per_segment") or 900),
         "script": {}, "logs": [], "steps": {},
-        "progress": (progress_cb or (lambda *a, **k: None)),
+        "progress": _progress,
     }
     dead = _is_dead_letter(config, project_name, int(episode_no))
     if dead:

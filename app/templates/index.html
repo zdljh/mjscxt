@@ -1535,6 +1535,36 @@
 
     </div><!-- /#advancedArea 高级模式结束 -->
 
+    <!-- 上传小说：上传后自动建立同名项目并选中（自动生产控制台第 1 步的落地入口） -->
+    <div class="modal" id="apNovelModal">
+        <div class="modal-box" style="max-width:620px">
+            <div class="d-flex align-items-center">
+                <h3 style="margin:0;font-size:1.05rem"><i class="bi bi-cloud-arrow-up"></i> 上传小说 · 自动建项目</h3>
+                <div style="flex:1"></div>
+                <button class="btn btn-ghost btn-sm" onclick="closeNovelModal()"><i class="bi bi-x-lg"></i> 关闭</button>
+            </div>
+            <div class="hint mt-2" data-i18n="auto.upHint">
+                上传后系统会自动建立同名项目并选中它，接着就能用总控 AI 谈风格、开托管。支持 txt / docx / pdf / epub / html，自动切分章节。
+            </div>
+
+            <div class="dropzone mt-3" id="apNovelDropzone">
+                <i class="bi bi-cloud-arrow-up" style="font-size:1.7rem"></i>
+                <div class="mt-1">点击选择小说文件，或把文件拖到这里</div>
+                <div class="hint mt-1">支持多选；文件仅在本机解析，不上传云端</div>
+            </div>
+            <input type="file" id="apNovelInput" multiple style="display:none">
+
+            <div id="apNovelResult" class="mt-3"></div>
+            <div id="apNovelHint" class="hint mt-2"></div>
+
+            <div class="d-flex mt-3" style="gap:8px;align-items:center">
+                <button class="btn btn-ghost btn-sm" onclick="closeNovelModal()">完成</button>
+                <div style="flex:1"></div>
+                <span class="hint">上传完成后会自动选中新项目，可直接进入第 2 步</span>
+            </div>
+        </div>
+    </div>
+
 </main>
 
 <!-- 加载遮罩 -->
@@ -6841,6 +6871,83 @@ function fmtSize(b){
     return (n / 1048576).toFixed(2) + ' MB';
 }
 
+/* ===================== 上传小说 · 自动建项目（控制台第 1 步） ===================== */
+
+function openNovelModal(){
+    const m = $('apNovelModal');
+    if (m) m.classList.add('show');
+    const r = $('apNovelResult'); if (r) r.innerHTML = '';
+    const h = $('apNovelHint'); if (h) h.textContent = '';
+}
+
+function closeNovelModal(){
+    const m = $('apNovelModal');
+    if (m) m.classList.remove('show');
+}
+
+function setupApNovelDropzone(){
+    const dz = $('apNovelDropzone'), input = $('apNovelInput');
+    if (!dz || !input) return;
+    dz.addEventListener('click', () => input.click());
+    input.addEventListener('change', () => { if (input.files.length) uploadApNovel(input.files); input.value = ''; });
+    ['dragenter', 'dragover'].forEach(ev => dz.addEventListener(ev, e => {
+        e.preventDefault(); e.stopPropagation(); dz.classList.add('drag');
+    }));
+    ['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, e => {
+        e.preventDefault(); e.stopPropagation(); dz.classList.remove('drag');
+    }));
+    dz.addEventListener('drop', e => {
+        const files = e.dataTransfer && e.dataTransfer.files;
+        if (files && files.length) uploadApNovel(files);
+    });
+}
+
+async function uploadApNovel(fileList){
+    const box = $('apNovelResult'), hint = $('apNovelHint');
+    if (hint) hint.textContent = `正在上传并解析 ${fileList.length} 个文件…`;
+    const fd = new FormData();
+    Array.from(fileList).forEach(f => fd.append('file', f, f.name));
+    let data;
+    try{
+        const resp = await fetch('/api/novels/upload', { method:'POST', body: fd });
+        data = await resp.json();
+    }catch(e){
+        if (hint) hint.textContent = '上传失败：' + e.message;
+        toast('上传失败：' + e.message, 'bad');
+        return;
+    }
+    const lines = (data.results || []).map(r => r.success
+        ? `<i class="bi bi-check-circle text-success"></i> ${esc(r.filename)}：${r.novel.char_count} 字 / ${r.novel.chapter_count} 章`
+        : `<i class="bi bi-x-circle text-danger"></i> ${esc(r.filename)}：${esc(r.error || '解析失败')}`);
+    if (box) box.innerHTML = lines.join('<br>');
+    if (!data.success){ if (hint) hint.textContent = data.error || '解析失败'; toast(data.error || '解析失败', 'bad'); return; }
+
+    // 关键：上传成功即自动建项目并选中，让「上传 → 建项目 → 定风格 → 开托管」不出现断档
+    const okOnes = (data.results || []).filter(r => r.success && r.novel && r.novel.novel_id);
+    if (!okOnes.length) return;
+    let target = null;
+    for (const r of okOnes){
+        try{
+            const d = await apPost('/api/projects/ensure-for-novel',
+                                   { novel_id: r.novel.novel_id, name: r.novel.title || r.novel.name });
+            if (d && d.project){
+                target = d.project;
+                if (box) box.innerHTML += `<br><i class="bi bi-folder-check text-success"></i> 已建立项目「${esc(d.project.name)}」`;
+            }
+        }catch(e){
+            if (box) box.innerHTML += `<br><i class="bi bi-exclamation-triangle text-warning"></i> 建项目失败：${esc(e.message)}`;
+        }
+    }
+    if (target){
+        projectName = target.dir_key || target.name;
+        await loadProjects(target.id);
+        if (hint) hint.textContent = `项目「${target.name}」已就绪，可关闭本窗口并进入第 2 步（总控 AI 定风格）。`;
+        toast(`项目「${target.name}」已建立并选中`, 'ok');
+    } else {
+        await loadProjects();
+    }
+}
+
 /* ===================== 初始化 ===================== */
 document.addEventListener('DOMContentLoaded', () => {
     checkComfyUIStatus();
@@ -6857,6 +6964,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 新增：初始化小说上传 / AI 设置（三模块） / AI 对话 / 提示词分析面板
     setupNovelDropzone();
+    setupApNovelDropzone();
     loadLLMStatus().then(() => { loadQcStatus(); loadWmStatus(); });
     // 项目级隔离：先加载项目列表并切到当前项目，再按项目拉取小说
     loadProjects().catch(() => loadNovels(false));

@@ -82,39 +82,122 @@ def _write_json(path: str, data: dict) -> None:
 # ===================== 会话历史 =====================
 
 def default_history() -> dict:
-    return {"version": 1, "messages": [], "drafts": {}, "active_project": "", "updated_at": None}
+    return {"version": 2, "messages": [], "projects": {}, "drafts": {},
+            "active_project": "", "updated_at": None}
+
+
+def _clean_messages(msgs) -> list:
+    if not isinstance(msgs, list):
+        return []
+    return [m for m in msgs if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
+
+
+def project_messages(history: dict, project: str = "") -> list:
+    """取某项目的对话消息（按项目隔离；未指定项目时取全局，兼容旧调用）
+
+    为什么必须按项目隔离：之前所有项目共用一份 messages，总控 AI 在为一个项目
+    定风格时会看到别的项目的历史，实测出现「您说的是《剑冢》，但之前讨论的是
+    《剑心初醒》，请问是替换还是并行项目」这类串台反问，直接影响设定质量。
+    """
+    key = history_project_key(project) if (project or "").strip() else ""
+    if key:
+        proj = (history.get("projects") or {}).get(key)
+        if isinstance(proj, dict):
+            return _clean_messages(proj.get("messages"))
+        return []
+    return _clean_messages(history.get("messages"))
+
+
+def history_project_key(project: str) -> str:
+    """历史/草稿的存储键：与直接落盘的 JSON 结构对齐（不做 safe_key 的大小写折叠）"""
+    return canonical_project_key(project)
+
+
+def _project_bucket(history: dict, project: str) -> dict:
+    key = canonical_project_key(project) or "default"
+    projects = history.setdefault("projects", {})
+    bucket = projects.get(key)
+    if not isinstance(bucket, dict):
+        bucket = {"messages": []}
+        projects[key] = bucket
+    return bucket
 
 
 def load_history(path: str) -> dict:
     data = _read_json(path, default_history())
     out = default_history()
-    msgs = data.get("messages")
-    if isinstance(msgs, list):
-        out["messages"] = [m for m in msgs if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
+    out["messages"] = _clean_messages(data.get("messages"))
+    # 按项目的历史（v2 结构）
+    raw_projects = data.get("projects")
+    if isinstance(raw_projects, dict):
+        for k, v in raw_projects.items():
+            if isinstance(v, dict):
+                out["projects"][str(k)] = {"messages": _clean_messages(v.get("messages"))}
+    # 旧数据迁移：v1 只有一份全局 messages，归到当时活跃的项目，避免历史丢失
+    if not out["projects"] and out["messages"]:
+        legacy_key = _legacy_canonical_key(data)
+        out["projects"][legacy_key] = {"messages": list(out["messages"])}
+        logger.info("AI 对话历史已迁移为按项目存储：%s（%d 条）",
+                    legacy_key, len(out["messages"]))
     if isinstance(data.get("drafts"), dict):
-        out["drafts"] = {k: v for k, v in data["drafts"].items() if isinstance(v, dict)}
+        out["drafts"] = {}
+        for k, v in data["drafts"].items():
+            if isinstance(v, dict):
+                # 草稿同样做旧键归一，避免与生效设定失配
+                out["drafts"][canonical_project_key(k)] = v
     out["active_project"] = str(data.get("active_project") or "")
     out["updated_at"] = data.get("updated_at")
     return out
 
 
+def _legacy_canonical_key(data: dict) -> str:
+    """旧版单份历史归属的项目键：优先活跃项目，其次 default"""
+    return canonical_project_key(str(data.get("active_project") or "")) or "default"
+
+
 def save_history(path: str, history: dict) -> dict:
-    history["messages"] = (history.get("messages") or [])[-HISTORY_MAX_MESSAGES:]
+    history["messages"] = _clean_messages(history.get("messages"))[-HISTORY_MAX_MESSAGES:]
+    for k, v in (history.get("projects") or {}).items():
+        if isinstance(v, dict):
+            v["messages"] = _clean_messages(v.get("messages"))[-HISTORY_MAX_MESSAGES:]
     history["updated_at"] = _now()
     _write_json(path, history)
     return history
 
 
-def append_message(history: dict, role: str, content: str) -> dict:
-    history.setdefault("messages", []).append(
-        {"role": role, "content": str(content or ""), "time": _now()}
-    )
+def append_message(history: dict, role: str, content: str, project: str = "") -> dict:
+    """追加一条消息。指定 project 时写入该项目独立的历史（避免跨项目串台）"""
+    msg = {"role": role, "content": str(content or ""), "time": _now()}
+    if (project or "").strip():
+        _project_bucket(history, project)["messages"].append(msg)
+    else:
+        history.setdefault("messages", []).append(msg)
     return history
 
 
-def clear_history(path: str, keep_settings: bool = True) -> dict:
+def drop_last_message(history: dict, project: str = "") -> dict:
+    """回滚最后一条消息（模型未配置 / 调用失败时避免脏历史）"""
+    if (project or "").strip():
+        msgs = _project_bucket(history, project)["messages"]
+    else:
+        msgs = history.setdefault("messages", [])
+    if msgs:
+        msgs.pop()
+    return history
+
+
+def clear_history(path: str, keep_settings: bool = True, project: str = "") -> dict:
+    """清空会话（指定 project 时只清该项目的历史，不动别的项目）"""
     history = load_history(path)
-    history["messages"] = []
+    if (project or "").strip():
+        key = canonical_project_key(project)
+        history.setdefault("projects", {}).pop(key, None)
+        for k in project_key_candidates(project):
+            if k != key:
+                (history.get("projects") or {}).pop(k, None)
+    else:
+        history["messages"] = []
+        history["projects"] = {}
     if not keep_settings:
         history["drafts"] = {}
         history["active_project"] = ""
@@ -122,15 +205,52 @@ def clear_history(path: str, keep_settings: bool = True) -> dict:
 
 
 def clear_draft(history: dict, project: str) -> dict:
-    history.setdefault("drafts", {}).pop(project_key(project), None)
+    drafts = history.setdefault("drafts", {})
+    for k in project_key_candidates(project):
+        drafts.pop(k, None)
     return history
 
 
 # ===================== 创作设定（草稿 / 生效） =====================
 
-def project_key(project_name: str) -> str:
+def canonical_project_key(project_name: str) -> str:
+    """项目键（规范规则）：与项目注册表 project_store.safe_key 完全一致
+
+    必须与「产物目录键」一致。AI 创作设定、对话草稿、托管生产计划都以项目为键，
+    两套规则一旦不同就会出现静默失配：项目名含《》书名号、空格或「·」时，
+    设定被写到 A 键、而查询按 B 键去找，表现为「明明谈好了风格，一键设定却报没有设定」。
+    """
+    cleaned = re.sub(r"[《》〈〉【】「」『』]", "", str(project_name or "")).strip()
+    key = "".join(c if c.isalnum() or c in "_-" else "_" for c in cleaned)
+    return (key.strip("_") or "project")[:60]
+
+
+def legacy_project_key(project_name: str) -> str:
+    """旧规则（仅替换文件系统非法字符，保留空格与《》等）
+
+    仅用于兼容读取历史落盘数据；新写入一律使用 canonical_project_key。
+    """
     name = (project_name or "").strip() or "default"
     return re.sub(r"[\\/:*?\"<>|]+", "_", name)[:60] or "default"
+
+
+def project_key(project_name: str) -> str:
+    """项目键（写入用）"""
+    return canonical_project_key(project_name)
+
+
+def project_key_candidates(project_name: str) -> list:
+    """读取用候选键（去重保序）：新规则 → 旧规则 → 原样名
+
+    读取必须宽松：历史数据可能按旧规则落盘，宽松匹配才能既修好新数据又不丢老配置。
+    """
+    out = []
+    for k in (canonical_project_key(project_name),
+              legacy_project_key(project_name),
+              str(project_name or "").strip()[:60]):
+        if k and k not in out:
+            out.append(k)
+    return out
 
 
 def normalize_settings(raw: dict) -> dict:
@@ -188,12 +308,23 @@ def merge_settings(base: dict, patch: dict) -> dict:
 
 
 def get_draft(history: dict, project_name: str) -> dict:
+    """取草稿：按候选键宽松查找，兼容历史旧规则键"""
     drafts = history.get("drafts") or {}
-    return normalize_settings(drafts.get(project_key(project_name)) or {})
+    for k in project_key_candidates(project_name):
+        rec = drafts.get(k)
+        if rec:
+            return normalize_settings(rec)
+    return {}
 
 
 def set_draft(history: dict, project_name: str, settings: dict) -> dict:
-    history.setdefault("drafts", {})[project_key(project_name)] = normalize_settings(settings)
+    """写草稿：按规范键写入，并清掉同项目的旧规则键（避免出现两份草稿）"""
+    drafts = history.setdefault("drafts", {})
+    key = project_key(project_name)
+    drafts[key] = normalize_settings(settings)
+    for k in project_key_candidates(project_name):
+        if k != key:
+            drafts.pop(k, None)
     return history
 
 
@@ -214,6 +345,14 @@ def save_project_settings(path: str, project_name: str, settings: dict) -> dict:
         "settings": clean,
         "updated_at": _now(),
     }
+    # 迁移：同名项目若曾按旧规则落盘，合并过去并删除旧键，避免出现两份互相打架的设定
+    for old in project_key_candidates(project_name):
+        if old == key:
+            continue
+        legacy = data["settings"].pop(old, None)
+        if isinstance(legacy, dict) and (legacy.get("settings") or {}):
+            merged = {**normalize_settings(legacy.get("settings")), **clean}
+            data["settings"][key]["settings"] = merged
     data["active_project"] = key
     data["updated_at"] = _now()
     _write_json(path, data)
@@ -221,11 +360,19 @@ def save_project_settings(path: str, project_name: str, settings: dict) -> dict:
 
 
 def active_settings(path: str, project_name: str = "") -> dict:
-    """读取当前生效的创作设定：指定项目优先，否则取最近应用的项目"""
+    """读取当前生效的创作设定：指定项目优先，否则取最近应用的项目
+
+    项目查找按候选键宽松匹配，兼容历史旧规则落盘的键。
+    """
     data = load_settings_file(path)
     items = data.get("settings") or {}
-    key = project_key(project_name) if (project_name or "").strip() else (data.get("active_project") or "")
-    rec = items.get(key) if key else None
+    keys = (project_key_candidates(project_name) if (project_name or "").strip()
+            else [data.get("active_project") or ""])
+    key, rec = "", None
+    for k in keys:
+        if k and isinstance(items.get(k), dict):
+            key, rec = k, items[k]
+            break
     if not isinstance(rec, dict):
         return {"project_name": "", "settings": {}, "active": False,
                 "settings_file": os.path.abspath(path), "updated_at": data.get("updated_at")}
@@ -326,7 +473,7 @@ def build_messages(history: dict, draft: dict, project_name: str = "") -> list:
     draft_txt = json.dumps(normalize_settings(draft) or {}, ensure_ascii=False, indent=2) if draft else "（暂无）"
     system = SYSTEM_PROMPT.replace("{fields}", _field_spec_text()).replace("{draft}", draft_txt)
     messages = [{"role": "system", "content": system}]
-    for m in (history.get("messages") or [])[-CONTEXT_MESSAGES:]:
+    for m in project_messages(history, project_name)[-CONTEXT_MESSAGES:]:
         messages.append({"role": m.get("role"), "content": str(m.get("content") or "")[:MAX_CHARS_PER_MESSAGE]})
     return messages
 

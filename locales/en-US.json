@@ -258,6 +258,7 @@
     },
     "curveSummary": "{n} episodes · avg {avg} · last {last}",
     "epOthers": "{n} more episodes queued in other projects",
-    "planProgress": "{a}/{b} episodes done"
+    "planProgress": "{a}/{b} episodes done",
+    "upHint": "A project with the same name is created and selected automatically, so you can settle the style with the director AI and start hosting right away. Supports txt / docx / pdf / epub / html with automatic chapter splitting."
   }
 }

@@ -32,12 +32,13 @@ if errorlevel 1 (
 echo [OK] 依赖已就绪
 
 echo.
-echo [3/3] 启动应用...
+echo [3/3] 启动应用（生产级 WSGI 服务器）...
 echo.
 echo 访问地址: http://localhost:5000
 echo 按 Ctrl+C 停止服务
 echo.
+REM 必须用 serve.py 而不是 app.py：Flask 自带开发服务器无法可靠处理小说上传
 cd "%~dp0app"
-python app.py
+python serve.py
 
 pause
