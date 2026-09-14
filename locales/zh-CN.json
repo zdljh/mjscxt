@@ -1,0 +1,136 @@
+{
+  "_meta": {
+    "lang": "zh-CN",
+    "name": "简体中文",
+    "version": 1,
+    "note": "前端语言包；键名与 index.html 中 data-i18n 属性对应"
+  },
+  "app": {
+    "title": "漫剧生成系统",
+    "subtitle": "本地 AI 漫剧全流程生产台"
+  },
+  "step": {
+    "1": "剧本生成",
+    "2": "角色资产",
+    "2sub": "多视图",
+    "3": "物品资产",
+    "3sub": "3D多视角",
+    "4": "场景资产",
+    "4sub": "3D多视角",
+    "5": "分镜图片",
+    "5sub": "逐镜头定妆",
+    "6": "视频生成",
+    "6sub": "MiniMax H3",
+    "7": "成片输出",
+    "7sub": "合成 / 下载",
+    "8": "视频配音",
+    "8sub": "QwenTTS",
+    "tools": "工作台",
+    "toolssub": "看板 / 画布 / 导出"
+  },
+  "common": {
+    "refresh": "刷新",
+    "run": "执行",
+    "generate": "生成",
+    "download": "下载",
+    "close": "关闭",
+    "cancel": "取消",
+    "confirm": "确认",
+    "loading": "处理中…",
+    "empty": "暂无数据",
+    "project": "项目",
+    "episode": "集数",
+    "shot": "镜头",
+    "score": "得分",
+    "status": "状态",
+    "path": "路径",
+    "yes": "是",
+    "no": "否",
+    "skip": "跳过",
+    "details": "详情"
+  },
+  "mode": {
+    "per_shot": "逐镜头生成（每镜一段）",
+    "episode": "整集一次生成（段数=分镜数）",
+    "keyframe": "关键帧驱动（首尾帧插值）"
+  },
+  "keyframe": {
+    "title": "关键帧驱动",
+    "desc": "先生成每镜尾帧，再把 [首帧, 尾帧] 注入 H3 让模型在两端之间插值运动，构图与位置可控性远高于纯参考图模式。",
+    "plan": "预检尾帧",
+    "generate": "生成尾帧",
+    "startReady": "首帧就绪",
+    "endReady": "尾帧就绪",
+    "toGenerate": "待生成",
+    "degraded": "退化单帧",
+    "missingStart": "缺少分镜图"
+  },
+  "canvas": {
+    "title": "分镜画布",
+    "desc": "拖拽调整镜头顺序，单镜可在卡片上直接重跑分镜图或视频。",
+    "load": "加载画布",
+    "saveOrder": "保存顺序",
+    "retryStoryboard": "重跑分镜图",
+    "retryVideo": "重跑视频",
+    "rerunKf": "关键帧重跑",
+    "carry": "承载原文",
+    "consistency": "一致性",
+    "qcScore": "质检",
+    "noQc": "未质检",
+    "dragHint": "按住卡片拖动可调整顺序"
+  },
+  "consistency": {
+    "title": "一致性看板",
+    "desc": "跨镜头比对同一角色的外观/服饰是否一致（感知哈希 + 多模态语义双通道）。",
+    "run": "执行校验",
+    "report": "读取报告",
+    "sameChar": "同一角色",
+    "score": "相似度",
+    "differences": "差异点"
+  },
+  "analytics": {
+    "title": "成本与耗时看板",
+    "desc": "按项目统计各环节耗时、调用次数与估算电费。",
+    "totalHours": "总耗时(小时)",
+    "cost": "估算成本",
+    "kwh": "耗电",
+    "events": "事件数",
+    "failed": "失败数",
+    "byKind": "各环节分布",
+    "reset": "清空统计"
+  },
+  "export": {
+    "title": "导出中心",
+    "desc": "一键导出剪映草稿 / Premiere FCPXML / SRT 字幕 / 帧序列清单。",
+    "run": "一键导出",
+    "history": "导出记录",
+    "jianying": "剪映草稿",
+    "fcpxml": "Premiere FCPXML",
+    "srt": "SRT 字幕",
+    "frames": "帧序列清单"
+  },
+  "engine": {
+    "title": "引擎与插件",
+    "desc": "查看各环节可用引擎与已注册的生产环节插件。",
+    "provider": "引擎 Provider",
+    "plugins": "插件注册表",
+    "current": "当前生效",
+    "available": "可用",
+    "unavailable": "不可用",
+    "dependencyOrder": "依赖顺序",
+    "runPlugin": "执行插件"
+  },
+  "tasks": {
+    "title": "任务与续跑",
+    "desc": "任务全生命周期落盘；中断/失败任务可预检并续跑（按磁盘产物跳过已完成单元）。",
+    "resumePreview": "续跑预检",
+    "doneUnits": "已完成单元",
+    "pendingUnits": "待重跑单元",
+    "resumable": "可续跑"
+  },
+  "lang": {
+    "switch": "语言",
+    "zh-CN": "简体中文",
+    "en-US": "English"
+  }
+}

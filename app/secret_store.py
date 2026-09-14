@@ -31,6 +31,10 @@ import os
 import secrets as _secrets
 from typing import Optional
 
+# 关键：必须经由 env_loader 保证 .env 已加载，否则 MJSCXT_SECRET_KEY 读不到，
+# 会导致已加密的密钥全部解密失败（实际踩过的坑）。
+from env_loader import PROJECT_ROOT_DIR as _ENV_ROOT  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 # ===================== 主密钥解析 =====================
@@ -270,6 +274,11 @@ def mask_key(key: str) -> str:
 def scrub_plaintext_key(config_path: str, namespace: str, root_dir: str) -> bool:
     """遗留明文迁移：把 json 里的 api_key 搬进加密库，并把 json 中该字段清空。
 
+    覆盖三种结构（qc_config.json 的 endpoint_override 是实际踩到过的漏网之鱼）：
+      ① 顶层 {"api_key": "..."}                      → namespace 参数
+      ② 嵌套 {"endpoint_override": {"api_key": ...}}  → namespace 参数
+      ③ 多模块 {"modules": {"text": {"api_key": ...}}} → 每模块各自的 ai.<name>
+
     返回是否发生了迁移（True = 本次把明文换成了加密存储）。
     """
     if not config_path or not os.path.isfile(config_path):
@@ -281,30 +290,49 @@ def scrub_plaintext_key(config_path: str, namespace: str, root_dir: str) -> bool
         logger.warning(f"遗留配置读取失败，跳过迁移：{e}")
         return False
 
-    plain = ""
-    # 兼容两种结构：单模块 {"api_key": ...} 与多模块 {"modules": {"text": {"api_key": ...}}}
-    if isinstance(data.get("api_key"), str) and data["api_key"].strip():
-        plain = data["api_key"].strip()
-        data["api_key"] = ""
+    migrated = False
+    store = get_store(root_dir)
+
+    # ② 嵌套 endpoint_override
+    override = data.get("endpoint_override")
+    if isinstance(override, dict):
+        key = override.get("api_key")
+        if isinstance(key, str) and key.strip():
+            if store.set_api_key(namespace, key.strip()):
+                override["api_key"] = ""
+                migrated = True
+            else:
+                logger.warning(f"{os.path.basename(config_path)} 的 endpoint_override.api_key "
+                               f"无法加密存储，保留明文（请配置 MJSCXT_SECRET_KEY）")
+
+    # ① 顶层 api_key
+    top = data.get("api_key")
+    if isinstance(top, str) and top.strip():
+        if store.set_api_key(namespace, top.strip()):
+            data["api_key"] = ""
+            migrated = True
+        else:
+            logger.warning(f"{os.path.basename(config_path)} 的 api_key "
+                           f"无法加密存储，保留明文（请配置 MJSCXT_SECRET_KEY）")
+
+    # ③ 多模块
     modules = data.get("modules")
     if isinstance(modules, dict):
         for m, cfg in modules.items():
-            if isinstance(cfg, dict) and isinstance(cfg.get("api_key"), str) and cfg["api_key"].strip():
+            if not isinstance(cfg, dict):
+                continue
+            key = cfg.get("api_key")
+            if isinstance(key, str) and key.strip():
                 ns = f"ai.{m}" if m in ("text", "qc", "chat") else m
-                store = get_store(root_dir)
-                if store.set_api_key(ns, cfg["api_key"].strip()):
+                if store.set_api_key(ns, key.strip()):
                     cfg["api_key"] = ""
-                    plain = plain or ""  # 多模块场景由循环内各自处理
+                    migrated = True
                 else:
-                    logger.warning(f"模块 {m} 的密钥无法加密存储，保留明文（请尽快配置 MJSCXT_SECRET_KEY）")
-                    continue
+                    logger.warning(f"模块 {m} 的密钥无法加密存储，保留明文"
+                                   f"（请安装 cryptography 或配置 MJSCXT_SECRET_KEY）")
 
-    if plain:
-        store = get_store(root_dir)
-        if not store.set_api_key(namespace, plain):
-            logger.warning(f"{os.path.basename(config_path)} 的密钥无法加密存储，保留明文；"
-                           f"请安装 cryptography 或改用环境变量")
-            return False
+    if not migrated:
+        return False
 
     try:
         tmp = config_path + ".tmp"

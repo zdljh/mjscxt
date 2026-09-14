@@ -89,13 +89,30 @@ def _now() -> str:
 
 
 class TaskStore:
-    """SQLite 任务存储（线程安全；各方法独立开连接，避免跨线程复用）"""
+    """SQLite 任务存储（线程安全；各方法独立开连接，避免跨线程复用）
 
-    def __init__(self, db_path: str):
+    on_change: 可选回调 fn(task_dict, event)，在任务状态变化（finish/fail）后调用。
+               用于把耗时统计等旁路逻辑解耦出去（P2-3 成本看板即由此接入），
+               回调内抛异常不影响任务本身。
+    """
+
+    def __init__(self, db_path: str, on_change: Callable = None):
         self.db_path = db_path
+        self.on_change = on_change
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self._lock = threading.Lock()
         self._init_schema()
+
+    def _notify(self, task_id: str, event: str) -> None:
+        """触发变更回调（绝不抛异常）"""
+        if not self.on_change:
+            return
+        try:
+            t = self.get(task_id)
+            if t:
+                self.on_change(t, event)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"任务变更回调失败（忽略）：{e}")
 
     # ---------- 底层 ----------
 
@@ -151,11 +168,14 @@ class TaskStore:
             self._update(task_id, **fields)
 
     def finish(self, task_id: str, result_path: str = "") -> None:
-        self._update(task_id, status=ST_DONE, progress=None,
+        # progress 置 100：否则前端会显示「已完成但 0%」，与状态矛盾
+        self._update(task_id, status=ST_DONE, progress=100.0,
                      result_path=result_path, finished_at=_now(), error="")
+        self._notify(task_id, ST_DONE)
 
     def fail(self, task_id: str, error: str) -> None:
         self._update(task_id, status=ST_FAILED, error=str(error)[:2000], finished_at=_now())
+        self._notify(task_id, ST_FAILED)
 
     def cancel(self, task_id: str) -> None:
         self._update(task_id, status=ST_CANCELLED, finished_at=_now())
@@ -420,11 +440,13 @@ _QUEUE: Optional[TaskQueue] = None
 _LOCK = threading.RLock()
 
 
-def get_store(db_path: str) -> TaskStore:
+def get_store(db_path: str, on_change: Callable = None) -> TaskStore:
     global _STORE
     with _LOCK:
         if _STORE is None or os.path.abspath(_STORE.db_path) != os.path.abspath(db_path):
-            _STORE = TaskStore(db_path)
+            _STORE = TaskStore(db_path, on_change=on_change)
+        elif on_change and _STORE.on_change is None:
+            _STORE.on_change = on_change
         return _STORE
 
 

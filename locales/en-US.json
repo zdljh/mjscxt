@@ -1,0 +1,136 @@
+{
+  "_meta": {
+    "lang": "en-US",
+    "name": "English",
+    "version": 1,
+    "note": "Frontend locale pack; keys map to data-i18n attributes in index.html"
+  },
+  "app": {
+    "title": "Comic Drama Studio",
+    "subtitle": "Local AI comic-drama production pipeline"
+  },
+  "step": {
+    "1": "Script",
+    "2": "Characters",
+    "2sub": "Multi-view",
+    "3": "Props",
+    "3sub": "3D multi-angle",
+    "4": "Scenes",
+    "4sub": "3D multi-angle",
+    "5": "Storyboards",
+    "5sub": "Per-shot stills",
+    "6": "Video",
+    "6sub": "MiniMax H3",
+    "7": "Final Cut",
+    "7sub": "Compose / Download",
+    "8": "Dubbing",
+    "8sub": "QwenTTS",
+    "tools": "Workbench",
+    "toolssub": "Boards / Canvas / Export"
+  },
+  "common": {
+    "refresh": "Refresh",
+    "run": "Run",
+    "generate": "Generate",
+    "download": "Download",
+    "close": "Close",
+    "cancel": "Cancel",
+    "confirm": "Confirm",
+    "loading": "Working…",
+    "empty": "No data",
+    "project": "Project",
+    "episode": "Episode",
+    "shot": "Shot",
+    "score": "Score",
+    "status": "Status",
+    "path": "Path",
+    "yes": "Yes",
+    "no": "No",
+    "skip": "Skipped",
+    "details": "Details"
+  },
+  "mode": {
+    "per_shot": "Per-shot (one segment each)",
+    "episode": "Whole episode (segments = shots)",
+    "keyframe": "Keyframe-driven (start/end interpolation)"
+  },
+  "keyframe": {
+    "title": "Keyframe Driven",
+    "desc": "Generate an end frame per shot first, then feed [start, end] into H3 so the model interpolates between two anchored compositions — far better control than reference-image-only mode.",
+    "plan": "Preview plan",
+    "generate": "Generate end frames",
+    "startReady": "Start frames ready",
+    "endReady": "End frames ready",
+    "toGenerate": "To generate",
+    "degraded": "Degraded to single frame",
+    "missingStart": "Missing storyboard"
+  },
+  "canvas": {
+    "title": "Storyboard Canvas",
+    "desc": "Drag cards to reorder shots; re-run a single storyboard or video directly on the card.",
+    "load": "Load canvas",
+    "saveOrder": "Save order",
+    "retryStoryboard": "Re-run storyboard",
+    "retryVideo": "Re-run video",
+    "rerunKf": "Re-run (keyframe)",
+    "carry": "Source lines carried",
+    "consistency": "Consistency",
+    "qcScore": "QC",
+    "noQc": "No QC",
+    "dragHint": "Drag a card to reorder"
+  },
+  "consistency": {
+    "title": "Consistency Board",
+    "desc": "Cross-shot comparison of the same character's look and costume (perceptual hash + multimodal semantics).",
+    "run": "Run check",
+    "report": "Load report",
+    "sameChar": "Same character",
+    "score": "Similarity",
+    "differences": "Differences"
+  },
+  "analytics": {
+    "title": "Cost & Time Board",
+    "desc": "Per-project stage duration, call counts and estimated electricity cost.",
+    "totalHours": "Total hours",
+    "cost": "Estimated cost",
+    "kwh": "Energy",
+    "events": "Events",
+    "failed": "Failed",
+    "byKind": "By stage",
+    "reset": "Reset stats"
+  },
+  "export": {
+    "title": "Export Center",
+    "desc": "One-click export to CapCut draft / Premiere FCPXML / SRT subtitles / frame sequence list.",
+    "run": "Export all",
+    "history": "Export history",
+    "jianying": "CapCut draft",
+    "fcpxml": "Premiere FCPXML",
+    "srt": "SRT subtitles",
+    "frames": "Frame list"
+  },
+  "engine": {
+    "title": "Engines & Plugins",
+    "desc": "Inspect available engines per stage and registered pipeline plugins.",
+    "provider": "Engine providers",
+    "plugins": "Plugin registry",
+    "current": "Active",
+    "available": "Available",
+    "unavailable": "Unavailable",
+    "dependencyOrder": "Dependency order",
+    "runPlugin": "Run plugin"
+  },
+  "tasks": {
+    "title": "Tasks & Resume",
+    "desc": "Task lifecycle persisted to disk; interrupted/failed tasks can be previewed and resumed, skipping units already present on disk.",
+    "resumePreview": "Resume preview",
+    "doneUnits": "Done units",
+    "pendingUnits": "Pending units",
+    "resumable": "Resumable"
+  },
+  "lang": {
+    "switch": "Language",
+    "zh-CN": "简体中文",
+    "en-US": "English"
+  }
+}

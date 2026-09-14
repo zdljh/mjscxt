@@ -1,0 +1,56 @@
+# Docker 构建上下文排除清单
+# 目标：镜像内只保留「代码 + 依赖声明」，产物数据与密钥一律不进镜像。
+
+# 产物数据（体积最大，且属于运行时数据）
+output/
+novels/
+output/projects/
+*.db
+
+# 密钥与私有配置（严禁进镜像）
+.env
+.secret_key
+ai_config.json
+llm_config.json
+qc_config.json
+watermark_config.json
+ref_img_path.txt
+*.pem
+*.key
+
+# 代码备份快照与工作流备份
+workflows_backup/
+*.bak
+*.bak_*
+*.tmp
+
+# 模型权重（ComfyUI 侧管理，绝不进镜像）
+*.safetensors
+*.ckpt
+*.pth
+*.bin
+*.onnx
+
+# Python / 开发环境
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 前端 / 桌面端依赖
+node_modules/
+deploy/desktop/dist/
+
+# 版本控制与编辑器
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# 文档与临时产物
+优化方案_对标GitHub开源漫剧项目.md
+*.log

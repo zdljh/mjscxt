@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>漫剧生成系统 · 国漫 AI 创作台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236d5cf6'/%3E%3Cpath d='M11 8h11v16H11z' fill='%23fff' opacity='.92'/%3E%3Ccircle cx='16.5' cy='13' r='2.6' fill='%236d5cf6'/%3E%3Crect x='13' y='18' width='7' height='1.8' rx='.9' fill='%236d5cf6'/%3E%3C/svg%3E">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
 <style>
@@ -454,6 +455,61 @@
     .asset-modal .kv .k{color:var(--muted);white-space:nowrap;min-width:64px}
     .asset-modal .kv .v{word-break:break-word}
 
+    /* ===================== 工作台（步骤9） ===================== */
+    .wb-canvas-grid{
+        display:grid;gap:12px;
+        grid-template-columns:repeat(auto-fill,minmax(268px,1fr));
+    }
+    .wb-card{
+        border:1px solid var(--line);border-radius:14px;overflow:hidden;
+        background:linear-gradient(180deg,rgba(21,30,50,.86),rgba(14,21,38,.80));
+        display:flex;flex-direction:column;transition:.2s;
+    }
+    .wb-card:hover{border-color:rgba(124,108,245,.55)}
+    .wb-card.dragging{opacity:.45;border-style:dashed}
+    .wb-card.drop-target{border-color:var(--gold);box-shadow:0 0 0 2px rgba(240,196,110,.30) inset}
+    .wb-card-head{
+        display:flex;align-items:center;gap:7px;padding:8px 10px;
+        border-bottom:1px solid var(--line);font-size:.84rem;font-weight:700;
+    }
+    .wb-card-head .grip{cursor:grab;color:var(--muted)}
+    .wb-card-thumb{position:relative;background:#0b1020;aspect-ratio:9/16;overflow:hidden}
+    .wb-card-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+    .wb-card-thumb .novideo{
+        position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+        color:var(--muted);font-size:.78rem;gap:6px
+    }
+    .wb-card-body{padding:9px 10px;font-size:.78rem;display:flex;flex-direction:column;gap:6px}
+    .wb-card-body .line{color:#cbd5e1;line-height:1.5}
+    .wb-card-body .line.muted{color:var(--muted)}
+    .wb-chip-row{display:flex;flex-wrap:wrap;gap:5px}
+    .wb-carry{
+        max-height:96px;overflow:auto;padding:6px 7px;border-radius:9px;
+        background:rgba(124,108,245,.07);border:1px dotted rgba(148,163,184,.22);
+        font-size:.72rem;line-height:1.5;color:#c7d2e1
+    }
+    .wb-actions{display:flex;flex-wrap:wrap;gap:6px;padding:8px 10px;border-top:1px solid var(--line);margin-top:auto}
+    .wb-kpi{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(168px,1fr))}
+    .wb-kpi .kpi{
+        border:1px solid var(--line);border-radius:13px;padding:11px 13px;
+        background:linear-gradient(180deg,rgba(21,30,50,.82),rgba(13,20,36,.72));
+    }
+    .wb-kpi .kpi .k{font-size:.73rem;color:var(--muted)}
+    .wb-kpi .kpi .v{font-size:1.28rem;font-weight:800;margin-top:3px}
+    .wb-table{width:100%;border-collapse:collapse;font-size:.79rem}
+    .wb-table th,.wb-table td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:left}
+    .wb-table th{color:var(--muted);font-weight:600;font-size:.74rem}
+    .wb-score{font-weight:800}
+    .wb-score.pass{color:#6ee7a8}
+    .wb-score.warn{color:var(--gold)}
+    .wb-score.bad{color:#ff8f8f}
+    .kf-item{
+        display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:9px;
+        border:1px solid var(--line);margin-bottom:6px;font-size:.78rem
+    }
+    .kf-item .ok{color:#6ee7a8}
+    .kf-item .no{color:var(--muted)}
+
     @media (max-width:768px){
         .step .name{font-size:.72rem}
         .panel-body{padding:14px}
@@ -480,6 +536,11 @@
         <button class="btn btn-ghost btn-sm" onclick="openQcConfig()"><i class="bi bi-patch-check"></i> 质检配置</button>
         <button class="btn btn-ghost btn-sm" onclick="openWmConfig()"><i class="bi bi-droplet"></i> 视频水印</button>
         <span class="status-pill" id="comfyuiStatus"><span class="dot off"></span> ComfyUI 检测中…</span>
+        <select class="form-select form-select-sm" id="langSelect" onchange="setLang(this.value)"
+                style="width:auto;min-width:118px" title="界面语言 / UI language">
+            <option value="zh-CN" selected>简体中文</option>
+            <option value="en-US">English</option>
+        </select>
     </div>
 </header>
 
@@ -509,6 +570,7 @@
         <div class="step" id="step6" onclick="scrollToPanel(6)"><div class="num">6</div><div class="name">视频生成<small>MiniMax H3</small></div></div>
         <div class="step" id="step7" onclick="scrollToPanel(7)"><div class="num">7</div><div class="name">成片输出<small>合成 / 下载</small></div></div>
         <div class="step" id="step8" onclick="scrollToPanel(8)"><div class="num">8</div><div class="name">视频配音<small>QwenTTS</small></div></div>
+        <div class="step" id="step9" onclick="scrollToPanel(9)"><div class="num">9</div><div class="name" data-i18n="step.tools">工作台<small>看板 / 画布 / 导出</small></div></div>
     </nav>
 
     <!-- 步骤1 -->
@@ -815,12 +877,31 @@
             <div class="spacer"></div>
             <select class="form-select form-select-sm" id="videoMode" style="width:auto;min-width:230px"
                     title="生成模式：一个分镜对应一段视频；整集模式段数=该集分镜数">
-                <option value="per_shot">逐镜头生成（每镜一段）</option>
-                <option value="episode">整集一次生成（段数=分镜数）</option>
+                <option value="per_shot" data-i18n="mode.per_shot">逐镜头生成（每镜一段）</option>
+                <option value="episode" data-i18n="mode.episode">整集一次生成（段数=分镜数）</option>
+                <option value="keyframe" data-i18n="mode.keyframe">关键帧驱动（首尾帧插值）</option>
             </select>
             <button class="btn btn-violet btn-sm" id="btnVideo" onclick="generateVideos()"><i class="bi bi-play-circle"></i> 开始生成视频</button>
         </div>
         <div class="panel-body">
+            <!-- P1-2 关键帧驱动：先用分镜图生成尾帧，再把 [首帧, 尾帧] 注入 H3 -->
+            <div class="shot-card mb-3" id="keyframeCard">
+                <div class="shot-head">
+                    <span class="shot-no"><i class="bi bi-bounding-box"></i> 关键帧驱动 · 首尾帧</span>
+                    <span class="badge-soft" id="kfBadge">未检测</span>
+                    <div style="flex:1"></div>
+                    <button class="btn btn-ghost btn-sm" onclick="loadKeyframePlan()"><i class="bi bi-list-check"></i> 预检尾帧</button>
+                    <button class="btn btn-violet btn-sm" onclick="generateKeyframes()"><i class="bi bi-magic"></i> 生成尾帧</button>
+                </div>
+                <div class="hint mt-1">
+                    先把每镜分镜图作为「首帧」，用 Qwen Edit 生成该镜动作结束的「尾帧」；
+                    生成视频时选择「关键帧驱动」，H3 参考图槽位即变为 [首帧, 尾帧]，让运动在两端之间插值。
+                    产物落盘 <code>output/keyframes/&lt;项目&gt;/shot_NN_end.png</code>，已存在则自动跳过（断点续跑）。
+                </div>
+                <div class="meter gold mt-2" id="kfMeter" style="display:none"><i></i></div>
+                <div class="hint mt-1" id="kfStatus">未检测。先「预检尾帧」查看待生成清单。</div>
+                <div id="kfPlan" class="mt-2"></div>
+            </div>
             <div class="ref-chip-box" id="refChips"></div>
             <div class="meter mb-2"><i id="videoProgress"></i></div>
             <div class="d-flex justify-content-between small" style="color:var(--muted)">
@@ -1031,6 +1112,123 @@
                 <div id="mixResult" class="mt-2"></div>
             </div>
             <div id="mixHistory" class="mt-2"></div>
+        </div>
+    </section>
+
+    <!-- 步骤9：工作台（看板 / 画布 / 导出 / 引擎 / 任务） -->
+    <section class="panel" id="panel9" style="display:none">
+        <div class="panel-head">
+            <h2><i class="bi bi-grid-1x2"></i> 工作台 · 质量与交付</h2>
+            <span class="sub">一致性看板 / 分镜画布 / 成本耗时 / 导出中心 / 引擎插件 / 任务续跑</span>
+            <div class="spacer"></div>
+            <span class="badge-soft" id="wbProjectBadge">项目：-</span>
+            <button class="btn btn-ghost btn-sm" onclick="wbReload()"><i class="bi bi-arrow-clockwise"></i> 刷新当前页</button>
+        </div>
+        <div class="panel-body">
+            <div class="stepper" style="margin:0 0 16px;padding:8px;border-radius:14px">
+                <div class="step active" id="wbTab1" onclick="wbSwitch('canvas')"><div class="name"><i class="bi bi-columns-gap"></i> <span data-i18n="canvas.title">分镜画布</span></div></div>
+                <div class="step" id="wbTab2" onclick="wbSwitch('consistency')"><div class="name"><i class="bi bi-person-badge"></i> <span data-i18n="consistency.title">一致性看板</span></div></div>
+                <div class="step" id="wbTab3" onclick="wbSwitch('analytics')"><div class="name"><i class="bi bi-graph-up"></i> <span data-i18n="analytics.title">成本耗时</span></div></div>
+                <div class="step" id="wbTab4" onclick="wbSwitch('export')"><div class="name"><i class="bi bi-box-arrow-up-right"></i> <span data-i18n="export.title">导出中心</span></div></div>
+                <div class="step" id="wbTab5" onclick="wbSwitch('engine')"><div class="name"><i class="bi bi-cpu"></i> <span data-i18n="engine.title">引擎与插件</span></div></div>
+                <div class="step" id="wbTab6" onclick="wbSwitch('tasks')"><div class="name"><i class="bi bi-list-task"></i> <span data-i18n="tasks.title">任务续跑</span></div></div>
+            </div>
+
+            <!-- 分镜画布 -->
+            <div id="wbPaneCanvas" class="wb-pane">
+                <div class="row g-2 align-items-end mb-2">
+                    <div class="col-auto">
+                        <div class="hint">集数（留空取第一集）</div>
+                        <input type="number" class="form-control form-control-sm" id="wbEpisode" value="1" min="1" step="1" style="width:100px">
+                    </div>
+                    <div class="col-auto">
+                        <button class="btn btn-gold btn-sm" onclick="loadCanvas()"><i class="bi bi-columns-gap"></i> 加载画布</button>
+                    </div>
+                    <div class="col-auto">
+                        <button class="btn btn-ghost btn-sm" onclick="saveCanvasOrder()"><i class="bi bi-save"></i> 保存顺序</button>
+                    </div>
+                    <div class="col-auto hint">按住卡片可拖拽排序；改动需「保存顺序」才写入剧本。</div>
+                </div>
+                <div id="canvasSummary" class="mb-2"></div>
+                <div id="canvasBoard" class="wb-canvas-grid"><div class="empty">点击「加载画布」查看分镜卡片</div></div>
+            </div>
+
+            <!-- 一致性看板 -->
+            <div id="wbPaneConsistency" class="wb-pane" style="display:none">
+                <div class="row g-2 align-items-end mb-2">
+                    <div class="col-auto">
+                        <div class="hint">集数</div>
+                        <input type="number" class="form-control form-control-sm" id="wbConsEpisode" value="1" min="1" step="1" style="width:100px">
+                    </div>
+                    <div class="col-auto">
+                        <button class="btn btn-violet btn-sm" onclick="runConsistency()"><i class="bi bi-shield-check"></i> 执行校验</button>
+                    </div>
+                    <div class="col-auto">
+                        <button class="btn btn-ghost btn-sm" onclick="loadConsistencyReport()"><i class="bi bi-file-earmark-text"></i> 读取已有报告</button>
+                    </div>
+                    <div class="col-auto hint">感知哈希快筛 + 多模态语义判定；不达标项会给出差异点。</div>
+                </div>
+                <div id="consistencyBox"><div class="empty">点「执行校验」开始（需已配置质检模型接口）。</div></div>
+            </div>
+
+            <!-- 成本耗时 -->
+            <div id="wbPaneAnalytics" class="wb-pane" style="display:none">
+                <div class="row g-2 align-items-end mb-2">
+                    <div class="col-auto">
+                        <button class="btn btn-gold btn-sm" onclick="loadAnalytics()"><i class="bi bi-graph-up"></i> 刷新统计</button>
+                    </div>
+                    <div class="col-auto">
+                        <button class="btn btn-ghost btn-sm" onclick="resetAnalytics()"><i class="bi bi-trash3"></i> 清空统计</button>
+                    </div>
+                    <div class="col-auto hint">耗时来自任务完成钩子与 ComfyUI 调用计数；电费按部署档案功率与电价估算。</div>
+                </div>
+                <div id="analyticsBox"><div class="empty">点击「刷新统计」查看各环节耗时与成本。</div></div>
+            </div>
+
+            <!-- 导出中心 -->
+            <div id="wbPaneExport" class="wb-pane" style="display:none">
+                <div class="row g-2 align-items-end mb-2">
+                    <div class="col-auto">
+                        <div class="hint">集数</div>
+                        <input type="number" class="form-control form-control-sm" id="wbExportEpisode" value="1" min="1" step="1" style="width:100px">
+                    </div>
+                    <div class="col-auto">
+                        <button class="btn btn-gold btn-sm" onclick="runExport()"><i class="bi bi-box-arrow-up-right"></i> 一键导出</button>
+                    </div>
+                    <div class="col-auto">
+                        <button class="btn btn-ghost btn-sm" onclick="loadExportList()"><i class="bi bi-clock-history"></i> 导出记录</button>
+                    </div>
+                    <div class="col-auto hint">剪映草稿可直接在剪映打开继续精修；FCPXML 供 Premiere / Final Cut。</div>
+                </div>
+                <div id="exportBox"><div class="empty">尚未导出。</div></div>
+            </div>
+
+            <!-- 引擎与插件 -->
+            <div id="wbPaneEngine" class="wb-pane" style="display:none">
+                <div class="row g-2 align-items-center mb-2">
+                    <div class="col-auto">
+                        <button class="btn btn-ghost btn-sm" onclick="loadProviders(true)" title="重新探测各引擎可用性（默认 20 秒内复用缓存结果）">
+                            <i class="bi bi-arrow-clockwise"></i> 重新探测引擎状态
+                        </button>
+                    </div>
+                    <div class="col-auto hint">可用性探测会真实连接 ComfyUI / TTS，默认走 20 秒缓存；切换引擎后可点此立即重探。</div>
+                </div>
+                <div id="providerBox"><div class="empty">点击「刷新当前页」加载引擎列表。</div></div>
+                <div id="pluginBox" class="mt-3"></div>
+            </div>
+
+            <!-- 任务续跑 -->
+            <div id="wbPaneTasks" class="wb-pane" style="display:none">
+                <div class="row g-2 align-items-end mb-2">
+                    <div class="col-auto">
+                        <button class="btn btn-ghost btn-sm" onclick="loadTasks()"><i class="bi bi-list-task"></i> 刷新任务</button>
+                    </div>
+                    <div class="col-auto hint">
+                        续跑判据以磁盘产物为准：产物存在且非空即视为已完成，即使状态表丢失也能正确跳过。
+                    </div>
+                </div>
+                <div id="tasksBox"><div class="empty">点击「刷新任务」查看任务队列与续跑预检。</div></div>
+            </div>
         </div>
     </section>
 
@@ -1431,7 +1629,7 @@ const ASSET_CONFIG = {
                 label:'场景', dir:'scenes', icon:'bi-building' }
 };
 
-const PANEL_ORDER = [1,2,3,4,5,6,7,8];
+const PANEL_ORDER = [1,2,3,4,5,6,7,8,9];
 let maxUnlocked = 1, maxDone = 0;
 
 /* ===================== 基础工具 ===================== */
@@ -1476,7 +1674,8 @@ async function checkComfyUIStatus(){
 
 /* ===================== 步骤态 ===================== */
 function activatePanel(n){
-    PANEL_ORDER.forEach(i => { const p = $('panel' + i); if (p) p.style.display = i <= n ? 'block' : 'none'; });
+    // 步骤9「工作台」是常驻工具页（不属于线性流程），始终可见、永不锁定
+    PANEL_ORDER.forEach(i => { const p = $('panel' + i); if (p) p.style.display = (i <= n || i === 9) ? 'block' : 'none'; });
     maxUnlocked = Math.max(maxUnlocked, n);
     refreshSteps();
     if (n >= 7 && typeof ensureUpscaleInit === 'function') ensureUpscaleInit();
@@ -1484,16 +1683,29 @@ function activatePanel(n){
 }
 function markDone(n){ maxDone = Math.max(maxDone, n); refreshSteps(); }
 function refreshSteps(){
-    for (let i = 1; i <= 8; i++){
+    for (let i = 1; i <= 9; i++){
         const s = $('step' + i);
         if (!s) continue;
         s.classList.remove('active', 'completed', 'locked');
+        if (i === 9){                       // 工作台：常驻可用
+            s.classList.add('completed');
+            continue;
+        }
         if (i <= maxDone) s.classList.add('completed');
         if (i === maxUnlocked) s.classList.add('active');
         if (i > maxUnlocked) s.classList.add('locked');
     }
 }
-function scrollToPanel(n){ const p = $('panel' + n); if (p) p.scrollIntoView({behavior:'smooth', block:'start'}); }
+function scrollToPanel(n){
+    const p = $('panel' + n);
+    if (!p) return;
+    if (n === 9){
+        // 工作台：确保可见并懒加载数据
+        p.style.display = 'block';
+        if (typeof wbOnOpen === 'function') wbOnOpen();
+    }
+    p.scrollIntoView({behavior:'smooth', block:'start'});
+}
 
 /* ===================== 步骤1：剧本 ===================== */
 function renderScript(data){
@@ -4988,11 +5200,743 @@ async function regenAsset(reg){
     }catch(e){ hint.innerHTML = `<i class="bi bi-exclamation-triangle text-danger"></i> 提交失败：${esc(e.message)}`; }
 }
 
+/* ==========================================================================
+ * 国际化（P2-5）
+ * 语言包由后端 /api/i18n/<lang> 提供（locales/*.json），前端只做键值替换。
+ * 用法：给元素加 data-i18n="app.title" 即可自动替换 textContent。
+ * ========================================================================== */
+let I18N = {};
+let I18N_LANG = localStorage.getItem('mjscxt_lang') || 'zh-CN';
+
+function t(key, fallback){
+    const parts = String(key || '').split('.');
+    let cur = I18N;
+    for (const p of parts){
+        if (cur && typeof cur === 'object' && p in cur){ cur = cur[p]; }
+        else { return fallback !== undefined ? fallback : key; }
+    }
+    return (cur === null || cur === undefined) ? (fallback !== undefined ? fallback : key) : cur;
+}
+
+async function loadI18n(lang){
+    const want = lang || I18N_LANG;
+    try{
+        const r = await fetch('/api/i18n/' + encodeURIComponent(want));
+        const d = await r.json();
+        if (d && d.success){
+            I18N = d.messages || {};
+            I18N_LANG = d.lang || want;
+            localStorage.setItem('mjscxt_lang', I18N_LANG);
+        }
+    }catch(e){ /* 语言包不可用时保持中文硬编码文案 */ }
+    const sel = $('langSelect');
+    if (sel) sel.value = I18N_LANG;
+    applyI18n();
+}
+
+function applyI18n(){
+    document.querySelectorAll('[data-i18n]').forEach(el => {
+        const v = t(el.getAttribute('data-i18n'), null);
+        if (v !== null) el.textContent = v;
+    });
+    document.querySelectorAll('[data-i18n-title]').forEach(el => {
+        const v = t(el.getAttribute('data-i18n-title'), null);
+        if (v !== null) el.setAttribute('title', v);
+    });
+}
+
+function setLang(lang){ loadI18n(lang); toast('已切换语言：' + lang, 'ok'); }
+
+/* ==========================================================================
+ * 工作台（步骤9）：分镜画布 / 一致性看板 / 成本耗时 / 导出中心 / 引擎插件 / 任务续跑
+ * ========================================================================== */
+let WB_TAB = 'canvas';
+let WB_OPENED = false;
+let CANVAS_CARDS = [];
+let CANVAS_ORDER = [];
+let DRAG_IDX = null;
+
+function wbProject(){
+    return (currentProject && (currentProject.dir_key || currentProject.name))
+        || (currentProject && currentProject.name) || projectName || 'project';
+}
+
+function wbEpisode(elId){
+    const el = $(elId);
+    const v = el ? parseInt(el.value || '0', 10) : 0;
+    return (v && v > 0) ? v : null;
+}
+
+function wbOnOpen(){
+    WB_OPENED = true;
+    const b = $('wbProjectBadge');
+    if (b) b.textContent = '项目：' + wbProject();
+    // 分镜画布是主视图，打开工作台时自动加载一次
+    if (!CANVAS_CARDS.length) loadCanvas();
+    if (!window._wbEngineLoaded) { loadProviders(); loadPlugins(); window._wbEngineLoaded = true; }
+    if (!window._wbTasksLoaded) { loadTasks(); window._wbTasksLoaded = true; }
+}
+
+function wbSwitch(tab){
+    WB_TAB = tab;
+    const map = {canvas: 1, consistency: 2, analytics: 3, export: 4, engine: 5, tasks: 6};
+    Object.keys(map).forEach(k => {
+        const tabEl = $('wbTab' + map[k]);
+        const pane = $('wbPane' + k.charAt(0).toUpperCase() + k.slice(1));
+        if (tabEl) tabEl.classList.toggle('active', k === tab);
+        if (pane) pane.style.display = (k === tab) ? 'block' : 'none';
+    });
+    if (tab === 'analytics' && !window._wbAnaLoaded){ loadAnalytics(); window._wbAnaLoaded = true; }
+    if (tab === 'export' && !window._wbExpLoaded){ loadExportList(); window._wbExpLoaded = true; }
+    if (tab === 'tasks' && !window._wbTasksLoaded){ loadTasks(); window._wbTasksLoaded = true; }
+    if (tab === 'engine' && !window._wbEngineLoaded){ loadProviders(); loadPlugins(); window._wbEngineLoaded = true; }
+    if (tab === 'consistency' && !window._wbConsLoaded){ loadConsistencyReport(); window._wbConsLoaded = true; }
+}
+
+function wbReload(){
+    if (WB_TAB === 'canvas') loadCanvas();
+    else if (WB_TAB === 'consistency') loadConsistencyReport();
+    else if (WB_TAB === 'analytics') loadAnalytics();
+    else if (WB_TAB === 'export') loadExportList();
+    else if (WB_TAB === 'engine'){ loadProviders(); loadPlugins(); }
+    else if (WB_TAB === 'tasks') loadTasks();
+}
+
+function wbScoreClass(score){
+    if (score === null || score === undefined) return '';
+    const n = Number(score);
+    if (isNaN(n)) return '';
+    if (n >= 85) return 'pass';
+    if (n >= 70) return 'warn';
+    return 'bad';
+}
+
+/* ------------------------- 分镜画布 ------------------------- */
+async function loadCanvas(){
+    const proj = wbProject();
+    const ep = wbEpisode('wbEpisode');
+    const box = $('canvasBoard');
+    if (!box) return;
+    box.innerHTML = '<div class="empty">加载中…</div>';
+    try{
+        const q = ep ? ('?episode_no=' + ep) : '';
+        const r = await fetch('/api/storyboard/canvas/' + encodeURIComponent(proj) + q);
+        const d = await r.json();
+        if (!d.success){
+            box.innerHTML = `<div class="empty">${esc(d.error || '读取失败')}</div>`;
+            $('canvasSummary').innerHTML = '';
+            return;
+        }
+        CANVAS_CARDS = d.cards || [];
+        CANVAS_ORDER = CANVAS_CARDS.map(c => String(c.shot_id));
+        renderCanvasSummary(d);
+        renderCanvas();
+    }catch(e){
+        box.innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`;
+    }
+}
+
+function renderCanvasSummary(d){
+    const s = d.summary || {};
+    const cov = s.coverage || {};
+    const kpi = [
+        ['镜头数', s.shot_count ?? 0],
+        ['分镜图就绪', s.storyboard_ready ?? 0],
+        ['视频就绪', s.video_ready ?? 0],
+        ['尾帧就绪', s.keyframe_end_ready ?? 0],
+        ['质检阻断', s.qc_blocked ?? 0],
+        ['情节覆盖率', (cov.plot_coverage_percent !== undefined && cov.plot_coverage_percent !== null) ? cov.plot_coverage_percent + '%' : '—'],
+        ['原文字级覆盖', (cov.detail_coverage_percent !== undefined && cov.detail_coverage_percent !== null) ? cov.detail_coverage_percent + '%' : '—'],
+        ['原文遗漏句', cov.missing_count ?? '—'],
+    ];
+    $('canvasSummary').innerHTML =
+        `<div class="wb-kpi">${kpi.map(([k, v]) =>
+            `<div class="kpi"><div class="k">${esc(k)}</div><div class="v">${esc(String(v))}</div></div>`).join('')}</div>`;
+}
+
+function renderCanvas(){
+    const box = $('canvasBoard');
+    if (!box) return;
+    if (!CANVAS_CARDS.length){ box.innerHTML = '<div class="empty">该集没有镜头</div>'; return; }
+    box.innerHTML = CANVAS_CARDS.map((c, i) => canvasCardHtml(c, i)).join('');
+    bindCanvasDnD();
+}
+
+function canvasCardHtml(c, idx){
+    const sb = c.storyboard || {}, v = c.video || {}, kf = c.keyframe || {}, cs = c.consistency || {};
+    const qc = sb.qc || {};
+    const img = sb.exists ? `<img src="${esc(sb.url)}" loading="lazy" alt="shot ${esc(String(c.shot_id))}">`
+        : `<div class="novideo"><i class="bi bi-image"></i> 无分镜图</div>`;
+    const vidBadge = v.exists
+        ? `<span class="chip jade"><i class="bi bi-film"></i> 视频就绪</span>`
+        : `<span class="chip"><i class="bi bi-dash-circle"></i> 无视频</span>`;
+    const kfBadge = kf.end_exists
+        ? `<span class="chip jade"><i class="bi bi-bounding-box"></i> 尾帧</span>`
+        : `<span class="chip"><i class="bi bi-bounding-box"></i> 无尾帧</span>`;
+    const qcScore = (qc.score !== undefined && qc.score !== null)
+        ? `<span class="chip gold">质检 ${esc(String(qc.score))}</span>`
+        : `<span class="chip">${esc(t('canvas.noQc', '未质检'))}</span>`;
+    const consScore = (cs.score !== undefined && cs.score !== null)
+        ? `<span class="chip"><i class="bi bi-person-check"></i> 一致性
+             <b class="wb-score ${wbScoreClass(cs.score)}">${esc(String(cs.score))}</b></span>`
+        : '';
+    const blocked = sb.blocked ? `<span class="chip" style="color:#ff8f8f">质检阻断</span>` : '';
+    const units = (c.coverage && c.coverage.units) || [];
+    const carry = units.length
+        ? `<div class="wb-carry">${units.map(u =>
+            `· ${esc((u.text || '').slice(0, 60))} <span class="muted">(${Math.round((u.ratio || 0) * 100)}%)</span>`).join('<br>')}</div>`
+        : `<div class="hint" style="margin:0">未匹配到原文单元（可能未做覆盖率校验）</div>`;
+    const dialogue = (c.dialogue || []).map(x =>
+        `${esc(x.speaker || '')}：${esc(x.text || '')}`).join('　');
+    return `
+    <div class="wb-card" draggable="true" data-idx="${idx}" data-shot="${esc(String(c.shot_id))}">
+        <div class="wb-card-head">
+            <span class="grip" title="${esc(t('canvas.dragHint', '按住拖动排序'))}"><i class="bi bi-grip-vertical"></i></span>
+            <span>镜 ${esc(String(c.shot_id))}</span>
+            <span class="badge-soft">${esc(c.camera || '-')}</span>
+            <span class="badge-soft">${esc(String(c.duration ?? '-'))}s</span>
+        </div>
+        <div class="wb-card-thumb">${img}</div>
+        <div class="wb-card-body">
+            <div class="line">${esc((c.description || '').slice(0, 96))}</div>
+            ${dialogue ? `<div class="line muted"><i class="bi bi-chat-quote"></i> ${dialogue.slice(0, 80)}</div>` : ''}
+            <div class="wb-chip-row">${vidBadge}${kfBadge}${qcScore}${consScore}${blocked}</div>
+            <div class="wb-chip-row">
+                ${(c.characters_in_shot || []).map(x => `<span class="chip"><i class="bi bi-person"></i> ${esc(x)}</span>`).join('')}
+                ${c.location ? `<span class="chip jade"><i class="bi bi-geo-alt"></i> ${esc(c.location)}</span>` : ''}
+            </div>
+            <div>
+                <div class="hint" style="margin:0 0 4px">${esc(t('canvas.carry', '承载原文'))}（${units.length} 句）</div>
+                ${carry}
+            </div>
+        </div>
+        <div class="wb-actions">
+            <button class="btn btn-ghost btn-sm" onclick="retryStoryboard(${esc(String(c.shot_id))}, this)">
+                <i class="bi bi-easel"></i> ${esc(t('canvas.retryStoryboard', '重跑分镜图'))}</button>
+            <button class="btn btn-ghost btn-sm" onclick="retryVideoShot(${esc(String(c.shot_id))}, 'reference', this)">
+                <i class="bi bi-play-circle"></i> ${esc(t('canvas.retryVideo', '重跑视频'))}</button>
+            <button class="btn btn-ghost btn-sm" onclick="retryVideoShot(${esc(String(c.shot_id))}, 'keyframe', this)">
+                <i class="bi bi-bounding-box"></i> ${esc(t('canvas.rerunKf', '关键帧重跑'))}</button>
+        </div>
+    </div>`;
+}
+
+function bindCanvasDnD(){
+    const cards = document.querySelectorAll('#canvasBoard .wb-card');
+    cards.forEach(el => {
+        el.addEventListener('dragstart', () => { DRAG_IDX = parseInt(el.dataset.idx, 10); el.classList.add('dragging'); });
+        el.addEventListener('dragend', () => { el.classList.remove('dragging'); document.querySelectorAll('.wb-card.drop-target').forEach(x => x.classList.remove('drop-target')); });
+        el.addEventListener('dragover', e => { e.preventDefault(); el.classList.add('drop-target'); });
+        el.addEventListener('dragleave', () => el.classList.remove('drop-target'));
+        el.addEventListener('drop', e => {
+            e.preventDefault();
+            el.classList.remove('drop-target');
+            const to = parseInt(el.dataset.idx, 10);
+            if (DRAG_IDX === null || DRAG_IDX === to) return;
+            const moved = CANVAS_CARDS.splice(DRAG_IDX, 1)[0];
+            CANVAS_CARDS.splice(to, 0, moved);
+            CANVAS_ORDER = CANVAS_CARDS.map(c => String(c.shot_id));
+            renderCanvas();
+            toast('已调整顺序（本地预览），点「保存顺序」写入剧本', 'ok');
+        });
+    });
+}
+
+async function saveCanvasOrder(){
+    const proj = wbProject();
+    const ep = wbEpisode('wbEpisode');
+    if (!CANVAS_ORDER.length){ toast('请先加载画布', 'bad'); return; }
+    try{
+        const r = await fetch('/api/storyboard/shot/reorder', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({project_name: proj, episode_no: ep, order: CANVAS_ORDER})
+        });
+        const d = await r.json();
+        if (d.success){ toast('顺序已写入剧本：' + CANVAS_ORDER.join(' → '), 'ok'); loadCanvas(); }
+        else toast(d.error || '保存失败', 'bad');
+    }catch(e){ toast('保存失败：' + e.message, 'bad'); }
+}
+
+async function retryStoryboard(shotId, btn){
+    const proj = wbProject();
+    const ep = wbEpisode('wbEpisode');
+    if (!window.confirm(`重跑镜头 ${shotId} 的分镜图？该镜原有分镜图将被覆盖（其它镜头不受影响）。`)) return;
+    const raw = btn ? btn.innerHTML : '';
+    if (btn){ btn.disabled = true; btn.innerHTML = '<span class="spin" style="width:12px;height:12px;display:inline-block"></span> 重跑中…'; }
+    try{
+        const r = await fetch('/api/storyboard/retry-shot', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({project_name: proj, episode_no: ep, shot_id: shotId})
+        });
+        const d = await r.json();
+        if (d.success) toast(`镜头 ${shotId} 分镜图已重跑`, 'ok');
+        else toast(d.error || '重跑失败', 'bad');
+        loadCanvas();
+    }catch(e){ toast('重跑失败：' + e.message, 'bad'); }
+    finally{ if (btn){ btn.disabled = false; btn.innerHTML = raw; } }
+}
+
+async function retryVideoShot(shotId, mode, btn){
+    const proj = wbProject();
+    const ep = wbEpisode('wbEpisode');
+    const label = (mode === 'keyframe') ? '关键帧驱动' : '参考图';
+    if (!window.confirm(`用「${label}」模式重跑镜头 ${shotId} 的视频？耗时取决于 H3 单段生成时间。`)) return;
+    const raw = btn ? btn.innerHTML : '';
+    if (btn){ btn.disabled = true; btn.innerHTML = '<span class="spin" style="width:12px;height:12px;display:inline-block"></span> 生成中…'; }
+    try{
+        const payload = {project_name: proj, episode_no: ep, shot_id: shotId, mode: mode};
+        // 参考图交由后端从磁盘资产目录解析（避免前端传结构不完整的对象导致静默无锚点）
+        const r = await fetch('/api/video/retry-shot', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        const d = await r.json();
+        if (d.success) toast(`镜头 ${shotId} 视频已重跑（${label}）`, 'ok');
+        else toast(d.error || '重跑失败', 'bad');
+        loadCanvas();
+    }catch(e){ toast('重跑失败：' + e.message, 'bad'); }
+    finally{ if (btn){ btn.disabled = false; btn.innerHTML = raw; } }
+}
+
+/* ------------------------- 一致性看板 ------------------------- */
+async function runConsistency(){
+    const proj = wbProject();
+    const ep = wbEpisode('wbConsEpisode');
+    const box = $('consistencyBox');
+    box.innerHTML = '<div class="empty">校验中…（含多模态语义比对，可能耗时数十秒）</div>';
+    try{
+        const r = await fetch('/api/consistency/run', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({project_name: proj, episode_no: ep, include_assets: true, include_shots: true})
+        });
+        const d = await r.json();
+        if (!d.success){ box.innerHTML = `<div class="empty">${esc(d.error || '校验失败')}</div>`; return; }
+        renderConsistency(d.report || {}, d.report_path);
+    }catch(e){ box.innerHTML = `<div class="empty">校验失败：${esc(e.message)}</div>`; }
+}
+
+async function loadConsistencyReport(){
+    const proj = wbProject();
+    const box = $('consistencyBox');
+    try{
+        const r = await fetch('/api/consistency/report/' + encodeURIComponent(proj));
+        const d = await r.json();
+        if (!d.success){
+            box.innerHTML = `<div class="empty">${esc(d.error || '暂无报告')}</div>`;
+            return;
+        }
+        renderConsistency(d.report || {}, (d.report || {}).report_path);
+    }catch(e){ box.innerHTML = `<div class="empty">读取失败：${esc(e.message)}</div>`; }
+}
+
+function renderConsistency(rep, path){
+    const box = $('consistencyBox');
+    const s = rep.summary || {};
+    const kpi = [
+        ['镜头比对数', s.shot_checks ?? '—'],
+        ['资产多视图校验', s.asset_checks ?? '—'],
+        ['通过', s.passed ?? '—'],
+        ['警告', s.warn ?? '—'],
+        ['不通过', s.failed ?? '—'],
+        ['平均相似度', s.avg_score ?? '—'],
+        ['最低相似度', s.min_score ?? '—'],
+    ];
+    let h = `<div class="wb-kpi mb-3">${kpi.map(([k, v]) =>
+        `<div class="kpi"><div class="k">${esc(k)}</div><div class="v">${esc(String(v))}</div></div>`).join('')}</div>`;
+
+    const sc = rep.shot_check || {};
+    const rows = sc.results || [];
+    if (rows.length){
+        h += `<div class="sec-title mt-2"><i class="bi bi-columns"></i> 跨镜头角色一致性</div>
+        <div class="table-responsive"><table class="wb-table">
+        <thead><tr><th>镜头</th><th>角色</th><th>相似度</th><th>判定</th><th>通道</th><th>差异点</th></tr></thead><tbody>`;
+        rows.forEach(x => {
+            const diffs = (x.differences || []).map(d => esc(String(d))).join('；') || '—';
+            h += `<tr>
+                <td>${esc(String(x.shot ?? '-'))}</td>
+                <td>${esc(x.character || '-')}</td>
+                <td><b class="wb-score ${wbScoreClass(x.score)}">${esc(String(x.score ?? '-'))}</b></td>
+                <td>${esc(x.verdict || '-')}</td>
+                <td>${esc(x.mode || '-')}</td>
+                <td style="max-width:420px">${diffs}</td>
+            </tr>`;
+        });
+        h += '</tbody></table></div>';
+    } else {
+        h += '<div class="hint mt-2">未产生镜头比对结果（可能该集还没有分镜图或角色归属信息）。</div>';
+    }
+
+    const ac = rep.asset_check || {};
+    const arows = ac.results || [];
+    if (arows.length){
+        h += `<div class="sec-title mt-3"><i class="bi bi-person-badge"></i> 角色资产多视图一致性</div>
+        <div class="table-responsive"><table class="wb-table">
+        <thead><tr><th>角色</th><th>视图</th><th>相似度</th><th>判定</th><th>通道</th></tr></thead><tbody>`;
+        arows.forEach(x => {
+            h += `<tr><td>${esc(x.character || '-')}</td><td>${esc(x.view || '-')}</td>
+                <td><b class="wb-score ${wbScoreClass(x.score)}">${esc(String(x.score ?? '-'))}</b></td>
+                <td>${esc(x.verdict || '-')}</td><td>${esc(x.mode || '-')}</td></tr>`;
+        });
+        h += '</tbody></table></div>';
+    }
+    if (path) h += `<div class="hint mt-2">报告落盘：<code>${esc(path)}</code></div>`;
+    box.innerHTML = h;
+}
+
+/* ------------------------- 成本耗时 ------------------------- */
+async function loadAnalytics(){
+    const box = $('analyticsBox');
+    box.innerHTML = '<div class="empty">加载中…</div>';
+    const proj = wbProject();
+    try{
+        const r = await fetch('/api/analytics/project/' + encodeURIComponent(proj));
+        const d = await r.json();
+        if (!d.success){ box.innerHTML = `<div class="empty">${esc(d.error || '读取失败')}</div>`; return; }
+        renderAnalytics(d);
+    }catch(e){ box.innerHTML = `<div class="empty">读取失败：${esc(e.message)}</div>`; }
+}
+
+function fmtHours(sec){ return ((Number(sec) || 0) / 3600).toFixed(2); }
+
+function renderAnalytics(d){
+    const box = $('analyticsBox');
+    const cost = d.cost || {};
+    const kpi = [
+        [t('analytics.totalHours', '总耗时(小时)'), fmtHours(d.total_seconds)],
+        [t('analytics.cost', '估算成本'), '￥' + (cost.cost_rmb ?? '—')],
+        [t('analytics.kwh', '耗电'), (cost.kwh ?? '—') + ' 度'],
+        [t('analytics.events', '事件数'), d.event_count ?? 0],
+        [t('analytics.failed', '失败数'), d.failed_count ?? 0],
+        ['ComfyUI 提交', (d.comfyui && d.comfyui.prompt_submitted) ?? 0],
+        ['提交失败', (d.comfyui && d.comfyui.prompt_failed) ?? 0],
+        ['GPU 等待(秒)', (d.comfyui && d.comfyui.waited_seconds) ?? 0],
+        ['生成段数', (d.comfyui && d.comfyui.segments_generated) ?? 0],
+        ['部署档案', d.deploy_profile || '—'],
+        ['功率(W)', cost.watts ?? '—'],
+    ];
+    let h = `<div class="wb-kpi mb-3">${kpi.map(([k, v]) =>
+        `<div class="kpi"><div class="k">${esc(k)}</div><div class="v">${esc(String(v))}</div></div>`).join('')}</div>`;
+
+    const rows = d.by_kind || [];
+    if (rows.length){
+        h += `<div class="sec-title mt-2"><i class="bi bi-bar-chart"></i> ${esc(t('analytics.byKind', '各环节分布'))}</div>
+        <div class="table-responsive"><table class="wb-table">
+        <thead><tr><th>环节</th><th>次数</th><th>耗时(s)</th><th>小时</th><th>单元数</th><th>失败</th><th>估算(元)</th></tr></thead><tbody>`;
+        rows.forEach(x => {
+            h += `<tr><td>${esc(x.label || x.kind)}</td><td>${esc(String(x.count ?? 0))}</td>
+                <td>${esc(String(x.seconds ?? 0))}</td><td>${esc(fmtHours(x.seconds))}</td>
+                <td>${esc(String(x.units ?? 0))}</td>
+                <td>${esc(String(x.failed ?? 0))}</td>
+                <td>${esc(String(x.cost_rmb ?? 0))}</td></tr>`;
+        });
+        h += '</tbody></table></div>';
+    } else {
+        h += '<div class="hint mt-2">暂无事件记录。任务完成后会自动登记耗时（任务库完成钩子）。</div>';
+    }
+    box.innerHTML = h;
+}
+
+async function resetAnalytics(){
+    if (!window.confirm('确认清空当前项目的耗时统计？此操作不可撤销。')) return;
+    try{
+        const r = await fetch('/api/analytics/reset', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({project: wbProject()})
+        });
+        const d = await r.json();
+        toast(d.success ? '统计已清空' : '清空失败', d.success ? 'ok' : 'bad');
+        loadAnalytics();
+    }catch(e){ toast('清空失败：' + e.message, 'bad'); }
+}
+
+/* ------------------------- 导出中心 ------------------------- */
+async function runExport(){
+    const proj = wbProject();
+    const ep = wbEpisode('wbExportEpisode');
+    const box = $('exportBox');
+    box.innerHTML = '<div class="empty">导出中…</div>';
+    try{
+        const r = await fetch('/api/export/run', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({project_name: proj, episode_no: ep})
+        });
+        const d = await r.json();
+        if (!d.success){ box.innerHTML = `<div class="empty">${esc(d.error || '导出失败')}</div>`; return; }
+        renderExportResult(d);
+        loadExportList();
+    }catch(e){ box.innerHTML = `<div class="empty">导出失败：${esc(e.message)}</div>`; }
+}
+
+function renderExportResult(d){
+    const box = $('exportBox');
+    const res = d.results || {};
+    const tl = res.timeline || {};
+    const rows = ['jianying', 'fcpxml', 'srt', 'frames'].map(k => {
+        const v = res[k];
+        if (!v) return '';
+        const p = v.path || v.draft_dir || '';
+        const rel = p ? p.replace(/\\/g, '/').split('/output/export/')[1] || p : '';
+        return `<tr>
+            <td>${esc(t('export.' + k, k))}</td>
+            <td>${v.ok ? '<b class="wb-score pass">成功</b>' : '<b class="wb-score bad">失败</b>'}</td>
+            <td style="max-width:520px;word-break:break-all">${esc(p || v.error || '')}</td>
+            <td>${v.ok && rel ? `<a class="btn btn-ghost btn-sm" href="/api/export/download/${encodeURI(rel)}"><i class="bi bi-download"></i></a>` : ''}</td>
+        </tr>`;
+    }).join('');
+    box.innerHTML = `
+        <div class="wb-kpi mb-3">
+            <div class="kpi"><div class="k">镜头数</div><div class="v">${esc(String(tl.shot_count ?? 0))}</div></div>
+            <div class="kpi"><div class="k">时间轴总长</div><div class="v">${esc(String(tl.total_sec ?? 0))}s</div></div>
+            <div class="kpi"><div class="k">导出目录</div><div class="v" style="font-size:.8rem;word-break:break-all">${esc(d.output_dir || '')}</div></div>
+        </div>
+        <div class="table-responsive"><table class="wb-table">
+        <thead><tr><th>格式</th><th>状态</th><th>产物路径</th><th>下载</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>`;
+}
+
+async function loadExportList(){
+    const box = $('exportBox');
+    try{
+        const r = await fetch('/api/export/list?project=' + encodeURIComponent(wbProject()));
+        const d = await r.json();
+        const items = d.items || [];
+        let h = '<div class="sec-title mb-2"><i class="bi bi-clock-history"></i> 导出记录</div>';
+        if (!items.length){
+            h += '<div class="hint">暂无导出记录。</div>';
+        } else {
+            h += `<div class="table-responsive"><table class="wb-table">
+            <thead><tr><th>格式</th><th>导出时间</th><th>镜头数</th><th>时间轴(s)</th><th>产物</th></tr></thead><tbody>`;
+            items.forEach(x => {
+                h += `<tr><td>${esc(x.format)}</td><td>${esc(x.exported_at || '-')}</td>
+                    <td>${esc(String(x.shot_count ?? '-'))}</td><td>${esc(String(x.total_sec ?? '-'))}</td>
+                    <td style="max-width:520px;word-break:break-all">${esc(x.path || '')}</td></tr>`;
+            });
+            h += '</tbody></table></div>';
+        }
+        box.innerHTML = h;
+    }catch(e){ box.innerHTML = `<div class="empty">读取失败：${esc(e.message)}</div>`; }
+}
+
+/* ------------------------- 引擎与插件 ------------------------- */
+async function loadProviders(force){
+    const box = $('providerBox');
+    if (!box) return;
+    try{
+        const r = await fetch('/api/providers' + (force ? '?refresh=1' : ''));
+        const d = await r.json();
+        if (!d.success){ box.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
+        let h = `<div class="sec-title mb-2"><i class="bi bi-cpu"></i> ${esc(t('engine.provider', '引擎 Provider'))}</div>
+        <div class="table-responsive"><table class="wb-table">
+        <thead><tr><th>环节</th><th>引擎</th><th>说明</th><th>可用</th><th>当前生效</th><th>切换</th></tr></thead><tbody>`;
+        Object.keys(d.kinds || {}).forEach(kind => {
+            const info = d.kinds[kind];
+            (info.items || []).forEach((it, i) => {
+                h += `<tr>
+                    ${i === 0 ? `<td rowspan="${info.items.length}">${esc(kind)}<div class="hint" style="margin:0">${esc(info.env_key || '')}</div></td>` : ''}
+                    <td>${esc(it.name)}</td>
+                    <td style="max-width:380px">${esc(it.description || it.label || '')}</td>
+                    <td>${it.available ? '<b class="wb-score pass">可用</b>' : `<span class="hint">${esc(it.unavailable_reason || '不可用')}</span>`}</td>
+                    <td>${it.current ? '<b>✅</b>' : ''}</td>
+                    <td>${it.current ? '' : `<button class="btn btn-ghost btn-sm" onclick="selectProvider('${esc(kind)}','${esc(it.name)}')">切换</button>`}</td>
+                </tr>`;
+            });
+        });
+        h += '</tbody></table></div>';
+        box.innerHTML = h;
+    }catch(e){ box.innerHTML = `<div class="empty">读取失败：${esc(e.message)}</div>`; }
+}
+
+async function selectProvider(kind, name){
+    try{
+        const r = await fetch('/api/providers/select', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({kind, name})
+        });
+        const d = await r.json();
+        toast(d.success ? `已切换 ${kind} → ${name}（仅当前进程生效，长期请写入 .env）` : (d.error || '切换失败'),
+              d.success ? 'ok' : 'bad');
+        loadProviders();
+    }catch(e){ toast('切换失败：' + e.message, 'bad'); }
+}
+
+async function loadPlugins(){
+    const box = $('pluginBox');
+    if (!box) return;
+    try{
+        const r = await fetch('/api/plugins');
+        const d = await r.json();
+        if (!d.success){ box.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
+        let h = `<div class="sec-title mb-2"><i class="bi bi-puzzle"></i> ${esc(t('engine.plugins', '插件注册表'))}
+            <span class="chip" style="margin-left:8px">共 ${esc(String(d.total || 0))} 项</span>
+            ${(d.load_errors || []).length ? `<span class="chip" style="color:#ff8f8f">加载错误 ${d.load_errors.length}</span>` : ''}
+            </div>`;
+        (d.categories || []).forEach(g => {
+            h += `<div class="wb-chip-row mb-2"><span class="chip gold">${esc(g.label)}</span>`;
+            (g.items || []).forEach(it => {
+                h += `<span class="chip" title="${esc(it.description || '')}">${esc(it.name)}
+                    <code style="margin-left:5px">${esc(it.id)}</code>
+                    ${it.builtin === false ? '<b style="color:var(--gold);margin-left:4px">外部</b>' : ''}
+                    ${it.runnable !== false ? `<button class="btn btn-ghost btn-sm" style="margin-left:5px;padding:0 6px"
+                        onclick="runPlugin('${esc(it.id)}')">执行</button>` : ''}
+                    </span>`;
+            });
+            h += '</div>';
+        });
+        h += `<div class="hint mt-2">${esc(t('engine.dependencyOrder', '依赖顺序'))}：${esc((d.dependency_order || []).join(' → '))}</div>`;
+        h += `<div class="hint">把自定义插件（.py，暴露 register(reg)）放进 <code>app/plugins/</code> 即被自动加载。</div>`;
+        box.innerHTML = h;
+    }catch(e){ box.innerHTML = `<div class="empty">读取失败：${esc(e.message)}</div>`; }
+}
+
+async function runPlugin(pid){
+    try{
+        const r = await fetch('/api/plugins/run', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({plugin_id: pid, project_name: wbProject(), episode_no: wbEpisode('wbEpisode')})
+        });
+        const d = await r.json();
+        if (!d.success){ toast(d.error || '插件执行失败', 'bad'); return; }
+        const res = d.result || {};
+        const brief = res.shots
+            ? `镜头 ${res.shot_count} 个，均速 ${res.avg_chars_per_sec} 字/秒`
+            : JSON.stringify(res).slice(0, 180);
+        toast(`插件 ${pid} 执行完成：${brief}`, 'ok');
+        console.info('[plugin]', pid, res);
+    }catch(e){ toast('插件执行失败：' + e.message, 'bad'); }
+}
+
+/* ------------------------- 任务续跑 ------------------------- */
+async function loadTasks(){
+    const box = $('tasksBox');
+    if (!box) return;
+    try{
+        const r = await fetch('/api/tasks?limit=30');
+        const d = await r.json();
+        const rows = d.items || d.tasks || [];
+        let h = `<div class="sec-title mb-2"><i class="bi bi-list-task"></i> 任务队列
+            <span class="chip" style="margin-left:8px">共 ${esc(String(d.count ?? rows.length))}</span></div>`;
+        if (!rows.length){
+            h += '<div class="hint">暂无任务记录。任务完成后会写入 output/tasks.db，重启不丢。</div>';
+        } else {
+            h += `<div class="table-responsive"><table class="wb-table">
+            <thead><tr><th>任务</th><th>类型</th><th>状态</th><th>进度</th><th>开始</th><th>结束</th><th>操作</th></tr></thead><tbody>`;
+            rows.forEach(x => {
+                const resumable = ['interrupted', 'failed'].includes(x.status);
+                h += `<tr>
+                    <td>${esc(x.label || x.id)}<div class="hint" style="margin:0">${esc(x.project || '')}</div></td>
+                    <td>${esc(x.kind || '-')}</td>
+                    <td>${esc(x.status || '-')}</td>
+                    <td>${esc(String(x.progress ?? 0))}%</td>
+                    <td>${esc(x.started_at || '-')}</td>
+                    <td>${esc(x.finished_at || '-')}</td>
+                    <td>${resumable ? `<button class="btn btn-ghost btn-sm" onclick="resumePreview('${esc(x.id)}')">
+                        <i class="bi bi-arrow-counterclockwise"></i> ${esc(t('tasks.resumePreview', '续跑预检'))}</button>` : ''}</td>
+                </tr>`;
+            });
+            h += '</tbody></table></div>';
+        }
+        h += '<div id="resumePreviewBox" class="mt-3"></div>';
+        box.innerHTML = h;
+    }catch(e){ box.innerHTML = `<div class="empty">读取失败：${esc(e.message)}</div>`; }
+}
+
+async function resumePreview(taskId){
+    const out = $('resumePreviewBox');
+    if (out) out.innerHTML = '<div class="empty">预检中…</div>';
+    try{
+        const r = await fetch('/api/tasks/' + encodeURIComponent(taskId) + '/resume-preview');
+        const d = await r.json();
+        if (!d.success && !d.task_id){ if (out) out.innerHTML = `<div class="empty">${esc(d.error || '预检失败')}</div>`; return; }
+        const done = d.done_units || [], pend = d.pending_units || [];
+        let h = `<div class="sec-title mb-2"><i class="bi bi-arrow-counterclockwise"></i> 续跑预检 · ${esc(taskId)}</div>
+        <div class="wb-kpi mb-2">
+            <div class="kpi"><div class="k">已完成单元</div><div class="v">${done.length}</div></div>
+            <div class="kpi"><div class="k">待重跑单元</div><div class="v">${pend.length}</div></div>
+            <div class="kpi"><div class="k">可续跑</div><div class="v">${d.resumable ? '是' : '否'}</div></div>
+        </div>`;
+        if (done.length) h += `<div class="hint">已完成（续跑将跳过）：${esc(done.slice(0, 30).map(x => x.unit_key || x).join('、'))}</div>`;
+        if (pend.length) h += `<div class="hint">待重跑：${esc(pend.slice(0, 30).map(x => x.unit_key || x).join('、'))}</div>`;
+        if (out) out.innerHTML = h;
+    }catch(e){ if (out) out.innerHTML = `<div class="empty">预检失败：${esc(e.message)}</div>`; }
+}
+
+/* ------------------------- 关键帧（步骤6） ------------------------- */
+async function loadKeyframePlan(){
+    const proj = wbProject();
+    const ep = (currentScript && currentScript.metadata && currentScript.metadata.episode_no)
+        || ($('dubEpisode') ? parseInt($('dubEpisode').value || '1', 10) : 1);
+    const box = $('kfPlan');
+    box.innerHTML = '<div class="hint">预检中…</div>';
+    try{
+        const r = await fetch(`/api/keyframes/plan?project_name=${encodeURIComponent(proj)}&episode_no=${ep}`);
+        const d = await r.json();
+        if (!d.success){ box.innerHTML = `<div class="hint">${esc(d.error || '预检失败')}</div>`; return; }
+        const badge = $('kfBadge');
+        if (badge) badge.textContent = `尾帧 ${d.end_frames_ready}/${d.shot_count}`;
+        $('kfStatus').textContent = `分镜图就绪 ${d.start_frames_ready}/${d.shot_count}，尾帧就绪 ${d.end_frames_ready}，待生成 ${d.to_generate}。`;
+        box.innerHTML = (d.plan || []).map(p => `<div class="kf-item">
+            <span class="${p.has_start ? 'ok' : 'no'}"><i class="bi bi-${p.has_start ? 'check-circle' : 'x-circle'}"></i></span>
+            <span>镜 ${esc(String(p.shot_id))}</span>
+            <span class="hint" style="margin:0">首帧 ${p.has_start ? esc(String(p.start_frame).split(/[\\\\/]/).pop()) : '缺失'}</span>
+            <span class="hint" style="margin:0">尾帧 ${p.has_end ? '已存在' : (p.need_gen ? '<b style="color:var(--gold)">待生成</b>' : '—')}</span>
+            <span class="spacer" style="flex:1"></span>
+            <span class="hint" style="margin:0">${esc(p.reason)}</span>
+        </div>`).join('');
+    }catch(e){ box.innerHTML = `<div class="hint">预检失败：${esc(e.message)}</div>`; }
+}
+
+async function generateKeyframes(){
+    const proj = wbProject();
+    const ep = (window.CURRENT_SCRIPT && CURRENT_SCRIPT.metadata && CURRENT_SCRIPT.metadata.episode_no) || 1;
+    if (!window.confirm('开始生成尾帧？每镜调用一次 Qwen Edit（以分镜图为首帧），耗时取决于本机算力。已存在的尾帧会自动跳过。')) return;
+    try{
+        const r = await fetch('/api/keyframes/generate', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({project_name: proj, episode_no: ep, only_missing: true})
+        });
+        const d = await r.json();
+        if (!d.success){ toast(d.error || '启动失败', 'bad'); return; }
+        if (!d.total){ toast('没有待生成的尾帧（都已存在）', 'ok'); loadKeyframePlan(); return; }
+        toast(`尾帧生成已启动：共 ${d.total} 镜`, 'ok');
+        const meter = $('kfMeter');
+        if (meter) meter.style.display = 'block';
+        trackKeyframeTask(d.task_id);
+    }catch(e){ toast('启动失败：' + e.message, 'bad'); }
+}
+
+async function trackKeyframeTask(taskId){
+    const meter = $('kfMeter');
+    const meterBar = meter ? meter.querySelector('i') : null;
+    for (let i = 0; i < 480; i++){
+        await new Promise(r => setTimeout(r, 5000));
+        let st = {};
+        try{
+            const r = await fetch('/api/generation/status/' + encodeURIComponent(taskId));
+            st = await r.json();
+        }catch(e){ continue; }
+        if (meterBar) meterBar.style.width = (st.progress || 0) + '%';
+        $('kfStatus').textContent = `${st.phase || '生成中'} · ${st.current || 0}/${st.total || 0}（${st.progress || 0}%）`;
+        if (['completed', 'failed'].includes(st.status)){
+            const rep = st.report || {};
+            $('kfStatus').textContent = `尾帧生成结束：成功 ${rep.succeeded || 0}，失败 ${rep.failed || 0}。` +
+                (st.error ? ' 错误：' + st.error : '');
+            if (meter) meter.style.display = 'none';
+            toast(`尾帧生成完成：成功 ${rep.succeeded || 0} / ${rep.generated || 0}`, rep.failed ? 'bad' : 'ok');
+            loadKeyframePlan();
+            if (CANVAS_CARDS.length) loadCanvas();
+            return;
+        }
+    }
+}
+
 /* ===================== 初始化 ===================== */
 document.addEventListener('DOMContentLoaded', () => {
     checkComfyUIStatus();
     statusTimer = setInterval(checkComfyUIStatus, 15000);
     refreshSteps();
+
+    // 国际化：语言包由后端 /api/i18n 提供（失败时保持中文硬编码，不影响功能）
+    loadI18n();
 
     // 新增：初始化小说上传 / AI 设置（三模块） / AI 对话 / 提示词分析面板
     setupNovelDropzone();

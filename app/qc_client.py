@@ -201,17 +201,12 @@ def load_config(config_path: str) -> dict:
                 if k in data and data[k] is not None:
                     cfg[k] = data[k]
             cfg["endpoint_override"] = _normalize_override(data.get("endpoint_override"))
-            # P0-3：明文密钥自动迁移到加密库并清空 json 字段（只做一次）
-            if data.get("api_key"):
+            # P0-3：明文密钥自动迁移到加密库并清空 json 字段（含 endpoint_override 嵌套结构）
+            if data.get("api_key") or (isinstance(data.get("endpoint_override"), dict)
+                                       and data["endpoint_override"].get("api_key")):
                 try:
                     import secret_store
-                    _root = _PROJECT_ROOT
-                    if secret_store.get_store(_root).set_api_key("qc", str(data["api_key"]).strip()):
-                        data["api_key"] = ""
-                        tmp = config_path + ".tmp"
-                        with open(tmp, "w", encoding="utf-8") as f:
-                            json.dump(data, f, ensure_ascii=False, indent=2)
-                        os.replace(tmp, config_path)
+                    if secret_store.scrub_plaintext_key(config_path, "qc", _PROJECT_ROOT):
                         logger.info("质检配置中的明文密钥已迁移至加密库")
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"质检密钥迁移失败（暂不阻断）：{e}")
@@ -223,6 +218,11 @@ def load_config(config_path: str) -> dict:
         secure = secret_store.get_store(_PROJECT_ROOT).get_api_key("qc")
         if secure:
             cfg["api_key"] = secure
+            # endpoint_override 若声明了 base_url/model 但密钥为空，用加密库的密钥补齐，
+            # 否则 resolve_endpoint 会因 override 缺 key 而落到未配置分支
+            ov = cfg.get("endpoint_override")
+            if isinstance(ov, dict) and ov and not (ov.get("api_key") or "").strip():
+                ov["api_key"] = secure
         env_base = secret_store.SecretStore.env_base_url("qc")
         env_model = secret_store.SecretStore.env_model("qc")
         if env_base:
@@ -314,6 +314,12 @@ def save_config(config_path: str, patch: dict, keep_key_if_blank: bool = True) -
             cfg[k] = str(v or "")
     cfg = load_config_dict(cfg)
     cfg["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    # P0-3：落盘前确保密钥字段不含明文（含 endpoint_override 嵌套结构）
+    # 明文密钥只存加密库；endpoint_override 的密钥由 load_config 从加密库补齐。
+    cfg["api_key"] = ""
+    ov = cfg.get("endpoint_override")
+    if isinstance(ov, dict):
+        ov["api_key"] = ""
     os.makedirs(os.path.dirname(os.path.abspath(config_path)), exist_ok=True)
     tmp = config_path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -386,14 +392,23 @@ def qc_endpoint_ready(cfg: dict, override: dict = None) -> bool:
 
 
 def set_endpoint(config_path: str, base_url: str, api_key: str, model: str) -> dict:
-    """被其它链路（如分镜加速自动写入）调用的质检接口同步：落盘并记录 endpoint_override"""
+    """被其它链路（如分镜加速自动写入）调用的质检接口同步：落盘并记录 endpoint_override
+
+    P0-3：密钥写入加密库，json 只保留 base_url/model（不含明文密钥）。
+    """
     cfg = load_config(config_path)
     ep = {"base_url": (base_url or "").strip(), "api_key": (api_key or "").strip(),
           "model": (model or "").strip()}
     if not (ep["base_url"] and ep["api_key"] and ep["model"]):
         return cfg
-    cfg["base_url"], cfg["api_key"], cfg["model"] = ep["base_url"], ep["api_key"], ep["model"]
-    cfg["endpoint_override"] = dict(ep)
+    try:
+        import secret_store
+        secret_store.get_store(_PROJECT_ROOT).set_api_key("qc", ep["api_key"])
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"质检接口密钥加密保存失败（将不落盘明文）：{e}")
+    cfg["base_url"], cfg["api_key"], cfg["model"] = ep["base_url"], "", ep["model"]
+    # endpoint_override 只记录 base_url/model，密钥由加密库提供
+    cfg["endpoint_override"] = {"base_url": ep["base_url"], "api_key": "", "model": ep["model"]}
     cfg["updated_at"] = datetime.now().isoformat(timespec="seconds")
     os.makedirs(os.path.dirname(os.path.abspath(config_path)), exist_ok=True)
     tmp = config_path + ".tmp"
@@ -406,6 +421,11 @@ def set_endpoint(config_path: str, base_url: str, api_key: str, model: str) -> d
 def reset_endpoint(config_path: str) -> dict:
     """「恢复为 AI 设置」：清空自动写入的接口，交还给用户在 AI 设置里独立配置"""
     cfg = load_config(config_path)
+    try:
+        import secret_store
+        secret_store.get_store(_PROJECT_ROOT).clear_api_key("qc")
+    except Exception:  # noqa: BLE001
+        pass
     cfg["base_url"], cfg["api_key"], cfg["model"] = "", "", ""
     cfg["endpoint_override"] = {"base_url": "", "api_key": "", "model": ""}
     cfg["updated_at"] = datetime.now().isoformat(timespec="seconds")
@@ -729,6 +749,77 @@ def _run_vision(ep: dict, prompt: str, image_paths: list, cfg: dict) -> dict:
                     "retries_used": max(0, int(resp.get("attempts", 1)) - 1),
                     "call_url": resp["url"], "model": ep["model"]})
     return verdict
+
+
+# ===================== 通用多模态调用（供一致性校验等复用） =====================
+
+def run_custom_vision(prompt: str, image_paths: list, cfg: dict = None,
+                      override: dict = None, max_tokens: int = 900,
+                      system: str = None, temperature: float = 0) -> dict:
+    """通用多模态调用：给定提示词 + 多张图，返回模型原始文本与耗时。
+
+    与质检的区别：不做「合格/不合格」判定，只把判定权交给调用方（如一致性校验）。
+    复用质检的 endpoint 配置（base_url / api_key / model）与图片编码逻辑。
+    永不抛异常：失败返回 {"ok": False, "error": ...}。
+    """
+    cfg = cfg or _empty_config()
+    ep = resolve_endpoint(cfg, override)
+    if not (ep.get("base_url") and ep.get("api_key") and ep.get("model")):
+        return {"ok": False, "error": "多模态接口未配置（base_url/api_key/model）"}
+    if not image_paths:
+        return {"ok": False, "error": "未提供图片"}
+    missing = [p for p in image_paths if not p or not os.path.isfile(p)]
+    if missing:
+        return {"ok": False, "error": f"图片不存在：{missing[0]}"}
+
+    content = [{"type": "text", "text": prompt}]
+    for p in image_paths:
+        content.append({"type": "image_url",
+                        "image_url": {"url": encode_image_data_url(
+                            p, cfg.get("image_max_side", 1024))}})
+    payload = {
+        "model": ep["model"],
+        "messages": [
+            {"role": "system", "content": system or "你是严格、客观的漫剧视觉审校员，只输出 JSON。"},
+            {"role": "user", "content": content},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    t0 = time.time()
+    try:
+        resp = _post_chat(ep, payload, cfg.get("timeout", 180),
+                          retries=cfg.get("api_retries", API_RETRY_ATTEMPTS),
+                          backoff=cfg.get("api_backoff", API_RETRY_BACKOFF))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"通用多模态调用失败：{e}")
+        return {"ok": False, "error": str(e), "model": ep.get("model")}
+    return {"ok": True, "content": resp.get("content") or "",
+            "latency_ms": resp.get("latency_ms"),
+            "api_total_ms": int((time.time() - t0) * 1000),
+            "model": ep.get("model"), "url": resp.get("url")}
+
+
+def parse_json_loose(content: str) -> dict:
+    """宽松解析模型返回的 JSON（容忍 markdown 代码块 / 前后废话）。失败返回 {}"""
+    if not content:
+        return {}
+    text = content.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        return json.loads(text)
+    except Exception:  # noqa: BLE001
+        pass
+    m = re.search(r"\{.*\}", text, re.S)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:  # noqa: BLE001
+            pass
+    return {}
 
 
 # ===================== 图片质检 =====================

@@ -1,0 +1,53 @@
+{
+  "name": "mjscxt-desktop",
+  "productName": "漫剧生成系统",
+  "version": "2.0.0",
+  "description": "本地 AI 漫剧全流程生产台 · 桌面端外壳（Electron）",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac"
+  },
+  "devDependencies": {
+    "electron": "^32.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.zdljh.mjscxt",
+    "productName": "漫剧生成系统",
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../../app",
+        "to": "app",
+        "filter": [
+          "**/*",
+          "!__pycache__/**",
+          "!**/__pycache__/**"
+        ]
+      },
+      {
+        "from": "../../locales",
+        "to": "locales"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ]
+    }
+  }
+}

@@ -1,0 +1,72 @@
+# ==========================================================================
+# 漫剧生成系统 · 容器编排（P2-7）
+#
+# 用法：
+#   docker compose up -d                # 启动后端（连接宿主机的 ComfyUI）
+#   docker compose logs -f backend      # 看日志
+#   docker compose down                 # 停止
+#
+# 前置：宿主机已启动 ComfyUI（默认 127.0.0.1:8188）。
+#   - Windows / macOS Docker Desktop：host.docker.internal 自动可用
+#   - Linux：需在 extra_hosts 中保留 host-gateway 映射（已配置）
+#
+# 产物与配置持久化：./output、./novels 直接挂载到容器，容器重建不丢数据。
+# 密钥：通过 .env 注入（不要写进 compose 文件），本文件只声明变量名。
+# ==========================================================================
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mjscxt-backend:2.0
+    container_name: mjscxt-backend
+    restart: unless-stopped
+    ports:
+      - "${FLASK_RUN_PORT:-5000}:5000"
+    environment:
+      # 引擎地址：宿主机 ComfyUI
+      COMFYUI_URL: "${COMFYUI_URL:-http://host.docker.internal:8188}"
+      # 部署档案：8G / 16G / server（影响超分与视频默认档位）
+      DEPLOY_PROFILE: "${DEPLOY_PROFILE:-server}"
+      # 密钥由 .env 提供；未提供时后端按「未配置」降级（不会崩）
+      MJSCXT_SECRET_KEY: "${MJSCXT_SECRET_KEY:-}"
+      NVIDIA_API_KEY: "${NVIDIA_API_KEY:-}"
+      # 引擎选择（本地/云端双通道，见 providers/）
+      MJSCXT_PROVIDER_IMAGE: "${MJSCXT_PROVIDER_IMAGE:-comfyui-local}"
+      MJSCXT_PROVIDER_VIDEO: "${MJSCXT_PROVIDER_VIDEO:-comfyui-local}"
+      MJSCXT_PROVIDER_TTS: "${MJSCXT_PROVIDER_TTS:-qwen-tts-local}"
+      TZ: "Asia/Shanghai"
+    volumes:
+      # 产物 / 小说 / 注册表 / 任务库：宿主目录直挂，便于本地查看与备份
+      - ./output:/app/output
+      - ./novels:/app/novels
+      # 项目级 JSON 配置（可选；不存在时后端按默认值启动）
+      - ./ai_config.json:/app/ai_config.json
+      - ./qc_config.json:/app/qc_config.json
+      - ./watermark_config.json:/app/watermark_config.json
+    extra_hosts:
+      # Linux 下让容器能访问宿主机服务（Docker Desktop 自带，重复声明无副作用）
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5000/api/tasks"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ------------------------------------------------------------------------
+  # 可选：Redis 异步队列（默认不启用）。
+  # 当前版本的持久化任务队列用 SQLite（output/tasks.db）+ 线程串行消费，
+  # 单机单 GPU 场景已足够；多机/多 GPU 扩容时再启用 Redis 做分布式队列。
+  # ------------------------------------------------------------------------
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: mjscxt-redis
+  #   restart: unless-stopped
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis-data:/data
+
+# volumes:
+#   redis-data:

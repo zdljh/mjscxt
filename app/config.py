@@ -11,55 +11,10 @@ P0-2 改造：原先硬编码的 ComfyUI / 模型路径已全部改为环境变�
 import logging
 import os
 
+# 环境加载与项目根目录统一由 env_loader 负责（导入即生效，避免模块导入顺序导致 .env 未加载）
+from env_loader import PROJECT_ROOT_DIR, env as _env, env_int as _env_int  # noqa: E402
+
 logger = logging.getLogger(__name__)
-
-# 项目根目录（供各模块复用；不依赖任何外部配置）
-PROJECT_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
-
-def _load_dotenv() -> None:
-    """加载项目根目录 .env（存在则加载；未安装 python-dotenv 时静默跳过）
-
-    只做「不覆盖已有环境变量」的加载，保证系统环境变量优先级更高。
-    """
-    env_path = os.path.join(PROJECT_ROOT_DIR, ".env")
-    if not os.path.isfile(env_path):
-        return
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(env_path, override=False)
-        logger.debug(f"已加载环境配置：{env_path}")
-    except ImportError:
-        # 未安装 python-dotenv：手工解析最简 KEY=VALUE，避免因此无法启动
-        try:
-            with open(env_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    k, v = line.split("=", 1)
-                    k, v = k.strip(), v.strip().strip('"').strip("'")
-                    if k and k not in os.environ:
-                        os.environ[k] = v
-            logger.debug(f"已加载环境配置（内置解析器）：{env_path}")
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f".env 解析失败（忽略，按默认值启动）：{e}")
-
-
-_load_dotenv()
-
-
-def _env(key: str, default: str = "") -> str:
-    """取环境变量（去空白）；空串视为未设置，回退默认值"""
-    val = (os.getenv(key) or "").strip()
-    return val if val else default
-
-
-def _env_int(key: str, default: int) -> int:
-    try:
-        return int(_env(key, str(default)))
-    except (TypeError, ValueError):
-        return default
 
 
 def _norm_path(p: str) -> str:
@@ -201,6 +156,8 @@ CHARACTERS_DIR = os.path.join(ASSETS_DIR, "characters")   # 角色资产（含�
 ITEMS_DIR = os.path.join(ASSETS_DIR, "items")             # 物品资产（含3D多视角）
 SCENES_DIR = os.path.join(ASSETS_DIR, "scenes")           # 场景资产（含3D多视角）
 STORYBOARDS_DIR = os.path.join(PROJECT_OUTPUT_DIR, "storyboards")  # 分镜图（按项目名分子目录）
+# 关键帧目录（P1-2 关键帧驱动视频模式）：output/keyframes/<项目>/shot_NN_start.png + shot_NN_end.png
+KEYFRAMES_DIR = os.path.join(PROJECT_OUTPUT_DIR, "keyframes")
 VIDEOS_DIR = os.path.join(PROJECT_OUTPUT_DIR, "videos")
 FINAL_DIR = os.path.join(PROJECT_OUTPUT_DIR, "final")
 # 超分结果目录（与原始视频严格隔离：原始在 videos/ final/，超分结果在 upscale/）

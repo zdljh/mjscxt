@@ -23,6 +23,7 @@ import time
 import copy
 import shutil
 import logging
+import threading
 import requests
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -38,6 +39,38 @@ from h3_episode_builder import H3EpisodeBuilder
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# ===================== 调用统计（P2-3 成本看板数据源） =====================
+# 只做进程内累计计数，不落盘、不影响业务；analytics 模块按需读取。
+_CALL_STATS = {
+    "prompt_submitted": 0,      # 提交到 /prompt 的次数
+    "prompt_failed": 0,         # 提交失败次数
+    "completed": 0,             # 等待完成的次数（成功）
+    "waited_seconds": 0.0,      # 累计等待时长（GPU 在跑的时间近似值）
+    "segments_generated": 0,    # 累计生成段数（视频）
+}
+_CALL_STATS_LOCK = threading.Lock()
+
+
+def get_call_stats() -> dict:
+    """读取调用统计快照"""
+    return dict(_CALL_STATS)
+
+
+def reset_call_stats() -> dict:
+    """重置调用统计"""
+    for k in list(_CALL_STATS.keys()):
+        _CALL_STATS[k] = 0 if not isinstance(_CALL_STATS[k], float) else 0.0
+    return dict(_CALL_STATS)
+
+
+def _bump(key: str, delta=1) -> None:
+    """安全累加统计项（统计失败绝不影响业务）"""
+    try:
+        _CALL_STATS[key] = _CALL_STATS.get(key, 0) + delta
+    except Exception:  # noqa: BLE001
+        pass
 
 # 前端伪控件 / 虚拟节点（不应提交给后端）
 PSEUDO_WIDGETS = {
@@ -509,9 +542,15 @@ class ComfyUIClient:
 
     def queue_prompt(self, api_prompt: dict) -> str:
         payload = {"prompt": api_prompt, "client_id": self.client_id}
-        result = self._post("/prompt", payload)
+        try:
+            result = self._post("/prompt", payload)
+        except Exception:
+            _bump("prompt_failed")
+            raise
         if "error" in result:
+            _bump("prompt_failed")
             raise RuntimeError(f"ComfyUI 队列错误: {result['error']}")
+        _bump("prompt_submitted")
         return result.get("prompt_id", "")
 
     def get_history(self, prompt_id: str) -> dict:
@@ -526,14 +565,18 @@ class ComfyUIClient:
                     entry = history[prompt_id]
                     status = entry.get("status", {}) or {}
                     if status.get("completed") or status.get("status_str") == "success":
+                        _bump("completed")
+                        _bump("waited_seconds", round(time.time() - start, 2))
                         return entry
                     if status.get("status_str") == "error":
                         logger.error(f"生成出错: {status}")
+                        _bump("waited_seconds", round(time.time() - start, 2))
                         return entry
             except Exception as e:
                 logger.debug(f"轮询历史失败: {e}")
             time.sleep(3)
         logger.warning(f"等待超时: {prompt_id}")
+        _bump("waited_seconds", round(time.time() - start, 2))
         return {}
 
     def get_output_files(self, history: dict, file_ext: str = "") -> List[str]:

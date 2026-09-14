@@ -31,8 +31,9 @@
 │  └──────────────────────────────────────────────────────────────┘  │
 │                                                                    │
 │  ┌─────────────────────── 视频生成 ────────────────────────────┐   │
-│  │  MiniMax H3 (Ref2VA) 10段无缝视频生成                        │   │
-│  │  参考图（角色正面图+场景正面图）→ 768p 视频 + 原生音频        │   │
+│  │  MiniMax H3 (Ref2VA) 动态段数无缝视频生成                     │   │
+│  │  三种模式：逐镜头 / 整集一次 / 关键帧驱动（首尾帧插值）        │   │
+│  │  参考图（分镜图+角色锚点 / 首帧+尾帧）→ 视频 + 原生音频        │   │
 │  │  Turbo LoRA 8步加速 + H3ContinuousSeamlessJoin 无缝拼接      │   │
 │  └─────────────────────────────────────────────────────────────┘   │
 │                                                                    │
@@ -41,6 +42,67 @@
 │  └─────────────────────────────────────────────────────────────┘   │
 └────────────────────────────────────────────────────────────────────┘
 ```
+
+## 🆕 能力增强（对标 GitHub 开源漫剧项目后的优化落地）
+
+本节记录相对初版的实质性增强。所有条目均已在本机实测通过（含真实模型调用）。
+
+### 工程底座
+
+| 能力 | 落地位置 | 说明 |
+|------|---------|------|
+| 配置外置 | `app/config.py` + `.env.example` | 移除全部硬编码路径，`COMFYUI_ROOT` 单点配置自动推导 workflows/input/output/models；换机只改 `.env` |
+| 部署档案 | `DEPLOY_PROFILE` | `8G` / `16G` / `server` 三档，影响超分与视频默认档位 |
+| 密钥加密 | `app/secret_store.py` | Fernet 对称加密；优先级 环境变量 > 加密库 `output/secrets.enc` > json 明文（首次读取**自动迁移**）；加密不可用时拒绝明文落盘 |
+| 持久化任务队列 | `app/task_store.py` | SQLite（`output/tasks.db`）+ 单元级进度 + 串行队列；启动自动 `recycle_interrupted()` |
+| 断点续跑 | `is_unit_done` / `filter_pending_units` | 判据以**磁盘产物**为准——产物存在且非空即视为完成，状态表丢失也能正确跳过 |
+| 统一环境加载 | `app/env_loader.py` | 任一模块单独导入（不经过 `config`）也能读到 `.env`，避免「换入口就丢密钥」 |
+
+### 质量与一致性
+
+| 能力 | 落地位置 | 说明 |
+|------|---------|------|
+| 跨镜头一致性校验 | `app/consistency.py` | 双通道：感知哈希（aHash/dHash，零依赖快筛）+ 多模态语义判定「是否同一角色」；输出差异点 |
+| 一致性看板 | 步骤9 · 一致性看板 | 报告落盘 `output/continuity/<项目>/consistency.json`，按镜头/角色展示相似度与判定 |
+| 原文承载归属 | `_shot_coverage_map` | 每个镜头承载了原文哪几句（4-gram 字面比对，与 `coverage.py` 同口径），画布上直接可见 |
+| 单镜重跑 | `/api/storyboard/retry-shot`、`/api/video/retry-shot` | 只影响目标镜头，不触碰其它产物；分镜重跑同样受质检闸门约束 |
+
+### 生成可控性
+
+| 能力 | 落地位置 | 说明 |
+|------|---------|------|
+| 关键帧驱动视频 | `app/keyframe.py` + 步骤6 | 先用分镜图生成「尾帧」，再把 `[首帧, 尾帧]` 注入 H3 参考图槽位，让运动在两端之间插值；缺尾帧自动退化为首帧单锚并标注 |
+| 可视化分镜画布 | 步骤9 · 分镜画布 | 卡片展示分镜图/视频/尾帧/质检分/一致性分/承载原文；拖拽排序写回剧本 `metadata.shot_order` |
+| 引擎 Provider 抽象 | `app/providers/` | `ImageProvider` / `VideoProvider` / `TTSProvider` 三接口；本地 ComfyUI 实现 + 云端预留（豆包/Wan/Kling/Vidu/Veo/CosyVoice）；`MJSCXT_PROVIDER_*` 切换 |
+| 插件化扩展 | `app/plugin_registry.py` + `app/plugins/` | 生产环节抽象为可注册插件（含依赖拓扑排序）；放入 `app/plugins/*.py` 暴露 `register(reg)` 即被自动加载 |
+
+### 生态与交付
+
+| 能力 | 落地位置 | 说明 |
+|------|---------|------|
+| 剪映草稿导出 | `app/nle_export.py` | `draft_content.json` + `draft_meta_info.json`，可直接在剪映打开继续精修 |
+| Premiere 导出 | `nle_export.export_fcpxml` | FCPXML，供 Premiere / Final Cut |
+| 字幕与帧清单 | `nle_export.export_srt` / `export_frames` | SRT 字幕 + 帧序列清单 |
+| 成本与耗时看板 | `app/analytics.py` + 步骤9 | 任务完成钩子自动登记耗时；ComfyUI 调用计数（提交/失败/等待秒数/生成段数）；按部署档案估算电费 |
+| 国际化 | `locales/zh-CN.json` / `en-US.json` + `/api/i18n` | 前端 `data-i18n` 键值替换，顶栏可切换 |
+| Docker | `Dockerfile` + `docker-compose.yml` | 只容器化后端（ComfyUI 依赖 GPU 与数十 GB 权重，留在宿主机）；产物与任务库挂载持久化 |
+| 桌面端 | `deploy/desktop/` | Electron 外壳，自动编排 ComfyUI + 后端双进程并在退出时回收 |
+
+### 顺带修复的真实缺陷
+
+| 缺陷 | 症状 | 修复 |
+|------|------|------|
+| ComfyUI 状态探测超时过长 | ComfyUI 离线时 `/api/status` 卡死约 4 分钟 | 3s 短超时 + `(connect, read)` 元组 |
+| 任务库全局锁自锁 | `import app` 挂起约 2 分钟 | `threading.Lock` → `RLock` |
+| 分镜图错配 | manifest 只记录部分镜头时，缺项镜头会**错配到别的镜头的分镜图**当关键帧首帧 | `_keyframe_sb_map` 改为合并式映射；`plan_keyframes` 取消数组下标兜底 |
+| 嵌套明文密钥 | `qc_config.json` 的 `endpoint_override.api_key` 未被迁移，仍为明文 | `secret_store` 递归处理嵌套结构 |
+| 单独导入即失败 | 只 `import qc_client` 时 `.env` 未加载，主密钥取不到、解密失败 | 新增 `env_loader.py` 统一加载 |
+| 参考图静默丢失 | 前端传结构不完整的角色对象时，视频退化为无角色锚点 | 后端 `_collect_asset_refs` 从磁盘资产兜底 |
+
+> ⚠️ **密钥提醒**：若 `ai_config.json` / `qc_config.json` 曾以明文形式进过 git、云盘同步或被分享，
+> 请到对应平台**轮换密钥**——加密只防未来，已暴露的无法追回。
+
+详见 [`优化方案_对标GitHub开源漫剧项目.md`](优化方案_对标GitHub开源漫剧项目.md) 与 [`deploy/README.md`](deploy/README.md)。
 
 ## 📦 图片资产三类规范
 
