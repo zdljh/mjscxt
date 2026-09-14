@@ -1,0 +1,290 @@
+"""
+剧本生成器 - 使用云端 LLM 生成结构化分镜脚本
+图片资产分为三大类：角色（多视图）、物品（3D多视角）、场景（3D多视角）
+"""
+import json
+import os
+import logging
+from typing import List, Dict, Optional
+from datetime import datetime
+
+from config import ANTHROPIC_API_KEY, LLM_PROVIDER, SCRIPT_DIR
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Claude 模型（可用环境变量覆盖）
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514")
+# 系统提示词：Anthropic Messages API 要求 system 必须是顶层参数，不能放进 messages
+SYSTEM_PROMPT = "你是一个专业的AI漫剧编剧，擅长生成结构化的分镜脚本。你输出的JSON必须合法，不包含markdown代码块标记。"
+# 免 Key 兜底剧本（按顺序探测）
+FALLBACK_SCRIPT_NAMES = ["剑心初醒_兼容版.json", "测试_剑心初醒_兼容版.json"]
+
+
+class ScriptGenerator:
+    """剧本生成器"""
+
+    def __init__(self, api_key: str = ANTHROPIC_API_KEY, provider: str = LLM_PROVIDER):
+        self.provider = provider
+        self.api_key = api_key
+        self.client = None
+
+        if provider == "anthropic":
+            if not api_key:
+                logger.warning("ANTHROPIC_API_KEY 未设置，剧本生成将在调用时报错")
+            else:
+                import anthropic  # 延迟导入
+                self.client = anthropic.Anthropic(api_key=api_key)
+
+    def generate_script(self,
+                       theme: str,
+                       episodes: int = 1,
+                       duration_per_episode: int = 60,
+                       style: str = "古风仙侠",
+                       target_audience: str = "年轻观众") -> Dict:
+        """生成完整剧本；云端失败或无 Key 时自动回退到本地兜底剧本"""
+
+        if self.provider != "anthropic":
+            raise ValueError(f"不支持的 LLM 提供商: {self.provider}")
+
+        if self.client is None:
+            logger.warning("ANTHROPIC_API_KEY 未设置，改用本地兜底剧本")
+            fallback = self.load_fallback_script()
+            if fallback:
+                return fallback
+            raise RuntimeError("ANTHROPIC_API_KEY 未设置，且未找到本地兜底剧本，无法生成剧本")
+
+        try:
+            return self._generate_with_claude(theme, episodes, duration_per_episode, style, target_audience)
+        except Exception as e:
+            logger.error(f"Claude 生成剧本失败: {e}")
+            fallback = self.load_fallback_script()
+            if fallback:
+                logger.warning("已回退到本地兜底剧本（免 Key 演示模式）")
+                fallback.setdefault("metadata", {})["fallback_reason"] = str(e)
+                return fallback
+            raise
+
+    def load_fallback_script(self) -> Optional[Dict]:
+        """加载本地兜底剧本（A 版 Schema，含 shots[] / prompt_h3）"""
+        if not os.path.isdir(SCRIPT_DIR):
+            return None
+        for name in FALLBACK_SCRIPT_NAMES:
+            path = os.path.join(SCRIPT_DIR, name)
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    script = json.load(f)
+                logger.info(f"已加载兜底剧本: {path}")
+                return script
+        # 兜底：目录中任意含 shots 的剧本
+        for fn in sorted(os.listdir(SCRIPT_DIR)):
+            if not fn.lower().endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(SCRIPT_DIR, fn), "r", encoding="utf-8") as f:
+                    script = json.load(f)
+                if script.get("shots"):
+                    logger.info(f"已加载兜底剧本: {fn}")
+                    return script
+            except Exception:
+                continue
+        logger.warning("未找到可用的本地兜底剧本")
+        return None
+
+    def _generate_with_claude(self, theme: str, episodes: int,
+                               duration: int, style: str, audience: str) -> Dict:
+        """使用 Claude API 生成剧本"""
+
+        prompt = f"""你是一个专业的AI漫剧编剧。请为以下主题生成详细的分镜脚本。
+
+主题：{theme}
+风格：{style}
+目标观众：{audience}
+集数：{episodes}集
+每集约{duration}秒
+
+请严格按照以下JSON格式输出（不要添加任何其他内容）：
+
+{{
+  "title": "剧集标题",
+  "theme": "{theme}",
+  "style": "{style}",
+  "characters": [
+    {{
+      "name": "角色名",
+      "age": "年龄描述",
+      "appearance": "外貌描述：发型、五官、体型、服装、配饰（用于生成角色参考图，需详细具体）",
+      "personality": "性格特点",
+      "voice_style": "声音特点",
+      "reference_prompt_zh": "中文角色图生成提示词（含：视角、姿态、表情、服装细节、画风）",
+      "reference_prompt_en": "English character image generation prompt"
+    }}
+  ],
+  "items": [
+    {{
+      "name": "物品名",
+      "category": "武器/法宝/道具/服饰",
+      "appearance": "物品外观描述：形状、材质、颜色、纹理、尺寸",
+      "owner": "所属角色（可为空）",
+      "reference_prompt_zh": "中文物品图生成提示词（含：3D渲染、白底展示、材质细节）",
+      "reference_prompt_en": "English item image generation prompt"
+    }}
+  ],
+  "scenes": [
+    {{
+      "name": "场景名",
+      "location": "地点类型：室内/室外/山川/建筑",
+      "appearance": "场景外观描述：环境布局、建筑风格、光照氛围、季节天气",
+      "reference_prompt_zh": "中文场景图生成提示词（含：构图、透视、光影、氛围）",
+      "reference_prompt_en": "English scene image generation prompt"
+    }}
+  ],
+  "shots": [
+    {{
+      "shot_id": 1,
+      "episode": 1,
+      "duration": 5,
+      "camera": "近景/中景/全景/特写",
+      "location": "场景名（对应scenes中的name）",
+      "description": "画面描述（详细，50字以内）",
+      "dialogue": "角色台词",
+      "emotion": "情绪",
+      "audio_cues": "音效/音乐提示",
+      "prompt_h3": "H3视频生成提示词（英文，包含角色动作、镜头运动、环境描述）",
+      "characters_in_shot": ["角色名列表"],
+      "items_in_shot": ["物品名列表"]
+    }}
+  ],
+  "production_notes": {{
+    "total_shots": 12,
+    "estimated_duration": 60,
+    "style_guide": "整体风格说明"
+  }}
+}}
+
+要求：
+1. characters：每个角色要有详细的外貌描述（发型/五官/服装/配饰），方便生成多视图参考图
+2. items：提取剧情中出现的重要物品（武器、法宝、关键道具），通常2-5个
+3. scenes：提取剧情涉及的主要场景，通常3-6个
+4. shots：至少10-15个分镜，每个分镜5-8秒，标注出场角色和物品
+5. 输出必须是合法的JSON格式，不要包含任何注释"""
+
+        message = self.client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=8000,
+            # 修复：Anthropic Messages API 要求 system 为顶层参数，messages 中不得出现 system role
+            system=SYSTEM_PROMPT,
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+
+        content = message.content[0].text if message.content else ""
+
+        # 解析 JSON
+        try:
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0]
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0]
+            script = json.loads(content.strip())
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON解析失败: {e}")
+            logger.error(f"原始内容: {content[:500]}")
+            script = self._parse_fallback(content)
+
+        return script
+
+    def _parse_fallback(self, content: str) -> Dict:
+        """降级解析"""
+        try:
+            start = content.find("{")
+            end = content.rfind("}")
+            if start != -1 and end != -1:
+                return json.loads(content[start:end+1])
+        except Exception:
+            pass
+        return {
+            "title": "未命名剧本",
+            "characters": [],
+            "items": [],
+            "scenes": [],
+            "shots": [],
+            "production_notes": {}
+        }
+
+    def save_script(self, script: Dict, project_name: str) -> str:
+        """保存剧本到文件"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        os.makedirs(SCRIPT_DIR, exist_ok=True)
+        filename = f"{project_name}_{timestamp}.json"
+        filepath = os.path.join(SCRIPT_DIR, filename)
+
+        script["metadata"] = {
+            "generated_at": datetime.now().isoformat(),
+            "project_name": project_name,
+            "provider": self.provider
+        }
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(script, f, ensure_ascii=False, indent=2)
+
+        logger.info(f"剧本已保存: {filepath}")
+        return filepath
+
+    def load_script(self, filepath: str) -> Dict:
+        """加载剧本文件"""
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return json.load(f)
+
+    # ===== 资产提示词提取 =====
+
+    def get_character_prompts(self, script: Dict) -> List[Dict]:
+        """提取角色生成提示词"""
+        return [
+            {
+                "name": c["name"],
+                "prompt_zh": c.get("reference_prompt_zh", c.get("appearance", "")),
+                "prompt_en": c.get("reference_prompt_en", ""),
+                "appearance": c.get("appearance", "")
+            }
+            for c in script.get("characters", [])
+        ]
+
+    def get_item_prompts(self, script: Dict) -> List[Dict]:
+        """提取物品生成提示词"""
+        return [
+            {
+                "name": i["name"],
+                "category": i.get("category", "道具"),
+                "prompt_zh": i.get("reference_prompt_zh", i.get("appearance", "")),
+                "prompt_en": i.get("reference_prompt_en", ""),
+                "appearance": i.get("appearance", "")
+            }
+            for i in script.get("items", [])
+        ]
+
+    def get_scene_prompts(self, script: Dict) -> List[Dict]:
+        """提取场景生成提示词"""
+        return [
+            {
+                "name": s["name"],
+                "location": s.get("location", ""),
+                "prompt_zh": s.get("reference_prompt_zh", s.get("appearance", "")),
+                "prompt_en": s.get("reference_prompt_en", ""),
+                "appearance": s.get("appearance", "")
+            }
+            for s in script.get("scenes", [])
+        ]
+
+    def get_video_prompts(self, script: Dict) -> List[Dict]:
+        """提取视频生成提示词"""
+        return [
+            {
+                "shot_id": s["shot_id"],
+                "prompt": s.get("prompt_h3", s.get("description", "")),
+                "duration": s.get("duration", 5),
+                "dialogue": s.get("dialogue", "")
+            }
+            for s in script.get("shots", [])
+        ]

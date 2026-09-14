@@ -1,0 +1,100 @@
+# ===================== 密钥与私有配置（严禁入库） =====================
+# 含 API Key 明文，绝不提交
+ai_config.json
+llm_config.json
+qc_config.json
+watermark_config.json
+ref_img_path.txt
+.env
+.env.*
+!.env.example
+profiles/*.env
+profiles/local.env
+
+# ===================== 运行产物（体积大，不入库） =====================
+# output/ 下全部为生成产物（图/视频/质检/超分），总计数百 MB
+output/
+!output/projects/index.json
+temp/
+
+# 小说原始文本与解析产物（含版权内容，不入库）
+novels/
+
+# ===================== 代码备份（个人历史快照，不入库） =====================
+backup_code_*/
+workflows_backup/
+
+# ===================== Python =====================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 虚拟环境
+venv/
+ENV/
+env/
+.venv/
+.conda/
+
+# ===================== 日志 =====================
+*.log
+logs/
+
+# ===================== 编辑器 / 系统 =====================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===================== 测试与临时 =====================
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+*.tmp
+_tmp_*
+_bak_*
+
+# ===================== 模型权重（本地已有，不入库） =====================
+*.safetensors
+*.ckpt
+*.pth
+*.onnx
+
+# ===================== 大体积中间 JSON（工作流调试产物） =====================
+h3_fixed.json
+h3_test_workflow.json
+h3_api_converted.json
+h3_submit.json
+h3_example_fixed.json
+prompt_success.json
+prompt_template.json
+test_wf.json
+test_wf_clean.json
+场景生成_clean.json
+models_avail.json
+qc_config.backup_*.json
