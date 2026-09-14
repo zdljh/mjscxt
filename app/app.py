@@ -44,11 +44,13 @@ import ai_config
 import ai_chat
 import novel_to_script
 import analytics
+import autopilot
 import consistency
 import continuity
 import coverage
 import keyframe
 import nle_export
+import pipeline
 import plugin_registry
 import project_store
 import providers
@@ -116,10 +118,74 @@ script_gen = ScriptGenerator()
 comfyui_client = ComfyUIClient()
 video_processor = VideoPostProcessor()
 
+# 无人值守托管：若存在已启用的托管计划，服务启动后自动接着生产（断点续跑）
+# 用一个短延时线程延后启动，避免拖慢 Flask 首次响应；失败不影响服务可用性。
+def _autopilot_boot():
+    try:
+        enabled = autopilot.enabled_projects()
+        if not enabled:
+            app.logger.info("托管：没有已启用的项目，守护进程待命（可在控制台一键开启）")
+            return
+        app.logger.info("托管：检测到 %d 个启用项目，自动恢复生产", len(enabled))
+        autopilot.resume()
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning(f"托管自动恢复失败（不影响服务）：{e}")
+
+
+try:
+    threading.Timer(3.0, _autopilot_boot).start()
+except Exception as _e:  # noqa: BLE001
+    app.logger.warning(f"托管启动调度失败：{_e}")
+
 
 def _safe_project(name: str) -> str:
     """项目名安全化（与项目注册表的项目键规则保持一致）"""
     return project_store.safe_key(name)
+
+
+# ==========================================================================
+# 集级产物目录（多集自动生产的必要条件）
+# --------------------------------------------------------------------------
+# 背景：配音文件名早已含集号（ep{NN}_shot{NN}_角色.wav），但分镜图 / 尾帧 / 视频
+# 历史上按 shot_NN 平铺存放，**多集生产会互相覆盖**——第 2 集的分镜图会覆盖第 1 集的。
+# 手动流程一次只做一集，问题不暴露；24 小时托管必须解决。
+#
+# 策略：第 1 集沿用平铺目录（现有项目、现有前端、现有数据完全不受影响），
+#       第 2 集起写入 epNN/ 子目录。读取时优先集目录、回落平铺目录，兼容旧数据。
+# ==========================================================================
+
+def _ep_dir(base_dir: str, episode_no=None) -> str:
+    """写入用的集级产物目录（第 1 集 = 平铺目录）"""
+    try:
+        ep = int(episode_no or 1)
+    except (TypeError, ValueError):
+        ep = 1
+    if ep <= 1:
+        return base_dir
+    return os.path.join(base_dir, f"ep{ep:02d}")
+
+
+def _ep_read_dir(base_dir: str, project: str, episode_no=None) -> str:
+    """读取用的集级产物目录：优先集目录，不存在则回落平铺目录（兼容旧数据）"""
+    flat = os.path.join(base_dir, project)
+    d = _ep_dir(flat, episode_no)
+    if os.path.isdir(d) and d != flat:
+        return d
+    return flat if os.path.isdir(flat) else d
+
+
+def _ep_of_script(script: dict, fallback=None):
+    """从剧本里取集号（metadata.episode_no > 顶层 episode_no > 兜底）"""
+    if not isinstance(script, dict):
+        return fallback
+    meta = script.get("metadata") or {}
+    for v in (meta.get("episode_no"), script.get("episode_no"), fallback):
+        try:
+            if v is not None and str(v).strip() != "":
+                return int(v)
+        except (TypeError, ValueError):
+            continue
+    return fallback
 
 
 def _episode_schema_defaults(project_name: str, shots: list) -> dict:
@@ -605,7 +671,7 @@ def _consistency_collect(project_name: str, episode_no: int = None) -> dict:
 
     # 分镜图 + 剧本角色归属（统一用数字键，保证文件名/剧本/manifest 三方对齐）
     shot_images = {}
-    sb_dir = os.path.join(STORYBOARDS_DIR, project_name)
+    sb_dir = _ep_read_dir(STORYBOARDS_DIR, project_name, episode_no)
 
     # 剧本 → 每镜角色
     shot_chars = {}
@@ -847,8 +913,8 @@ def _shot_coverage_map(script: dict) -> dict:
     return out
 
 
-def _keyframes_dir(project_name: str) -> str:
-    d = os.path.join(KEYFRAMES_DIR, _safe_project(project_name))
+def _keyframes_dir(project_name: str, episode_no=None) -> str:
+    d = _ep_dir(os.path.join(KEYFRAMES_DIR, _safe_project(project_name)), episode_no)
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -890,7 +956,8 @@ def _collect_asset_refs(project: str) -> tuple:
 # P1-2 关键帧驱动视频模式
 # ==========================================================================
 
-def _keyframe_sb_map(project_name: str, script: dict = None, storyboards=None) -> dict:
+def _keyframe_sb_map(project_name: str, script: dict = None, storyboards=None,
+                     episode_no=None) -> dict:
     """取该项目的分镜图映射 {shot键: 本地路径}
 
     键同时注册「数字键」与「shot_NN 键」（如 "1" 与 "shot_01"），
@@ -920,7 +987,8 @@ def _keyframe_sb_map(project_name: str, script: dict = None, storyboards=None) -
             if local:
                 _put(k, local)
     # ② 目录扫描作为基底（覆盖所有实际存在的分镜图）
-    sb_dir = os.path.join(STORYBOARDS_DIR, project)
+    sb_dir = _ep_read_dir(STORYBOARDS_DIR, project,
+                          episode_no if episode_no is not None else _ep_of_script(script))
     if not sb_map and os.path.isdir(sb_dir):
         for fn in sorted(os.listdir(sb_dir)):
             if fn.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
@@ -956,8 +1024,8 @@ def api_keyframes_plan():
     if not shots:
         return jsonify({"success": False, "error": "该剧本没有镜头数据",
                         "project": project}), 404
-    kf_dir = _keyframes_dir(project)
-    sb_map = _keyframe_sb_map(project, script)
+    kf_dir = _keyframes_dir(project, episode_no)
+    sb_map = _keyframe_sb_map(project, script, episode_no=episode_no)
     plan = keyframe.plan_keyframes(shots, sb_map, kf_dir,
                                   only_missing=(request.args.get('only_missing', '1') != '0'))
     return jsonify({"success": True, "project": project,
@@ -981,8 +1049,9 @@ def api_keyframes_generate():
     shots = script.get("shots") or []
     if not shots:
         return jsonify({"success": False, "error": "没有镜头数据"}), 400
-    kf_dir = _keyframes_dir(project)
-    sb_map = _keyframe_sb_map(project, script, data.get('storyboards'))
+    _kf_ep = _ep_of_script(script, data.get('episode_no'))
+    kf_dir = _keyframes_dir(project, _kf_ep)
+    sb_map = _keyframe_sb_map(project, script, data.get('storyboards'), episode_no=_kf_ep)
     only_missing = bool(data.get('only_missing', True))
     seed = data.get('seed')
     timeout = int(data.get('timeout') or 900)
@@ -1077,7 +1146,9 @@ def api_keyframes_file(filename):
 def api_keyframes_list(project_name):
     """列出项目已有首尾帧"""
     project = _safe_project(os.path.basename(project_name.rstrip('/')))
-    kf_dir = os.path.join(KEYFRAMES_DIR, project)
+    _kl_ep = request.args.get('episode_no')
+    _kl_sub = f"ep{int(_kl_ep):02d}/" if str(_kl_ep or '').strip() and int(_kl_ep) > 1 else ""
+    kf_dir = _ep_read_dir(KEYFRAMES_DIR, project, _kl_ep)
     items = []
     if os.path.isdir(kf_dir):
         for fn in sorted(os.listdir(kf_dir)):
@@ -1086,7 +1157,7 @@ def api_keyframes_list(project_name):
             seq = "".join(ch for ch in fn.split("_")[1] if ch.isdigit()) if "_" in fn else ""
             kind = "end" if "_end." in fn else ("start" if "_start." in fn else "other")
             items.append({"file": fn, "shot": int(seq) if seq else None, "kind": kind,
-                          "url": f"/api/keyframes/file/{project}/{fn}",
+                          "url": f"/api/keyframes/file/{project}/{_kl_sub}{fn}",
                           "size": os.path.getsize(os.path.join(kf_dir, fn))})
     return jsonify({"success": True, "project": project, "dir": kf_dir,
                     "count": len(items), "items": items})
@@ -1111,9 +1182,11 @@ def api_storyboard_canvas(project_name):
                         "project": project}), 404
     meta = script.get("metadata") or {}
 
-    # 分镜图 + 质检
-    sb_map = _keyframe_sb_map(project, script)
-    sb_dir = os.path.join(STORYBOARDS_DIR, project)
+    # 分镜图 + 质检（集级目录：第 1 集平铺，第 2 集起含 epNN）
+    _cv_ep = _ep_of_script(script, request.args.get('episode_no'))
+    _cv_sub = f"ep{int(_cv_ep):02d}/" if _cv_ep and int(_cv_ep) > 1 else ""
+    sb_map = _keyframe_sb_map(project, script, episode_no=_cv_ep)
+    sb_dir = _ep_read_dir(STORYBOARDS_DIR, project, _cv_ep)
     sb_manifest = {}
     mpath = os.path.join(sb_dir, "storyboard_manifest.json")
     if os.path.isfile(mpath):
@@ -1126,7 +1199,7 @@ def api_storyboard_canvas(project_name):
             app.logger.warning(f"分镜 manifest 读取失败：{e}")
 
     # 视频
-    vid_dir = os.path.join(VIDEOS_DIR, project)
+    vid_dir = _ep_dir(os.path.join(VIDEOS_DIR, project), _cv_ep)
     vid_map = {}
     if os.path.isdir(vid_dir):
         for fn in sorted(os.listdir(vid_dir)):
@@ -1167,7 +1240,7 @@ def api_storyboard_canvas(project_name):
         idx = {str(s.get("shot_id")): i for i, s in enumerate(shots)}
         ordered = sorted(shots, key=lambda s: (order.index(str(s.get("shot_id")))
                                                if str(s.get("shot_id")) in order else 10 ** 6))
-    kf_dir = os.path.join(KEYFRAMES_DIR, project)
+    kf_dir = _ep_dir(os.path.join(KEYFRAMES_DIR, project), _cv_ep)
     cards = []
     for i, s in enumerate(ordered):
         sid = s.get("shot_id", i + 1)
@@ -1192,7 +1265,8 @@ def api_storyboard_canvas(project_name):
             "items_in_shot": s.get("items_in_shot") or [],
             "storyboard": {
                 "exists": bool(sb_file),
-                "url": f"/api/storyboards/file/{project}/shot_{seq:02d}.png" if sb_file else "",
+                "url": (f"/api/storyboards/file/{project}/{_cv_sub}shot_{seq:02d}.png"
+                        if sb_file else ""),
                 "path": sb_file or "",
                 "qc": sb_item.get("qc") or {},
                 "success": bool(sb_item.get("success")),
@@ -1201,14 +1275,15 @@ def api_storyboard_canvas(project_name):
             },
             "video": {
                 "exists": bool(vid),
-                "url": f"/api/videos/{project}/{os.path.basename(vid)}" if vid else "",
+                "url": (f"/api/videos/{project}/{_cv_sub}{os.path.basename(vid)}"
+                        if vid else ""),
                 "path": vid or "",
             },
             "keyframe": {
                 "start": bool(sb_file),
                 "end_exists": os.path.isfile(kf_end),
-                "end_url": f"/api/keyframes/file/{project}/shot_{seq:02d}_end.png"
-                           if os.path.isfile(kf_end) else "",
+                "end_url": (f"/api/keyframes/file/{project}/{_cv_sub}shot_{seq:02d}_end.png"
+                            if os.path.isfile(kf_end) else ""),
             },
             "consistency": consistency_by_shot.get(k) or {},
             "coverage": {"units": cover_map.get(str(sid)) or [],
@@ -1321,7 +1396,8 @@ def api_storyboard_retry_shot():
     # 质检（若已开启）：不达标同样阻断入库（与批量链路一致）
     qc_cfg = _qc_load_cfg()
     qc_on = qc_client.image_qc_ready(qc_cfg)
-    dst_dir = os.path.join(STORYBOARDS_DIR, project)
+    _ep = _ep_of_script(script, data.get('episode_no'))
+    dst_dir = _ep_dir(os.path.join(STORYBOARDS_DIR, project), _ep)
     os.makedirs(dst_dir, exist_ok=True)
     dst = os.path.join(dst_dir, f"shot_{seq:02d}.png")
     verdict = None
@@ -1348,18 +1424,27 @@ def api_storyboard_retry_shot():
                         "verdict": verdict, "scratch": scratch}), 200
     shutil.copy2(scratch, dst)
     # 同步更新 manifest 中该镜条目
-    _update_storyboard_manifest_shot(project, shot_id, seq, dst, prompt, refs, verdict, gate)
+    _update_storyboard_manifest_shot(project, shot_id, seq, dst, prompt, refs, verdict, gate,
+                                     episode_no=_ep)
+    _sub = f"ep{int(_ep):02d}/" if _ep and int(_ep) > 1 else ""
     return jsonify({"success": True, "project": project, "shot_id": shot_id, "seq": seq,
                     "path": dst,
-                    "url": f"/api/storyboards/file/{project}/shot_{seq:02d}.png",
+                    "url": f"/api/storyboards/file/{project}/{_sub}shot_{seq:02d}.png",
                     "prompt": prompt, "ref_count": len(refs),
                     "qc": verdict})
 
 
 def _update_storyboard_manifest_shot(project: str, shot_id, seq: int, dst: str,
-                                     prompt: str, refs: list, verdict=None, gate=None):
-    """把单镜重跑结果写回分镜 manifest（保持既有 schema 不变）"""
-    mpath = os.path.join(STORYBOARDS_DIR, project, "storyboard_manifest.json")
+                                     prompt: str, refs: list, verdict=None, gate=None,
+                                     episode_no=None):
+    """把单镜重跑结果写回分镜 manifest（保持既有 schema 不变）
+
+    集级目录：第 1 集沿用平铺，第 2 集起写 epNN/ 下的 manifest 与 URL。
+    """
+    _flat = os.path.join(STORYBOARDS_DIR, project)
+    mpath = os.path.join(_ep_dir(_flat, episode_no), "storyboard_manifest.json")
+    _sub = os.path.basename(_ep_dir(_flat, episode_no)) if _ep_dir(_flat, episode_no) != _flat else ""
+    _url_prefix = f"{project}/{_sub}/" if _sub else f"{project}/"
     manifest = {}
     if os.path.isfile(mpath):
         try:
@@ -1371,7 +1456,7 @@ def _update_storyboard_manifest_shot(project: str, shot_id, seq: int, dst: str,
     target = next((s for s in items if _shot_num_key(s.get("shot_id")) == _shot_num_key(shot_id)), None)
     entry = {
         "shot_id": shot_id, "success": True,
-        "file": dst, "url": f"/api/storyboards/file/{project}/shot_{seq:02d}.png",
+        "file": dst, "url": f"/api/storyboards/file/{_url_prefix}shot_{seq:02d}.png",
         "prompt": prompt, "ref_count": len(refs),
         "refs": {r[0]: os.path.basename(os.path.dirname(r[2])) for r in refs},
         "regenerated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1439,11 +1524,13 @@ def api_video_retry_shot():
         if main_char_img or ref_imgs:
             app.logger.info(f"[retry-shot] 参考图已由磁盘资产补齐："
                             f"角色 {len(main_char_img)} / 合计 {len(ref_imgs)}")
-    sb_map = _keyframe_sb_map(project, script)
+    _rs_ep = _ep_of_script(script, data.get('episode_no'))
+    _rs_sub = f"ep{int(_rs_ep):02d}/" if _rs_ep and int(_rs_ep) > 1 else ""
+    sb_map = _keyframe_sb_map(project, script, episode_no=_rs_ep)
     sb_local = sb_map.get(_shot_num_key(shot_id))
 
     if mode == 'keyframe':
-        kf_dir = os.path.join(KEYFRAMES_DIR, project)
+        kf_dir = _ep_dir(os.path.join(KEYFRAMES_DIR, project), _rs_ep)
         end_p = os.path.join(kf_dir, f"shot_{seq:02d}_end.png")
         if not (sb_local and os.path.isfile(sb_local)):
             return jsonify({"success": False, "error": "缺少分镜图，无法关键帧驱动"}), 400
@@ -1483,13 +1570,13 @@ def api_video_retry_shot():
     files = (result or {}).get('files') or []
     if not files or not os.path.isfile(files[0]):
         return jsonify({"success": False, "error": "ComfyUI 未返回视频文件"}), 500
-    vid_dir = os.path.join(VIDEOS_DIR, project)
+    vid_dir = _ep_dir(os.path.join(VIDEOS_DIR, project), _rs_ep)
     os.makedirs(vid_dir, exist_ok=True)
     dst = os.path.join(vid_dir, f"shot_{seq:02d}.mp4")
     shutil.move(files[0], dst)
     return jsonify({"success": True, "project": project, "shot_id": shot_id, "seq": seq,
                     "mode": mode, "path": dst,
-                    "url": f"/api/videos/{project}/{os.path.basename(dst)}",
+                    "url": f"/api/videos/{project}/{_rs_sub}{os.path.basename(dst)}",
                     "ref_count": len(seg["reference_images"]), "duration": seg["duration"]})
 
 
@@ -2108,10 +2195,15 @@ def _shot_seq(shot_id, fallback: int) -> int:
 
 
 def _storyboard_worker(task_id: str, project_name: str, shots: list,
-                       char_idx: dict, item_idx: dict, scene_idx: dict):
-    """后台分镜图生成任务：逐镜头生成并落盘 output/storyboards/<项目>/shot_XX.png"""
-    out_dir = os.path.join(STORYBOARDS_DIR, project_name)
+                       char_idx: dict, item_idx: dict, scene_idx: dict,
+                       episode_no=None):
+    """后台分镜图生成任务：逐镜头生成并落盘 output/storyboards/<项目>[/epNN]/shot_XX.png"""
+    out_dir = _ep_dir(os.path.join(STORYBOARDS_DIR, project_name), episode_no)
     os.makedirs(out_dir, exist_ok=True)
+    try:
+        _episode = int(episode_no) if str(episode_no or "").strip() else 1
+    except (TypeError, ValueError):
+        _episode = 1
     manifest_shots = []
     try:
         for i, shot in enumerate(shots):
@@ -2290,7 +2382,8 @@ def api_generate_storyboards():
         }
 
     thread = threading.Thread(target=_storyboard_worker,
-                              args=(task_id, project_name, shots, char_idx, item_idx, scene_idx))
+                              args=(task_id, project_name, shots, char_idx, item_idx, scene_idx,
+                                    data.get('episode_no')))
     thread.daemon = True
     thread.start()
     return jsonify({"task_id": task_id, "status": "started", "total": len(shots),
@@ -2301,7 +2394,7 @@ def api_generate_storyboards():
 def api_storyboard_manifest(project_name):
     """读取已生成的分镜图清单（用于页面回看）"""
     project = _safe_project(os.path.basename(project_name.rstrip('/')))
-    out_dir = os.path.join(STORYBOARDS_DIR, project)
+    out_dir = _ep_read_dir(STORYBOARDS_DIR, project, request.args.get('episode_no'))
     manifest_path = os.path.join(out_dir, "storyboard_manifest.json")
     if os.path.exists(manifest_path):
         with open(manifest_path, "r", encoding="utf-8") as f:
@@ -2408,308 +2501,332 @@ def api_generate_videos():
             "episode_stats": episode_stats,
         }
 
-    def video_worker():
+def _video_generate_worker(task_id, project_name, shots, character_refs,
+                          scene_refs, storyboards, use_storyboard, mode,
+                          timeout_per_segment, episode_tag, episode_no=None):
+    """逐镜/整集/关键帧三种模式的视频生成（后台任务体，可被路由与流水线复用）
+
+    从 /api/videos/generate 抽出的模块级实现：原闭包变量（项目名、镜头、参考图、
+    模式等）改为显式参数，业务逻辑不变。抽出的目的是让自动生产流水线
+    （pipeline.py / autopilot.py）能直接复用同一条视频生成链路，避免两套实现漂移。
+
+    episode_no：集级目录隔离（第 1 集沿用平铺，第 2 集起写 epNN/），
+    避免多集自动生产时 shot_NN.mp4 互相覆盖。
+    """
+    try:
+        videos_dir = _ep_dir(os.path.join(VIDEOS_DIR, project_name), episode_no)
+        os.makedirs(videos_dir, exist_ok=True)
         try:
-            videos_dir = os.path.join(VIDEOS_DIR, project_name)
-            os.makedirs(videos_dir, exist_ok=True)
+            _epn = int(episode_no) if str(episode_no or "").strip() else 1
+        except (TypeError, ValueError):
+            _epn = 1
+        # 视频 URL 前缀：第 2 集起带 epNN 段（与 _ep_dir 的落盘位置一致）
+        _vurl = (f"/api/videos/{project_name}/ep{_epn:02d}" if _epn > 1
+                 else f"/api/videos/{project_name}")
 
-            ref_imgs = _collect_reference_images(character_refs, scene_refs)
-            main_char_img = _collect_reference_images(character_refs[:1], [])
-            app.logger.info(f"视频参考图解析结果: {ref_imgs}；主角锚点: {main_char_img}")
+        ref_imgs = _collect_reference_images(character_refs, scene_refs)
+        main_char_img = _collect_reference_images(character_refs[:1], [])
+        app.logger.info(f"视频参考图解析结果: {ref_imgs}；主角锚点: {main_char_img}")
 
-            # 分镜图映射（步骤5产物）→ 作为 H3 的 <Picture 1> 构图基准
-            # 修复：改用合并式映射（目录扫描 + manifest + 前端传入）。
-            # 原实现只认前端传入的 storyboards，前端漏传某镜时该镜会静默退化为
-            # 「无分镜图参考」，与用户所见不符。
-            sb_map = _keyframe_sb_map(project_name, None, storyboards)
-            app.logger.info(f"分镜图参考映射: {sorted(sb_map.keys())}")
+        # 分镜图映射（步骤5产物）→ 作为 H3 的 <Picture 1> 构图基准
+        # 修复：改用合并式映射（目录扫描 + manifest + 前端传入）。
+        # 原实现只认前端传入的 storyboards，前端漏传某镜时该镜会静默退化为
+        # 「无分镜图参考」，与用户所见不符。
+        sb_map = _keyframe_sb_map(project_name, None, storyboards, episode_no=episode_no)
+        app.logger.info(f"分镜图参考映射: {sorted(sb_map.keys())}")
 
-            # 关键帧驱动模式：取该项目尾帧目录，并按镜登记 [首帧, 尾帧]
-            kf_end_map = {}
-            if mode == 'keyframe':
-                kf_dir = os.path.join(KEYFRAMES_DIR, project_name)
-                for i, _s in enumerate(shots):
-                    _sid = _s.get('shot_id', i + 1)
-                    _seq = _shot_seq(_sid, i + 1)
-                    _end = os.path.join(kf_dir, f"shot_{_seq:02d}_end.png")
-                    if os.path.isfile(_end):
-                        kf_end_map[str(_sid)] = _end
-                        kf_end_map[f"shot_{_seq:02d}"] = _end
-                app.logger.info(f"[keyframe] 尾帧就绪 {len(set(kf_end_map.values()))}/{len(shots)} 镜")
+        # 关键帧驱动模式：取该项目尾帧目录，并按镜登记 [首帧, 尾帧]
+        kf_end_map = {}
+        if mode == 'keyframe':
+            kf_dir = _ep_dir(os.path.join(KEYFRAMES_DIR, project_name), episode_no)
+            for i, _s in enumerate(shots):
+                _sid = _s.get('shot_id', i + 1)
+                _seq = _shot_seq(_sid, i + 1)
+                _end = os.path.join(kf_dir, f"shot_{_seq:02d}_end.png")
+                if os.path.isfile(_end):
+                    kf_end_map[str(_sid)] = _end
+                    kf_end_map[f"shot_{_seq:02d}"] = _end
+            app.logger.info(f"[keyframe] 尾帧就绪 {len(set(kf_end_map.values()))}/{len(shots)} 镜")
 
-            def _shot_segment(shot, seq):
-                """把一个分镜转成 H3 工作流的一个「段」（提示词 + 时长 + 参考图）
+        def _shot_segment(shot, seq):
+            """把一个分镜转成 H3 工作流的一个「段」（提示词 + 时长 + 参考图）
 
-                keyframe 模式：参考图 = [首帧(分镜图), 尾帧]，让 H3 在两端之间插值运动；
-                缺尾帧时自动退化为首帧单锚（并在返回值中标记，便于前端提示）。
-                """
-                sid = shot.get('shot_id')
-                sb_local = sb_map.get(_norm_shot_key(sid)) if use_storyboard else None
-                if mode == 'keyframe' and sb_local:
-                    sb_local = sb_map.get(_norm_shot_key(seq)) or sb_map.get(
-                        f"shot_{seq:02d}") or sb_local
-                    end_p = kf_end_map.get(str(sid)) or kf_end_map.get(f"shot_{seq:02d}")
-                    refs = [sb_local] + ([end_p] if end_p else [])
-                    prompt = comfyui_client._build_h3_prompt(
-                        shot, character_refs, scene_refs,
-                        storyboard_ref={"name": f"shot_{sid}"})
-                elif sb_local:
-                    # 分镜图（构图/场景基准）+ 主角外观锚点，共 2 张（H3 参考图上限）
-                    refs = [sb_local] + main_char_img
-                    prompt = comfyui_client._build_h3_prompt(
-                        shot, character_refs, scene_refs,
-                        storyboard_ref={"name": f"shot_{sid}"})
-                else:
-                    refs = ref_imgs
-                    prompt = shot.get('prompt_h3') or comfyui_client._build_h3_prompt(
-                        shot, character_refs, scene_refs)
-                try:
-                    dur = float(shot.get('duration') or 5)
-                except (TypeError, ValueError):
-                    dur = 5.0
-                return {"prompt": prompt, "duration": dur, "reference_images": refs,
-                        "name": f"shot_{seq:02d}"}, sb_local
+            keyframe 模式：参考图 = [首帧(分镜图), 尾帧]，让 H3 在两端之间插值运动；
+            缺尾帧时自动退化为首帧单锚（并在返回值中标记，便于前端提示）。
+            """
+            sid = shot.get('shot_id')
+            sb_local = sb_map.get(_norm_shot_key(sid)) if use_storyboard else None
+            if mode == 'keyframe' and sb_local:
+                sb_local = sb_map.get(_norm_shot_key(seq)) or sb_map.get(
+                    f"shot_{seq:02d}") or sb_local
+                end_p = kf_end_map.get(str(sid)) or kf_end_map.get(f"shot_{seq:02d}")
+                refs = [sb_local] + ([end_p] if end_p else [])
+                prompt = comfyui_client._build_h3_prompt(
+                    shot, character_refs, scene_refs,
+                    storyboard_ref={"name": f"shot_{sid}"})
+            elif sb_local:
+                # 分镜图（构图/场景基准）+ 主角外观锚点，共 2 张（H3 参考图上限）
+                refs = [sb_local] + main_char_img
+                prompt = comfyui_client._build_h3_prompt(
+                    shot, character_refs, scene_refs,
+                    storyboard_ref={"name": f"shot_{sid}"})
+            else:
+                refs = ref_imgs
+                prompt = shot.get('prompt_h3') or comfyui_client._build_h3_prompt(
+                    shot, character_refs, scene_refs)
+            try:
+                dur = float(shot.get('duration') or 5)
+            except (TypeError, ValueError):
+                dur = 5.0
+            return {"prompt": prompt, "duration": dur, "reference_images": refs,
+                    "name": f"shot_{seq:02d}"}, sb_local
 
-            # ---------- 模式 episode：整集一次提交，工作流段数 = 该集分镜数 ----------
-            if mode == 'episode':
-                segs, shot_meta_map = [], []
-                for i, shot in enumerate(shots):
-                    shot_id = shot.get('shot_id', i + 1)
-                    seq = _shot_seq(shot_id, i + 1)
-                    seg, sb_local = _shot_segment(shot, seq)
-                    segs.append(seg)
-                    shot_meta_map.append({"shot_id": shot_id, "seq": seq,
-                                          "duration": seg["duration"],
-                                          "used_storyboard": bool(sb_local)})
-                with lock:
-                    generation_state[task_id].update({
-                        "current": 0, "progress": 5,
-                        "phase": f"整集 {len(segs)} 段一次生成（每段=一个分镜）",
-                        "segment_count": len(segs),
-                    })
-                app.logger.info(f"[episode] 整集一次生成：{len(segs)} 段，"
-                                f"分镜 {[s['name'] for s in segs]}")
-                result = comfyui_client.generate_h3_sequence(
-                    segments=segs,
-                    filename_prefix=f"comic_drama/{project_name}_{episode_tag or 'episode'}",
-                    seed=None,
-                    timeout_per_segment=timeout_per_segment,
-                )
-                files = result.get('files') or []
-                # 源文件存在性校验：ComfyUI 返回了路径但文件缺失时明确判失败
-                missing_src = bool(files) and not os.path.isfile(files[0])
-                if not files or missing_src:
-                    with lock:
-                        generation_state[task_id]["results"].append({
-                            "success": False, "mode": "episode",
-                            "segment_count": len(segs),
-                            "error": (f"ComfyUI 返回的视频文件不存在: {files[0]}" if missing_src
-                                      else "ComfyUI 未返回视频文件（可能未安装 H3 节点或超时）"),
-                        })
-                else:
-                    src = files[0]
-                    ep_name = f"{episode_tag or 'episode'}_full.mp4"
-                    dst = os.path.join(videos_dir, ep_name)
-                    if os.path.abspath(src) != os.path.abspath(dst):
-                        shutil.move(src, dst)
-                    item = {"success": True, "mode": "episode",
-                            "segment_count": len(segs),
-                            "path": dst, "url": f"/api/videos/{project_name}/{ep_name}",
-                            "segments": [{"index": s.get("index"), "name": s.get("name"),
-                                          "duration": s.get("duration"),
-                                          "refs": len(s.get("refs") or [])}
-                                         for s in (result.get("segments") or [])],
-                            "shots": shot_meta_map,
-                            "prompt_id": result.get("prompt_id"),
-                            "timeout": result.get("timeout")}
-                    if H3_STRIP_AUDIO:
-                        strip = ensure_no_audio(dst, backup=True)
-                        item["audio"] = {
-                            "has_audio_before": strip.get("has_audio_before"),
-                            "has_audio_after": strip.get("has_audio_after"),
-                            "changed": strip.get("changed"),
-                            "method": strip.get("method"),
-                            "backup": strip.get("backup"),
-                            "message": strip.get("message") or ("已剥离音轨" if strip.get("changed") else ""),
-                            "error": strip.get("error"),
-                        }
-                    with lock:
-                        generation_state[task_id]["results"].append(item)
-                        generation_state[task_id]["progress"] = 100
-                        generation_state[task_id]["phase"] = "整集视频生成完成"
-                    app.logger.info(f"[episode] 产物落盘: {dst}（{len(segs)} 段 → 1 条整集视频）")
-                with lock:
-                    results = generation_state[task_id]["results"]
-                    ok = sum(1 for r in results if r.get("success"))
-                    generation_state[task_id].update({
-                        "status": "completed" if ok else "failed",
-                        "success_count": ok,
-                        "error": "" if ok else "整集视频生成失败",
-                    })
-                return
-
+        # ---------- 模式 episode：整集一次提交，工作流段数 = 该集分镜数 ----------
+        if mode == 'episode':
+            segs, shot_meta_map = [], []
             for i, shot in enumerate(shots):
                 shot_id = shot.get('shot_id', i + 1)
                 seq = _shot_seq(shot_id, i + 1)
+                seg, sb_local = _shot_segment(shot, seq)
+                segs.append(seg)
+                shot_meta_map.append({"shot_id": shot_id, "seq": seq,
+                                      "duration": seg["duration"],
+                                      "used_storyboard": bool(sb_local)})
+            with lock:
+                generation_state[task_id].update({
+                    "current": 0, "progress": 5,
+                    "phase": f"整集 {len(segs)} 段一次生成（每段=一个分镜）",
+                    "segment_count": len(segs),
+                })
+            app.logger.info(f"[episode] 整集一次生成：{len(segs)} 段，"
+                            f"分镜 {[s['name'] for s in segs]}")
+            result = comfyui_client.generate_h3_sequence(
+                segments=segs,
+                filename_prefix=f"comic_drama/{project_name}_{episode_tag or 'episode'}",
+                seed=None,
+                timeout_per_segment=timeout_per_segment,
+            )
+            files = result.get('files') or []
+            # 源文件存在性校验：ComfyUI 返回了路径但文件缺失时明确判失败
+            missing_src = bool(files) and not os.path.isfile(files[0])
+            if not files or missing_src:
                 with lock:
-                    generation_state[task_id].update({
-                        "current": i + 1,
-                        "progress": int((i + 1) / len(shots) * 100),
-                        "current_shot": shot_id
+                    generation_state[task_id]["results"].append({
+                        "success": False, "mode": "episode",
+                        "segment_count": len(segs),
+                        "error": (f"ComfyUI 返回的视频文件不存在: {files[0]}" if missing_src
+                                  else "ComfyUI 未返回视频文件（可能未安装 H3 节点或超时）"),
                     })
-
-                try:
-                    seg, sb_local = _shot_segment(shot, seq)
-                    shot_refs = seg["reference_images"]
-                    prompt = seg["prompt"]
-
-                    # ---------- 视频 AI 质检（抽帧送检，不达标自动重生成） ----------
-                    qc_cfg = _qc_load_cfg()
-                    qc_on = qc_client.video_qc_ready(qc_cfg)
-                    qc_declared = bool(qc_cfg.get("enabled") and qc_cfg.get("video_enabled"))
-                    max_retries = int(qc_cfg.get("max_retries", 0)) if qc_on else 0
-                    attempts = []
-                    seed = None
-                    dst = os.path.join(videos_dir, f"shot_{seq:02d}.mp4")
-                    video_item = {"shot_id": shot_id, "success": False,
-                                  "mode": "per_shot", "segment_count": 1,
-                                  "duration": seg.get("duration"),
-                                  "used_storyboard": bool(sb_local)}
-
-                    for attempt in range(max_retries + 1):
-                        if attempt > 0:
-                            seed = random.randint(1, 2 ** 31 - 1)
-                            with lock:
-                                generation_state[task_id]["phase"] = \
-                                    f"视频质检不达标，重新生成（第 {attempt}/{max_retries} 次）"
-                                generation_state[task_id]["qc_phase"] = "regenerating"
-                        with lock:
-                            if attempt == 0:
-                                generation_state[task_id]["phase"] = f"视频生成中（镜头 {shot_id}）"
-                        # 一个分镜 = 一段：按分镜数动态构建工作流，此处段数固定为 1
-                        result = comfyui_client.generate_h3_sequence(
-                            segments=[seg],
-                            filename_prefix=f"comic_drama/{project_name}_shot_{seq:02d}",
-                            seed=seed,
-                            timeout_per_segment=timeout_per_segment,
-                        )
-                        if not result['files']:
-                            video_item["error"] = "ComfyUI 未返回视频文件（可能未安装 H3 节点或超时）"
-                            break
-                        src = result['files'][0]
-                        # 防御：源文件不存在时明确判失败（避免重试时对已 move 过的路径二次读取报错）
-                        if not os.path.isfile(src):
-                            video_item["error"] = f"ComfyUI 返回的视频文件不存在: {src}"
-                            break
-                        # 模型自绘文字/水印修复：逐帧区域插值，确保抽帧质检与交付一致
-                        if WATERMARK_CLEANUP_ENABLED:
-                            wm_rec = watermark_cleanup.clean_video(
-                                src, backup_dir=os.path.join(WATERMARK_CLEANUP_BACKUP_DIR, project_name))
-                            video_item["watermark_cleanup"] = wm_rec
-                            if not wm_rec.get("ok"):
-                                app.logger.warning(f"视频去水印未生效: {wm_rec.get('error')}")
-                        # P0：先落「质检暂存区」，质检达标后才写入正式交付目录（阻断 ⇒ 正式目录不产生该视频）
-                        v_scratch_dir = os.path.join(QC_DIR, project_name, "video_scratch")
-                        os.makedirs(v_scratch_dir, exist_ok=True)
-                        v_scratch = os.path.join(v_scratch_dir,
-                                                 f"shot_{seq:02d}_try{attempt + 1}.mp4")
-                        if os.path.abspath(src) != os.path.abspath(v_scratch):
-                            shutil.move(src, v_scratch)
-                        video_item.update({"success": True, "path": dst,
-                                           "url": f"/api/videos/{project_name}/shot_{seq:02d}.mp4"})
-                        video_item.pop("error", None)
-                        if not qc_on:
-                            if os.path.exists(dst):
-                                os.remove(dst)
-                            shutil.move(v_scratch, dst)   # 未开启质检：按原行为直接入库
-                            break
-                        with lock:
-                            generation_state[task_id]["phase"] = \
-                                f"视频质检中（镜头 {shot_id} · 抽帧 {qc_cfg.get('video_frame_count', 3)} 张 · 第 {attempt + 1} 次）"
-                            generation_state[task_id]["qc_phase"] = "checking"
-                        frames_dir = os.path.join(QC_DIR, project_name, "frames",
-                                                  f"shot_{seq:02d}_try{attempt + 1}")
-                        verdict = qc_client.check_video(v_scratch, _qc_shot_desc(shot), qc_cfg,
-                                                        frames_dir=frames_dir)
-                        rec = _qc_record_verdict(
-                            project_name, "video", shot_id, "视频质检",
-                            attempt + 1, seed, v_scratch, verdict,
-                            extra={
-                                "duration": verdict.get("duration"),
-                                "frames": [f"/api/qc/frames/{os.path.relpath(f, QC_DIR).replace(os.sep, '/')}"
-                                           for f in (verdict.get("frames") or [])],
-                                "frames_local": verdict.get("frames") or [],
-                            })
-                        attempts.append(rec)
-                        gate = _qc_gate(verdict)
-                        video_item["qc_gate"] = gate
-                        video_item["qc"] = _qc_summary(attempts, qc_declared, True, max_retries)
-                        if gate["accept"]:
-                            if os.path.exists(dst):
-                                os.remove(dst)
-                            shutil.move(v_scratch, dst)   # 质检达标 → 写入正式交付目录
-                            break
-                        if not verdict.get("ok"):
-                            break
-                    if qc_declared or qc_on:
-                        video_item["qc"] = _qc_summary(attempts, qc_declared, qc_on,
-                                                       int(qc_cfg.get("max_retries", 0)))
-                        gate = video_item.get("qc_gate")
-                        if not gate or not gate.get("accept"):
-                            # P0：质检不达标 / 调用异常 → 阻断入库（不写正式目录，暂存区留证，不计入成功）
-                            video_item["success"] = False
-                            video_item["qc_blocked"] = True
-                            video_item.pop("path", None)
-                            video_item.pop("url", None)
-                            video_item["error"] = ((f"视频质检阻断（{gate['label']}）：{gate['reason']}"
-                                                    "；未通过质检，未写入正式目录（暂存视频见质检历史）")
-                                                   if gate else (video_item.get("error")
-                                                                 or "视频生成失败，未写入正式目录"))
-                    elif "qc" not in video_item:
-                        video_item["qc"] = {"enabled": False, "status": "disabled",
-                                            "label": "质检未开启", "attempts": 0, "regenerated": 0}
-
-                    # ---------- 去音轨兜底（H3 生成阶段已断开音频输入，此处再做一次 ffprobe 实测校验） ----------
-                    if video_item.get("success") and H3_STRIP_AUDIO:
-                        strip = ensure_no_audio(dst, backup=True)
-                        video_item["audio"] = {
-                            "has_audio_before": strip.get("has_audio_before"),
-                            "has_audio_after": strip.get("has_audio_after"),
-                            "changed": strip.get("changed"),
-                            "method": strip.get("method"),
-                            "backup": strip.get("backup"),
-                            "message": strip.get("message") or ("已剥离音轨" if strip.get("changed") else ""),
-                            "error": strip.get("error"),
-                        }
-                        if strip.get("has_audio_after"):
-                            app.logger.warning(f"镜头 {shot_id} 去音轨后仍检测到音频流: {dst}")
-                    with lock:
-                        generation_state[task_id]["results"].append(video_item)
-                        generation_state[task_id]["phase"] = "视频生成"
-                except Exception as shot_err:
-                    # 单镜头失败不影响其余镜头（原实现会让整批 failed）
-                    app.logger.error(f"镜头 {shot_id} 生成失败: {shot_err}")
-                    with lock:
-                        generation_state[task_id]["results"].append({
-                            "shot_id": shot_id, "success": False, "error": str(shot_err)
-                        })
-
+            else:
+                src = files[0]
+                ep_name = f"{episode_tag or 'episode'}_full.mp4"
+                dst = os.path.join(videos_dir, ep_name)
+                if os.path.abspath(src) != os.path.abspath(dst):
+                    shutil.move(src, dst)
+                item = {"success": True, "mode": "episode",
+                        "segment_count": len(segs),
+                        "path": dst, "url": f"{_vurl}/{ep_name}",
+                        "segments": [{"index": s.get("index"), "name": s.get("name"),
+                                      "duration": s.get("duration"),
+                                      "refs": len(s.get("refs") or [])}
+                                     for s in (result.get("segments") or [])],
+                        "shots": shot_meta_map,
+                        "prompt_id": result.get("prompt_id"),
+                        "timeout": result.get("timeout")}
+                if H3_STRIP_AUDIO:
+                    strip = ensure_no_audio(dst, backup=True)
+                    item["audio"] = {
+                        "has_audio_before": strip.get("has_audio_before"),
+                        "has_audio_after": strip.get("has_audio_after"),
+                        "changed": strip.get("changed"),
+                        "method": strip.get("method"),
+                        "backup": strip.get("backup"),
+                        "message": strip.get("message") or ("已剥离音轨" if strip.get("changed") else ""),
+                        "error": strip.get("error"),
+                    }
+                with lock:
+                    generation_state[task_id]["results"].append(item)
+                    generation_state[task_id]["progress"] = 100
+                    generation_state[task_id]["phase"] = "整集视频生成完成"
+                app.logger.info(f"[episode] 产物落盘: {dst}（{len(segs)} 段 → 1 条整集视频）")
             with lock:
                 results = generation_state[task_id]["results"]
                 ok = sum(1 for r in results if r.get("success"))
-                blocked = sum(1 for r in results if r.get("qc_blocked"))
                 generation_state[task_id].update({
                     "status": "completed" if ok else "failed",
                     "success_count": ok,
-                    "qc_blocked_count": blocked,
-                    "error": "" if ok else "所有镜头均生成失败",
+                    "error": "" if ok else "整集视频生成失败",
                 })
-        except Exception as e:
-            app.logger.error(f"视频生成失败: {e}")
-            with lock:
-                generation_state[task_id].update({"status": "failed", "error": str(e)})
+            return
 
-    thread = threading.Thread(target=video_worker)
+        for i, shot in enumerate(shots):
+            shot_id = shot.get('shot_id', i + 1)
+            seq = _shot_seq(shot_id, i + 1)
+            with lock:
+                generation_state[task_id].update({
+                    "current": i + 1,
+                    "progress": int((i + 1) / len(shots) * 100),
+                    "current_shot": shot_id
+                })
+
+            try:
+                seg, sb_local = _shot_segment(shot, seq)
+                shot_refs = seg["reference_images"]
+                prompt = seg["prompt"]
+
+                # ---------- 视频 AI 质检（抽帧送检，不达标自动重生成） ----------
+                qc_cfg = _qc_load_cfg()
+                qc_on = qc_client.video_qc_ready(qc_cfg)
+                qc_declared = bool(qc_cfg.get("enabled") and qc_cfg.get("video_enabled"))
+                max_retries = int(qc_cfg.get("max_retries", 0)) if qc_on else 0
+                attempts = []
+                seed = None
+                dst = os.path.join(videos_dir, f"shot_{seq:02d}.mp4")
+                video_item = {"shot_id": shot_id, "success": False,
+                              "mode": "per_shot", "segment_count": 1,
+                              "duration": seg.get("duration"),
+                              "used_storyboard": bool(sb_local)}
+
+                for attempt in range(max_retries + 1):
+                    if attempt > 0:
+                        seed = random.randint(1, 2 ** 31 - 1)
+                        with lock:
+                            generation_state[task_id]["phase"] = \
+                                f"视频质检不达标，重新生成（第 {attempt}/{max_retries} 次）"
+                            generation_state[task_id]["qc_phase"] = "regenerating"
+                    with lock:
+                        if attempt == 0:
+                            generation_state[task_id]["phase"] = f"视频生成中（镜头 {shot_id}）"
+                    # 一个分镜 = 一段：按分镜数动态构建工作流，此处段数固定为 1
+                    result = comfyui_client.generate_h3_sequence(
+                        segments=[seg],
+                        filename_prefix=f"comic_drama/{project_name}_shot_{seq:02d}",
+                        seed=seed,
+                        timeout_per_segment=timeout_per_segment,
+                    )
+                    if not result['files']:
+                        video_item["error"] = "ComfyUI 未返回视频文件（可能未安装 H3 节点或超时）"
+                        break
+                    src = result['files'][0]
+                    # 防御：源文件不存在时明确判失败（避免重试时对已 move 过的路径二次读取报错）
+                    if not os.path.isfile(src):
+                        video_item["error"] = f"ComfyUI 返回的视频文件不存在: {src}"
+                        break
+                    # 模型自绘文字/水印修复：逐帧区域插值，确保抽帧质检与交付一致
+                    if WATERMARK_CLEANUP_ENABLED:
+                        wm_rec = watermark_cleanup.clean_video(
+                            src, backup_dir=os.path.join(WATERMARK_CLEANUP_BACKUP_DIR, project_name))
+                        video_item["watermark_cleanup"] = wm_rec
+                        if not wm_rec.get("ok"):
+                            app.logger.warning(f"视频去水印未生效: {wm_rec.get('error')}")
+                    # P0：先落「质检暂存区」，质检达标后才写入正式交付目录（阻断 ⇒ 正式目录不产生该视频）
+                    v_scratch_dir = os.path.join(QC_DIR, project_name, "video_scratch")
+                    os.makedirs(v_scratch_dir, exist_ok=True)
+                    v_scratch = os.path.join(v_scratch_dir,
+                                             f"shot_{seq:02d}_try{attempt + 1}.mp4")
+                    if os.path.abspath(src) != os.path.abspath(v_scratch):
+                        shutil.move(src, v_scratch)
+                    video_item.update({"success": True, "path": dst,
+                                       "url": f"{_vurl}/shot_{seq:02d}.mp4"})
+                    video_item.pop("error", None)
+                    if not qc_on:
+                        if os.path.exists(dst):
+                            os.remove(dst)
+                        shutil.move(v_scratch, dst)   # 未开启质检：按原行为直接入库
+                        break
+                    with lock:
+                        generation_state[task_id]["phase"] = \
+                            f"视频质检中（镜头 {shot_id} · 抽帧 {qc_cfg.get('video_frame_count', 3)} 张 · 第 {attempt + 1} 次）"
+                        generation_state[task_id]["qc_phase"] = "checking"
+                    frames_dir = os.path.join(QC_DIR, project_name, "frames",
+                                              f"shot_{seq:02d}_try{attempt + 1}")
+                    verdict = qc_client.check_video(v_scratch, _qc_shot_desc(shot), qc_cfg,
+                                                    frames_dir=frames_dir)
+                    rec = _qc_record_verdict(
+                        project_name, "video", shot_id, "视频质检",
+                        attempt + 1, seed, v_scratch, verdict,
+                        extra={
+                            "duration": verdict.get("duration"),
+                            "frames": [f"/api/qc/frames/{os.path.relpath(f, QC_DIR).replace(os.sep, '/')}"
+                                       for f in (verdict.get("frames") or [])],
+                            "frames_local": verdict.get("frames") or [],
+                        })
+                    attempts.append(rec)
+                    gate = _qc_gate(verdict)
+                    video_item["qc_gate"] = gate
+                    video_item["qc"] = _qc_summary(attempts, qc_declared, True, max_retries)
+                    if gate["accept"]:
+                        if os.path.exists(dst):
+                            os.remove(dst)
+                        shutil.move(v_scratch, dst)   # 质检达标 → 写入正式交付目录
+                        break
+                    if not verdict.get("ok"):
+                        break
+                if qc_declared or qc_on:
+                    video_item["qc"] = _qc_summary(attempts, qc_declared, qc_on,
+                                                   int(qc_cfg.get("max_retries", 0)))
+                    gate = video_item.get("qc_gate")
+                    if not gate or not gate.get("accept"):
+                        # P0：质检不达标 / 调用异常 → 阻断入库（不写正式目录，暂存区留证，不计入成功）
+                        video_item["success"] = False
+                        video_item["qc_blocked"] = True
+                        video_item.pop("path", None)
+                        video_item.pop("url", None)
+                        video_item["error"] = ((f"视频质检阻断（{gate['label']}）：{gate['reason']}"
+                                                "；未通过质检，未写入正式目录（暂存视频见质检历史）")
+                                               if gate else (video_item.get("error")
+                                                             or "视频生成失败，未写入正式目录"))
+                elif "qc" not in video_item:
+                    video_item["qc"] = {"enabled": False, "status": "disabled",
+                                        "label": "质检未开启", "attempts": 0, "regenerated": 0}
+
+                # ---------- 去音轨兜底（H3 生成阶段已断开音频输入，此处再做一次 ffprobe 实测校验） ----------
+                if video_item.get("success") and H3_STRIP_AUDIO:
+                    strip = ensure_no_audio(dst, backup=True)
+                    video_item["audio"] = {
+                        "has_audio_before": strip.get("has_audio_before"),
+                        "has_audio_after": strip.get("has_audio_after"),
+                        "changed": strip.get("changed"),
+                        "method": strip.get("method"),
+                        "backup": strip.get("backup"),
+                        "message": strip.get("message") or ("已剥离音轨" if strip.get("changed") else ""),
+                        "error": strip.get("error"),
+                    }
+                    if strip.get("has_audio_after"):
+                        app.logger.warning(f"镜头 {shot_id} 去音轨后仍检测到音频流: {dst}")
+                with lock:
+                    generation_state[task_id]["results"].append(video_item)
+                    generation_state[task_id]["phase"] = "视频生成"
+            except Exception as shot_err:
+                # 单镜头失败不影响其余镜头（原实现会让整批 failed）
+                app.logger.error(f"镜头 {shot_id} 生成失败: {shot_err}")
+                with lock:
+                    generation_state[task_id]["results"].append({
+                        "shot_id": shot_id, "success": False, "error": str(shot_err)
+                    })
+
+        with lock:
+            results = generation_state[task_id]["results"]
+            ok = sum(1 for r in results if r.get("success"))
+            blocked = sum(1 for r in results if r.get("qc_blocked"))
+            generation_state[task_id].update({
+                "status": "completed" if ok else "failed",
+                "success_count": ok,
+                "qc_blocked_count": blocked,
+                "error": "" if ok else "所有镜头均生成失败",
+            })
+    except Exception as e:
+        app.logger.error(f"视频生成失败: {e}")
+        with lock:
+            generation_state[task_id].update({"status": "failed", "error": str(e)})
+
+
+    thread = threading.Thread(
+        target=_video_generate_worker,
+        args=(task_id, project_name, shots, character_refs, scene_refs,
+              storyboards, use_storyboard, mode, timeout_per_segment, episode_tag,
+              data.get('episode_no')),
+    )
     thread.daemon = True
     thread.start()
 
@@ -3929,7 +4046,9 @@ def api_qc_test():
     image_path = data.get("image_path") or ""
     if not image_path:
         # 自动挑一张已有分镜图作为测试样张
-        probe = os.path.join(STORYBOARDS_DIR, _safe_project(data.get("project_name") or "project"))
+        probe = _ep_read_dir(STORYBOARDS_DIR,
+                             _safe_project(data.get("project_name") or "project"),
+                             data.get("episode_no"))
         if os.path.isdir(probe):
             pngs = sorted([f for f in os.listdir(probe) if f.lower().endswith(".png")])
             if pngs:
@@ -5578,6 +5697,305 @@ def api_mix_file(project_name, filename):
         abort(404)
     return send_file(filepath, conditional=True,
                      as_attachment=request.args.get('download') == '1')
+
+
+# ============================================================================
+# 无人值守托管（Autopilot）——「上传小说 → 敲定风格 → 电脑自己生产 → 人只验成品」
+# ============================================================================
+# 接口分工：
+#   总览/自检 → status / ready / curve
+#   托管开关 → plans / plan / enable / disable / pause / resume
+#   进度视图 → progress / progress/<project>
+#   成品验收 → deliverables / review / deliverable/file
+#   人工介入 → exceptions / exceptions resolve
+#   手动触发 → run-once（用于验证与补跑单集）
+
+
+def _autopilot_guard(fn):
+    """统一异常兜底：托管接口不应把 500 抛给前端，而是返回可读错误"""
+    def _wrap(*a, **k):
+        try:
+            return fn(*a, **k)
+        except KeyError as e:
+            return jsonify({"success": False, "error": f"对象不存在：{e}"}), 404
+        except Exception as e:  # noqa: BLE001
+            app.logger.exception("托管接口异常")
+            return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
+    _wrap.__name__ = fn.__name__
+    return _wrap
+
+
+@app.route('/api/autopilot/status', methods=['GET'])
+@_autopilot_guard
+def api_autopilot_status():
+    """托管总览：开关状态、当前在做什么、待验收数、异常数、24h 生产曲线"""
+    return jsonify({"success": True, **autopilot.status()})
+
+
+@app.route('/api/autopilot/ready', methods=['GET'])
+@_autopilot_guard
+def api_autopilot_ready():
+    """托管可行性自检：告诉用户还差什么才能真正无人值守"""
+    return jsonify({"success": True, **autopilot.ready()})
+
+
+@app.route('/api/autopilot/curve', methods=['GET'])
+@_autopilot_guard
+def api_autopilot_curve():
+    """24 小时生产曲线（每小时完成/失败集数、平均耗时、吞吐）"""
+    try:
+        hours = max(1, min(int(request.args.get('hours') or 24), 168))
+    except (TypeError, ValueError):
+        hours = 24
+    return jsonify({"success": True, **autopilot.production_curve(hours)})
+
+
+@app.route('/api/autopilot/plans', methods=['GET'])
+@_autopilot_guard
+def api_autopilot_plans():
+    """全部项目的托管计划"""
+    plans = autopilot.list_plans()
+    return jsonify({"success": True, "count": len(plans), "items": plans,
+                    "defaults": autopilot.PLAN_DEFAULTS})
+
+
+@app.route('/api/autopilot/plan/<project_name>', methods=['GET'])
+@_autopilot_guard
+def api_autopilot_plan_get(project_name):
+    project = _safe_project(project_name)
+    return jsonify({"success": True, "project": project,
+                    "plan": autopilot.get_plan(project),
+                    "defaults": autopilot.PLAN_DEFAULTS})
+
+
+@app.route('/api/autopilot/plan/<project_name>', methods=['POST'])
+@_autopilot_guard
+def api_autopilot_plan_set(project_name):
+    """设置某项目的自动生产计划（目标集数、镜头数、风格、质量阈值、重试上限…）"""
+    project = _safe_project(project_name)
+    data = request.json or {}
+    novel_id = str(data.pop('novel_id', '') or '').strip()
+    patch = {k: v for k, v in (data or {}).items() if k in autopilot.PLAN_DEFAULTS}
+    if not patch and not novel_id:
+        return jsonify({"success": False,
+                        "error": f"没有可更新字段；可用字段：{sorted(autopilot.PLAN_DEFAULTS)}"}), 400
+    plan = autopilot.set_plan(project, patch, novel_id=novel_id)
+    return jsonify({"success": True, "project": project, "plan": plan})
+
+
+@app.route('/api/autopilot/enable', methods=['POST'])
+@_autopilot_guard
+def api_autopilot_enable():
+    """开启托管（可同时带生产配置）。novel_id 缺省时从项目注册表自动关联。"""
+    data = request.json or {}
+    project = _safe_project(data.get('project') or data.get('project_name') or '')
+    if not project:
+        return jsonify({"success": False, "error": "缺少 project"}), 400
+    novel_id = str(data.get('novel_id') or '').strip()
+    if not novel_id:
+        try:
+            rec = project_store.get_project(project) or {}
+            novel_id = (rec.get('novel_id') or '').strip()
+        except Exception:  # noqa: BLE001
+            novel_id = ''
+    if not novel_id:
+        # 退回「按项目名匹配同名小说」，尽量让用户少填一步
+        try:
+            for n in list_novels(NOVELS_DIR):
+                if (n.get('title') or '').strip() == project:
+                    novel_id = n.get('novel_id') or ''
+                    break
+        except Exception:  # noqa: BLE001
+            novel_id = ''
+    patch = {k: v for k, v in (data or {}).items()
+             if k in autopilot.PLAN_DEFAULTS and k != 'enabled'}
+    plan = autopilot.enable(project, patch)
+    if novel_id:
+        plan = autopilot.set_plan(project, {}, novel_id=novel_id)
+    # 顺带校验输入是否齐备（小说正文 / 项目绑定），避免"开了但没活干"
+    warn = ""
+    if not plan.get('novel_id'):
+        warn = "该项目未关联小说，托管不会生产；请先在「小说库」上传并建项目"
+    return jsonify({"success": True, "project": project, "plan": plan,
+                    "novel_id": plan.get('novel_id') or "", "warning": warn})
+
+
+@app.route('/api/autopilot/disable', methods=['POST'])
+@_autopilot_guard
+def api_autopilot_disable():
+    data = request.json or {}
+    project = _safe_project(data.get('project') or data.get('project_name') or '')
+    if not project:
+        return jsonify({"success": False, "error": "缺少 project"}), 400
+    return jsonify({"success": True, "project": project,
+                    "plan": autopilot.disable(project)})
+
+
+@app.route('/api/autopilot/pause', methods=['POST'])
+@_autopilot_guard
+def api_autopilot_pause():
+    """暂停托管（在当前步骤边界生效，不产生半成品）"""
+    data = request.json or {}
+    return jsonify({"success": True, **autopilot.pause(str(data.get('reason') or '手动暂停'))})
+
+
+@app.route('/api/autopilot/resume', methods=['POST'])
+@_autopilot_guard
+def api_autopilot_resume():
+    """恢复托管（服务重启后也可用它手动拉起守护进程）"""
+    return jsonify({"success": True, **autopilot.resume()})
+
+
+@app.route('/api/autopilot/progress', methods=['GET'])
+@_autopilot_guard
+def api_autopilot_progress_all():
+    """全部项目的分集进度（剧本/资产/分镜/视频/成片 逐集状态）"""
+    items = autopilot.all_progress()
+    return jsonify({"success": True, "count": len(items), "items": items})
+
+
+@app.route('/api/autopilot/progress/<project_name>', methods=['GET'])
+@_autopilot_guard
+def api_autopilot_progress_one(project_name):
+    project = _safe_project(project_name)
+    return jsonify({"success": True, **autopilot.project_progress(project)})
+
+
+@app.route('/api/autopilot/deliverables', methods=['GET'])
+@_autopilot_guard
+def api_autopilot_deliverables():
+    """成品验收队列——用户唯一需要重点看的清单（只含最终成片）"""
+    project = _safe_project(request.args.get('project') or '') if request.args.get('project') else ''
+    items = pipeline.list_deliverables(project)
+    return jsonify({"success": True, "count": len(items),
+                    "pending": sum(1 for x in items if x.get('review') == 'pending'),
+                    "items": items})
+
+
+@app.route('/api/autopilot/deliverables/review', methods=['POST'])
+@_autopilot_guard
+def api_autopilot_review():
+    """验收 / 打回成片（打回 = 该集在下次轮转时自动重做）"""
+    data = request.json or {}
+    project = _safe_project(data.get('project') or data.get('project_name') or '')
+    review = str(data.get('review') or '').strip().lower()
+    if review not in ('accepted', 'rejected', 'pending'):
+        return jsonify({"success": False, "error": "review 仅支持 accepted / rejected / pending"}), 400
+    try:
+        ep = int(data.get('episode_no') or 0)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "episode_no 非法"}), 400
+    item = pipeline.set_deliverable_review(project, ep, review, str(data.get('note') or ''))
+    if not item:
+        return jsonify({"success": False, "error": f"未找到 {project} 第{ep}集的成片记录"}), 404
+    return jsonify({"success": True, "item": item})
+
+
+@app.route('/api/autopilot/deliverable/file/<project_name>/<path:filename>')
+@_autopilot_guard
+def api_autopilot_deliverable_file(project_name, filename):
+    """播放 / 下载成片（以交付物索引为准解析真实路径，防目录穿越）"""
+    project = _safe_project(project_name)
+    filepath = pipeline.deliverable_path(project, filename)
+    if not filepath or not os.path.isfile(filepath):
+        abort(404)
+    return send_file(filepath, conditional=True,
+                     as_attachment=request.args.get('download') == '1')
+
+
+@app.route('/api/autopilot/exceptions', methods=['GET'])
+@_autopilot_guard
+def api_autopilot_exceptions():
+    """需人工介入清单（超过重试上限 / 环境性缺失导致挂起）"""
+    project = _safe_project(request.args.get('project') or '') if request.args.get('project') else ''
+    projects = [project] if project else [p['project'] for p in autopilot.list_plans()]
+    items = []
+    for pj in projects:
+        for d in pipeline.list_dead_letters(pj):
+            if not d.get('resolved'):
+                items.append(d)
+    items.sort(key=lambda x: (x.get('project') or '', int(x.get('episode_no') or 0)))
+    return jsonify({"success": True, "count": len(items), "items": items})
+
+
+@app.route('/api/autopilot/exceptions/resolve', methods=['POST'])
+@_autopilot_guard
+def api_autopilot_exception_resolve():
+    """处理异常：标记已解决 / 忽略（之后托管会重新尝试该集）"""
+    data = request.json or {}
+    project = _safe_project(data.get('project') or data.get('project_name') or '')
+    try:
+        ep = int(data.get('episode_no') or 0)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "episode_no 非法"}), 400
+    item = pipeline.resolve_dead_letter(project, ep, str(data.get('note') or ''))
+    if not item:
+        return jsonify({"success": False, "error": f"未找到 {project} 第{ep}集的异常记录"}), 404
+    autopilot.wake()
+    return jsonify({"success": True, "item": item})
+
+
+@app.route('/api/autopilot/run-once', methods=['POST'])
+@_autopilot_guard
+def api_autopilot_run_once():
+    """立即生产指定一集（同步返回结果；用于联调与补跑，不建议前端长等待）"""
+    data = request.json or {}
+    project = _safe_project(data.get('project') or data.get('project_name') or '')
+    try:
+        ep = int(data.get('episode_no') or 1)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "episode_no 非法"}), 400
+    plan = autopilot.get_plan(project)
+    meta = autopilot._novel_meta(project, plan)
+    if not meta:
+        return jsonify({"success": False,
+                        "error": "该项目未关联小说，无法生产（请先在小说库上传建项目）"}), 400
+    chapters = autopilot.chapters_of(meta)
+    chapter = next((c for c in chapters if c['index'] == ep), None)
+    if not chapter:
+        return jsonify({"success": False,
+                        "error": f"小说里没有第{ep}章（共 {len(chapters)} 章）"}), 400
+    cfg = pipeline.normalize_config({**plan, 'novel_id': meta.get('novel_id')},
+                                    default_project_key=project)
+    result = pipeline.run_episode(cfg, project, ep, meta, chapter)
+    if result.get('ok') and result.get('deliverable'):
+        pipeline.record_deliverable(project, ep, result['deliverable'], meta={
+            'title': chapter.get('title') or '', 'chapter_index': chapter.get('index'),
+            'elapsed_sec': result.get('elapsed_sec')})
+    return jsonify({"success": bool(result.get('ok')), "result": result})
+
+
+@app.route('/api/autopilot/plan-from-settings/<project_name>', methods=['POST'])
+@_autopilot_guard
+def api_autopilot_plan_from_settings(project_name):
+    """总控 AI 一键设定：把对话敲定的创作设定（风格/画风/镜头数/节奏…）落成托管计划
+
+    这是「对话 → 自动生产」的接缝：用户在总控 AI 里谈好风格后点一下，
+    风格纲要写进流水线配置，之后每集剧本生成都会带上它，无需再手工填表。
+    """
+    project = _safe_project(project_name)
+    view = ai_chat.settings_view(AI_SETTINGS_PATH, project)
+    brief = (view.get('style_brief') or '').strip()
+    s = view.get('settings') or {}
+    patch = {}
+    if brief:
+        patch['style'] = brief
+    # 单集镜头数：从设定里解析数字（如 "12 个" → 12）
+    shots = str(s.get('shots_per_episode') or '')
+    digits = ''.join(ch for ch in shots if ch.isdigit())
+    if digits:
+        try:
+            patch['target_shots'] = max(4, min(int(digits), 40))
+        except ValueError:
+            pass
+    if not patch:
+        return jsonify({"success": False,
+                        "error": "总控 AI 还没有生效设定；请先在「总控 AI 对话」里谈好风格再一键设定"}), 400
+    plan = autopilot.set_plan(project, patch)
+    return jsonify({"success": True, "project": project, "plan": plan,
+                    "applied": patch, "settings_filled": view.get('filled'),
+                    "settings_missing": view.get('missing'),
+                    "style_brief": brief})
 
 
 if __name__ == '__main__':

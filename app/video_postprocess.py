@@ -186,38 +186,55 @@ class VideoPostProcessor:
 
     def add_subtitles(self, video_path: str, subtitles: List[dict],
                      output_path: str) -> str:
-        """添加字幕到视频"""
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        """添加字幕到视频（烧录）
 
-        # 生成 SRT 文件
-        srt_file = output_path + ".srt"
-        with open(srt_file, 'w', encoding='utf-8') as f:
-            for i, sub in enumerate(subtitles, 1):
-                start = sub.get("start", 0)
-                end = sub.get("end", start + 3)
-                text = sub.get("text", "")
-                f.write(f"{i}\n")
-                f.write(f"{self._format_time(start)} --> {self._format_time(end)}\n")
-                f.write(f"{text}\n\n")
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", video_path,
-            "-vf", f"subtitles='{srt_file}'",
-            "-c:a", "copy",
-            output_path
-        ]
-
+        Windows 路径坑（实测踩过）：ffmpeg 的 `subtitles=` 是**滤镜参数**，其解析器
+        会把反斜杠当转义符吃掉，`C:\\a\\b.srt` 会变成 `Cab.srt`，报
+        "Unable to parse original_size option value ..."。
+        因此这里改为：把 ffmpeg 的工作目录切到 SRT 所在目录，滤镜只传**纯文件名**。
+        这样既不出现反斜杠也不用转义盘符冒号，且路径里的中文/空格也一并规避。
+        """
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            if result.returncode == 0:
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+            # 生成 SRT 文件
+            srt_file = output_path + ".srt"
+            with open(srt_file, 'w', encoding='utf-8') as f:
+                for i, sub in enumerate(subtitles, 1):
+                    start = sub.get("start", 0)
+                    end = sub.get("end", start + 3)
+                    text = sub.get("text", "")
+                    f.write(f"{i}\n")
+                    f.write(f"{self._format_time(start)} --> {self._format_time(end)}\n")
+                    f.write(f"{text}\n\n")
+
+            srt_dir = os.path.dirname(os.path.abspath(srt_file))
+            srt_name = os.path.basename(srt_file)
+            # 文件名内可能含单引号（项目名极端情况），按 ffmpeg 滤镜语法转义
+            filter_arg = "subtitles=filename='" + srt_name.replace("'", r"\'") + "'"
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", os.path.abspath(video_path),
+                "-vf", filter_arg,
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-c:a", "copy",
+                os.path.abspath(output_path),
+            ]
+
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    timeout=1800, cwd=srt_dir)
+            if result.returncode == 0 and os.path.isfile(output_path) \
+                    and os.path.getsize(output_path) > 0:
                 logger.info(f"字幕添加成功: {output_path}")
-                os.remove(srt_file)
+                try:
+                    os.remove(srt_file)
+                except OSError:
+                    pass
                 return output_path
-            else:
-                logger.error(f"添加字幕失败: {result.stderr}")
-                return ""
-        except Exception as e:
+            logger.error(f"添加字幕失败（返回码 {result.returncode}）："
+                         f"{(result.stderr or '')[-800:]}")
+            return ""
+        except Exception as e:  # noqa: BLE001
             logger.error(f"添加字幕失败: {e}")
             return ""
 

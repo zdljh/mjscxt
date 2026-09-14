@@ -510,10 +510,150 @@
     .kf-item .ok{color:#6ee7a8}
     .kf-item .no{color:var(--muted)}
 
+    /* ===================== 无人值守托管控制台 ===================== */
+    .badge-soft{display:inline-flex;align-items:center;font-size:.71rem;padding:3px 9px;
+        border-radius:8px;border:1px solid var(--line);color:var(--muted);
+        background:rgba(148,163,184,.08);white-space:nowrap}
+    .mode-switch{display:flex;gap:2px;padding:3px;border-radius:11px;
+        background:rgba(148,163,184,.10);border:1px solid var(--line)}
+    .mode-switch button{
+        border:0;background:transparent;color:var(--muted);cursor:pointer;
+        padding:6px 13px;border-radius:8px;font-size:.8rem;font-weight:600;
+        display:inline-flex;align-items:center;gap:6px;white-space:nowrap;transition:.16s}
+    .mode-switch button:hover{color:var(--text)}
+    .mode-switch button.on{
+        background:linear-gradient(135deg,rgba(124,108,245,.9),rgba(79,209,197,.75));
+        color:#fff;box-shadow:0 3px 12px rgba(124,108,245,.32)}
+
+    .ap-hero{border:1px solid var(--line);border-radius:16px;padding:18px 20px;
+        background:linear-gradient(135deg,rgba(124,108,245,.13),rgba(79,209,197,.07));
+        margin-bottom:14px}
+    .ap-hero h3{margin:0 0 4px;font-size:1.02rem;display:flex;align-items:center;gap:8px}
+    .ap-hero .sub{color:var(--muted);font-size:.79rem;line-height:1.65}
+    .ap-steps{display:flex;gap:10px;flex-wrap:wrap;margin-top:13px}
+    .ap-step{flex:1 1 178px;border:1px solid var(--line);border-radius:12px;
+        padding:11px 13px;background:rgba(13,20,36,.55);position:relative}
+    .ap-step .n{position:absolute;top:-9px;left:11px;width:20px;height:20px;border-radius:50%;
+        background:linear-gradient(135deg,var(--gold),var(--gold-2));color:#1a1205;
+        font-size:.68rem;font-weight:800;display:flex;align-items:center;justify-content:center}
+    .ap-step .t{font-size:.83rem;font-weight:700;margin:5px 0 3px}
+    .ap-step .d{font-size:.73rem;color:var(--muted);line-height:1.6}
+    .ap-step .act{margin-top:8px}
+    .ap-step.done{border-color:rgba(52,211,153,.45)}
+    .ap-step.done .n{background:linear-gradient(135deg,#34d399,#10b981);color:#04120b}
+
+    .ap-switch{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+    .ap-toggle{position:relative;width:62px;height:32px;border-radius:32px;cursor:pointer;
+        background:rgba(148,163,184,.22);border:1px solid var(--line);transition:.2s;flex:0 0 auto}
+    .ap-toggle::after{content:"";position:absolute;top:3px;left:3px;width:24px;height:24px;
+        border-radius:50%;background:#e8edf7;transition:.2s}
+    .ap-toggle.on{background:linear-gradient(135deg,#34d399,#10b981);border-color:transparent}
+    .ap-toggle.on::after{left:33px}
+    .ap-toggle.busy{animation:apPulse 1.4s ease-in-out infinite}
+    @keyframes apPulse{0%,100%{opacity:1}50%{opacity:.55}}
+    .ap-state-title{font-size:1.06rem;font-weight:800}
+    .ap-state-sub{font-size:.78rem;color:var(--muted);margin-top:2px}
+
+    .ap-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(126px,1fr));
+        gap:10px;margin-top:13px}
+    .ap-kpi{border:1px solid var(--line);border-radius:12px;padding:11px 13px;
+        background:rgba(13,20,36,.5)}
+    .ap-kpi .k{font-size:.7rem;color:var(--muted);letter-spacing:.4px}
+    .ap-kpi .v{font-size:1.42rem;font-weight:800;margin-top:3px;
+        background:linear-gradient(135deg,var(--gold),#f6e2b8);
+        -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+    .ap-kpi.warn .v{background:linear-gradient(135deg,#fbbf24,#f59e0b);
+        -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+    .ap-kpi.err .v{background:linear-gradient(135deg,#f87171,#ef4444);
+        -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+    .ap-kpi.ok .v{background:linear-gradient(135deg,#34d399,#10b981);
+        -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+
+    .ap-checks{display:flex;gap:8px;flex-wrap:wrap;margin-top:11px}
+    .ap-check{display:inline-flex;align-items:center;gap:6px;font-size:.75rem;
+        padding:5px 10px;border-radius:9px;border:1px solid var(--line);
+        background:rgba(13,20,36,.5);cursor:default}
+    .ap-check.ok{border-color:rgba(52,211,153,.42);color:#a7f3d0}
+    .ap-check.no{border-color:rgba(248,113,113,.42);color:#fecaca}
+
+    .ap-flowbar{height:9px;border-radius:9px;background:rgba(148,163,184,.16);
+        overflow:hidden;margin-top:11px}
+    .ap-flowbar > i{display:block;height:100%;border-radius:9px;
+        background:linear-gradient(90deg,var(--violet),var(--jade));
+        transition:width .5s ease;width:0}
+    .ap-stepchips{display:flex;gap:5px;flex-wrap:wrap;margin-top:9px}
+    .ap-stepchip{font-size:.7rem;padding:3px 8px;border-radius:7px;
+        border:1px solid var(--line);color:var(--muted)}
+    .ap-stepchip.run{border-color:rgba(124,108,245,.6);color:#c4b5fd;
+        background:rgba(124,108,245,.14)}
+    .ap-stepchip.done{border-color:rgba(52,211,153,.5);color:#a7f3d0}
+    .ap-stepchip.fail{border-color:rgba(248,113,113,.55);color:#fecaca}
+    .ap-stepchip.skip{opacity:.5}
+
+    .ap-curve{display:flex;align-items:flex-end;gap:3px;height:104px;margin-top:10px}
+    .ap-curve .col{flex:1;display:flex;flex-direction:column;justify-content:flex-end;
+        gap:2px;min-width:5px;position:relative}
+    .ap-curve .bar{width:100%;border-radius:3px 3px 0 0;min-height:2px;
+        background:linear-gradient(180deg,var(--violet-2),var(--violet));
+        transition:height .4s ease}
+    .ap-curve .bar.f{background:linear-gradient(180deg,#f87171,#b91c1c)}
+    .ap-curve .lbl{font-size:.58rem;color:var(--muted);text-align:center;
+        white-space:nowrap;overflow:hidden;margin-top:3px}
+    .ap-curve .col:hover .bar{filter:brightness(1.25)}
+
+    .ap-row{display:flex;align-items:center;gap:11px;padding:10px 12px;
+        border:1px solid var(--line);border-radius:12px;margin-bottom:8px;
+        background:rgba(13,20,36,.45);flex-wrap:wrap}
+    .ap-row .thumb{width:96px;height:54px;border-radius:8px;background:#000;
+        object-fit:cover;flex:0 0 auto;border:1px solid var(--line)}
+    .ap-row .grow{flex:1 1 220px;min-width:0}
+    .ap-row .t{font-size:.87rem;font-weight:700;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+    .ap-row .d{font-size:.74rem;color:var(--muted);margin-top:3px;line-height:1.6}
+    .ap-tag{font-size:.67rem;padding:2px 7px;border-radius:6px;border:1px solid var(--line)}
+    .ap-tag.pending{border-color:rgba(251,191,36,.5);color:#fde68a;background:rgba(251,191,36,.12)}
+    .ap-tag.accepted{border-color:rgba(52,211,153,.5);color:#a7f3d0;background:rgba(52,211,153,.12)}
+    .ap-tag.rejected{border-color:rgba(248,113,113,.5);color:#fecaca;background:rgba(248,113,113,.12)}
+    .ap-tag.running{border-color:rgba(124,108,245,.55);color:#c4b5fd;background:rgba(124,108,245,.14)}
+    .ap-tag.done{border-color:rgba(52,211,153,.5);color:#a7f3d0;background:rgba(52,211,153,.12)}
+    .ap-tag.todo{color:var(--muted)}
+    .ap-tag.rejected,.ap-tag.failed{border-color:rgba(248,113,113,.5);color:#fecaca}
+
+    .ap-epgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(228px,1fr));gap:9px}
+    .ap-epcard{border:1px solid var(--line);border-radius:11px;padding:10px 12px;
+        background:rgba(13,20,36,.45)}
+    .ap-epcard .h{display:flex;justify-content:space-between;align-items:center;gap:8px}
+    .ap-epcard .no{font-size:.82rem;font-weight:700}
+    .ap-stages{display:flex;gap:3px;margin-top:8px}
+    .ap-stages i{flex:1;height:5px;border-radius:5px;background:rgba(148,163,184,.2)}
+    .ap-stages i.on{background:linear-gradient(90deg,var(--jade),var(--violet))}
+    .ap-stages i.part{background:var(--warn)}
+    .ap-stages i.bad{background:var(--err)}
+    .ap-stage-lbl{display:flex;justify-content:space-between;font-size:.63rem;
+        color:var(--muted);margin-top:4px}
+
+    .ap-empty{border:1px dashed var(--line);border-radius:12px;padding:22px;
+        text-align:center;color:var(--muted);font-size:.8rem}
+
+    /* 自动生产控制台的子卡片：沿用应用自有视觉语言（不用 Bootstrap 的浅色 card，
+       否则深色主题下会出现白底、且 .card-head 这个类在 Bootstrap 里并不存在，
+       会导致卡片标题与按钮各占一行、卡片边界消失） */
+    .ap-card{background:rgba(255,255,255,.02);border:1px solid var(--line);border-radius:16px;
+        overflow:hidden;box-shadow:0 10px 26px rgba(0,0,0,.20)}
+    .ap-card-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+        padding:13px 16px;border-bottom:1px solid var(--line);background:rgba(148,163,184,.055)}
+    .ap-card-head .ap-card-title{font-size:.92rem;font-weight:700;color:#e8edf7;
+        display:flex;align-items:center;gap:7px;margin:0;padding:0;border:none}
+    .ap-card-head .spacer{flex:1 1 auto}
+    .ap-card-body{padding:14px 16px 16px}
+
     @media (max-width:768px){
         .step .name{font-size:.72rem}
         .panel-body{padding:14px}
         .brand small{display:none}
+        .mode-switch button span{display:none}
+        .ap-row .thumb{width:100%;height:132px}
+        .ap-card-head{padding:11px 13px}
+        .ap-card-body{padding:12px 13px 14px}
     }
 </style>
 </head>
@@ -529,6 +669,14 @@
             </div>
         </div>
         <div class="spacer"></div>
+        <div class="mode-switch" id="modeSwitch" title="自动生产：交给托管进程 24 小时无人值守；高级模式：逐步手动操作">
+            <button id="modeAuto" class="on" onclick="setAppMode('auto')">
+                <i class="bi bi-robot"></i><span data-i18n="mode.auto">自动生产</span>
+            </button>
+            <button id="modeAdvanced" onclick="setAppMode('advanced')">
+                <i class="bi bi-sliders2"></i><span data-i18n="mode.advanced">高级模式</span>
+            </button>
+        </div>
         <span class="status-pill" id="llmStatus" onclick="openLLMConfig()" style="cursor:pointer" title="点击打开 AI 设置：文本分析 / 质检 / 对话总控，三个模型各自独立配置（OpenAI 兼容）"><span class="dot off"></span> AI 设置检测中…</span>
         <button class="btn btn-ghost btn-sm" onclick="openLLMConfig()"><i class="bi bi-sliders"></i> AI 设置</button>
         <button class="btn btn-ghost btn-sm" onclick="openAiChat()"><i class="bi bi-chat-dots"></i> AI 对话</button>
@@ -559,6 +707,159 @@
             <button class="btn btn-ghost btn-sm" onclick="refreshProjectAssets()"><i class="bi bi-arrow-clockwise"></i> 刷新资产</button>
         </span>
     </div>
+
+    <!-- ============ 自动生产控制台（主视图：人只看这里） ============ -->
+    <section id="panelAuto" class="panel">
+        <!-- 上手三步：把「上传小说 → 定风格 → 开托管」做成看得见的路径 -->
+        <div class="ap-hero">
+            <h3><i class="bi bi-robot" style="color:var(--violet-2)"></i> <span data-i18n="auto.title">无人值守自动生产</span></h3>
+            <div class="sub" data-i18n="auto.sub">
+                上传小说建立项目 → 用总控 AI 谈定风格与要求 → 开启托管。之后电脑会按章节自动生产每一集
+                （剧本 · 资产 · 分镜 · 视频 · 配音 · 成片），质检不达标自动重跑，你只需在下方验收最终成片。
+            </div>
+            <div class="ap-steps">
+                <div class="ap-step" id="apStep1">
+                    <div class="n">1</div>
+                    <div class="t" data-i18n="auto.s1t">上传小说 · 建项目</div>
+                    <div class="d" data-i18n="auto.s1d">支持 txt / docx / pdf / epub / html，自动切分章节。</div>
+                    <div class="act">
+                        <button class="btn btn-primary btn-sm" onclick="openNovelModal()">
+                            <i class="bi bi-cloud-arrow-up"></i> <span data-i18n="auto.s1b">上传小说</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="ap-step" id="apStep2">
+                    <div class="n">2</div>
+                    <div class="t" data-i18n="auto.s2t">总控 AI 定风格</div>
+                    <div class="d" data-i18n="auto.s2d">对话敲定题材 / 画风 / 节奏 / 镜头数，一键写进生产配置。</div>
+                    <div class="act">
+                        <button class="btn btn-violet btn-sm" onclick="openAiChat()">
+                            <i class="bi bi-chat-dots"></i> <span data-i18n="auto.s2b">开始对话</span>
+                        </button>
+                        <button class="btn btn-ghost btn-sm" onclick="applyStyleToPlan()">
+                            <i class="bi bi-magic"></i> <span data-i18n="auto.s2c">一键设定</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="ap-step" id="apStep3">
+                    <div class="n">3</div>
+                    <div class="t" data-i18n="auto.s3t">开启托管 · 全自动生产</div>
+                    <div class="d" data-i18n="auto.s3d">24 小时按章节推进；服务重启也会自动接着干。</div>
+                    <div class="act">
+                        <button class="btn btn-primary btn-sm" onclick="apQuickStart()">
+                            <i class="bi bi-play-fill"></i> <span data-i18n="auto.s3b">开启自动生产</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 托管开关 + 当前状态 -->
+        <div class="ap-card mb-3">
+            <div class="ap-card-head">
+                <div class="ap-card-title"><i class="bi bi-toggles"></i> <span data-i18n="auto.ctl">托管总控</span></div>
+                <div class="spacer"></div>
+                <button class="btn btn-ghost btn-sm" onclick="apRefreshAll(true)">
+                    <i class="bi bi-arrow-clockwise"></i> <span data-i18n="auto.refresh">刷新</span>
+                </button>
+            </div>
+            <div class="ap-card-body">
+                <div class="ap-switch">
+                    <div class="ap-toggle" id="apToggle" onclick="apToggleHost()" title="开启 / 暂停自动生产"></div>
+                    <div style="flex:1 1 240px;min-width:0">
+                        <div class="ap-state-title" id="apStateTitle">加载中…</div>
+                        <div class="ap-state-sub" id="apStateSub">—</div>
+                    </div>
+                    <div style="display:flex;gap:6px;flex-wrap:wrap">
+                        <button class="btn btn-ghost btn-sm" onclick="apPause()" id="apBtnPause" style="display:none">
+                            <i class="bi bi-pause-fill"></i> <span data-i18n="auto.pause">暂停</span>
+                        </button>
+                        <button class="btn btn-ghost btn-sm" onclick="apResume()" id="apBtnResume" style="display:none">
+                            <i class="bi bi-play-fill"></i> <span data-i18n="auto.resume">恢复</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="ap-flowbar"><i id="apFlowBar"></i></div>
+                <div class="ap-stepchips" id="apStepChips"></div>
+                <div class="ap-checks" id="apChecks"></div>
+            </div>
+        </div>
+
+        <!-- KPI -->
+        <div class="ap-card mb-3">
+            <div class="ap-card-head">
+                <div class="ap-card-title"><i class="bi bi-speedometer2"></i> <span data-i18n="auto.kpi">生产总览</span></div>
+                <div class="spacer"></div>
+                <span class="badge-soft" id="apKpiRange">近 24 小时</span>
+            </div>
+            <div class="ap-card-body">
+                <div class="ap-kpis" id="apKpis"></div>
+                <div class="ap-curve" id="apCurve"></div>
+                <div class="ap-stage-lbl"><span data-i18n="auto.curveTip">柱高 = 该小时完成的集数；红色为失败</span><span id="apCurveTip">—</span></div>
+            </div>
+        </div>
+
+        <!-- 成品验收（用户唯一必须看的清单） -->
+        <div class="ap-card mb-3">
+            <div class="ap-card-head">
+                <div class="ap-card-title"><i class="bi bi-collection-play"></i> <span data-i18n="auto.deliver">成品验收</span></div>
+                <div class="spacer"></div>
+                <select class="form-select form-select-sm" id="apDeliverFilter" onchange="apRenderDeliver()" style="width:auto;min-width:150px">
+                    <option value="pending" data-i18n="auto.fPending">待验收</option>
+                    <option value="all" data-i18n="auto.fAll">全部</option>
+                    <option value="accepted" data-i18n="auto.fAccepted">已通过</option>
+                    <option value="rejected" data-i18n="auto.fRejected">已打回</option>
+                </select>
+            </div>
+            <div class="ap-card-body">
+                <div id="apDeliverBox"><div class="ap-empty" data-i18n="auto.deliverEmpty">暂无成片。开启托管后，每集成片都会出现在这里。</div></div>
+            </div>
+        </div>
+
+        <!-- 需人工介入 -->
+        <div class="ap-card mb-3" id="apExcCard" style="display:none">
+            <div class="ap-card-head">
+                <div class="ap-card-title"><i class="bi bi-exclamation-triangle" style="color:var(--warn)"></i> <span data-i18n="auto.exc">需人工介入</span></div>
+                <div class="spacer"></div>
+                <span class="badge-soft" id="apExcCount">0</span>
+            </div>
+            <div class="ap-card-body">
+                <div id="apExcBox"></div>
+            </div>
+        </div>
+
+        <!-- 分集进度 -->
+        <div class="ap-card mb-3">
+            <div class="ap-card-head">
+                <div class="ap-card-title"><i class="bi bi-list-ol"></i> <span data-i18n="auto.epProgress">分集进度</span></div>
+                <div class="spacer"></div>
+                <span class="badge-soft" id="apEpSummary">—</span>
+            </div>
+            <div class="ap-card-body">
+                <div class="ap-epgrid" id="apEpGrid"></div>
+            </div>
+        </div>
+
+        <!-- 项目生产配置 -->
+        <div class="ap-card mb-3">
+            <div class="ap-card-head">
+                <div class="ap-card-title"><i class="bi bi-gear-wide-connected"></i> <span data-i18n="auto.plans">项目生产配置</span></div>
+                <div class="spacer"></div>
+                <span class="badge-soft" id="apPlanSummary">—</span>
+            </div>
+            <div class="ap-card-body">
+                <div id="apPlanBox"></div>
+            </div>
+        </div>
+
+        <div class="hint" style="margin:6px 2px 0">
+            <i class="bi bi-info-circle"></i>
+            <span data-i18n="auto.foot">托管为单线程串行（同一时刻只跑一集），避免多任务抢显存；暂停只在步骤边界生效，不会产生半成品。</span>
+        </div>
+    </section>
+
+    <!-- ============ 高级模式（原有 9 步手动流程，默认折叠） ============ -->
+    <div id="advancedArea" style="display:none">
 
     <!-- 步骤条 -->
     <nav class="stepper" id="stepper">
@@ -1231,6 +1532,8 @@
             </div>
         </div>
     </section>
+
+    </div><!-- /#advancedArea 高级模式结束 -->
 
 </main>
 
@@ -5218,6 +5521,13 @@ function t(key, fallback){
     return (cur === null || cur === undefined) ? (fallback !== undefined ? fallback : key) : cur;
 }
 
+/** 带占位符的翻译：ti('a.b', {n: 3}, '共 {n} 集') */
+function ti(key, vars, fallback){
+    const raw = t(key, fallback);
+    if (typeof raw !== 'string') return fallback || key;
+    return raw.replace(/\{(\w+)\}/g, (m, k) => (vars && k in vars) ? String(vars[k]) : m);
+}
+
 async function loadI18n(lang){
     const want = lang || I18N_LANG;
     try{
@@ -5929,11 +6239,618 @@ async function trackKeyframeTask(taskId){
     }
 }
 
+/* ===================== 无人值守托管控制台 ===================== */
+/* 设计目标：把「9 步手动向导」降级为高级模式，主视图只回答三个问题 ——
+   ① 电脑现在在干什么？② 有哪些成品等着我看？③ 有没有卡住要人管？
+   轮询策略：托管运行时 5s（要看到进度流动），空闲时 15s（省资源）。 */
+
+let AP = {                       // 托管界面状态
+    state: null,                 // /api/autopilot/status
+    ready: null,                 // /api/autopilot/ready
+    plans: [],                   // /api/autopilot/plans
+    progress: [],                 // /api/autopilot/progress
+    deliverables: [],
+    exceptions: [],
+    timer: null,
+    busy: false
+};
+
+const AP_STEP_LABELS = {
+    script: '剧本', assets: '资产', storyboard: '分镜', keyframe: '尾帧',
+    video: '视频', final: '成片', tts: '配音', mix: '混音'
+};
+/** 步骤名（跟随语言包，缺键回退中文） */
+function apStep(s){ return t('auto.step.' + s, AP_STEP_LABELS[s] || s); }
+
+function setAppMode(mode, silent){
+    const auto = mode !== 'advanced';
+    const pa = $('panelAuto'), adv = $('advancedArea');
+    if (pa) pa.style.display = auto ? 'block' : 'none';
+    if (adv) adv.style.display = auto ? 'none' : 'block';
+    const ba = $('modeAuto'), bb = $('modeAdvanced');
+    if (ba) ba.classList.toggle('on', auto);
+    if (bb) bb.classList.toggle('on', !auto);
+    try { localStorage.setItem('mj_app_mode', auto ? 'auto' : 'advanced'); } catch(e) {}
+    if (auto){
+        apRefreshAll();
+        apStartPoll();
+    } else {
+        apStopPoll();
+        // 切到高级模式时补齐工作台数据，避免面板空白
+        if (typeof refreshSteps === 'function') refreshSteps();
+    }
+    if (!silent && auto) window.scrollTo({top:0, behavior:'smooth'});
+}
+
+function apStartPoll(){
+    apStopPoll();
+    const period = (AP.state && AP.state.running && !AP.state.paused) ? 5000 : 15000;
+    AP.timer = setInterval(() => { if (!AP.busy) apRefreshAll(); }, period);
+}
+
+function apStopPoll(){
+    if (AP.timer){ clearInterval(AP.timer); AP.timer = null; }
+}
+
+async function apGet(url){
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+}
+
+async function apPost(url, body){
+    const r = await fetch(url, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(body || {})
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.success === false) throw new Error(d.error || ('HTTP ' + r.status));
+    return d;
+}
+
+async function apRefreshAll(force){
+    if (AP.busy) return;
+    AP.busy = true;
+    try {
+        const [st, rd, pl, pr, dl, ex] = await Promise.all([
+            apGet('/api/autopilot/status'),
+            apGet('/api/autopilot/ready'),
+            apGet('/api/autopilot/plans'),
+            apGet('/api/autopilot/progress'),
+            apGet('/api/autopilot/deliverables'),
+            apGet('/api/autopilot/exceptions')
+        ]);
+        AP.state = st; AP.ready = rd;
+        AP.plans = pl.items || [];
+        AP.progress = pr.items || [];
+        AP.deliverables = dl.items || [];
+        AP.exceptions = ex.items || [];
+        apRenderAll();
+        // 依据实际运行状态调整轮询频率
+        if (!AP.timer) apStartPoll();
+    } catch(e){
+        const t = $('apStateTitle');
+        if (t) t.textContent = '托管状态读取失败：' + e.message;
+        if (force) toast('托管状态读取失败：' + e.message, 'err');
+    } finally {
+        AP.busy = false;
+    }
+}
+
+function apRenderAll(){
+    apRenderHero();
+    apRenderState();
+    apRenderKpis();
+    apRenderCurve();
+    apRenderDeliver();
+    apRenderExceptions();
+    apRenderEpisodes();
+    apRenderPlans();
+}
+
+function apRenderHero(){
+    const running = !!(AP.state && AP.state.running && !AP.state.paused);
+    const plans = AP.plans || [];
+    const enabled = plans.filter(p => p.enabled);
+    const hasNovel = AP.progress.some(p => (p.chapters_found || 0) > 0);
+    const styled = plans.some(p => (p.style || '').trim());
+    const stepDone = [
+        hasNovel,                       // 已有可生产的小说/项目
+        styled,                         // 已用总控 AI 定过风格
+        running && enabled.length > 0   // 托管在跑
+    ];
+    ['apStep1','apStep2','apStep3'].forEach((id, i) => {
+        const el = $(id);
+        if (el) el.classList.toggle('done', !!stepDone[i]);
+    });
+}
+
+function apRenderState(){
+    const st = AP.state || {};
+    const cur = st.current || {};
+    const running = !!st.running, paused = !!st.paused;
+    const enabled = (AP.plans || []).filter(p => p.enabled).length;
+
+    const tg = $('apToggle');
+    if (tg){
+        tg.classList.toggle('on', running && !paused);
+        tg.classList.toggle('busy', running && !paused && !!cur.episode);
+    }
+    $('apBtnPause').style.display  = (running && !paused) ? '' : 'none';
+    $('apBtnResume').style.display = (paused || !running) ? '' : 'none';
+
+    let title, sub;
+    if (paused){
+        title = t('auto.state.paused', '已暂停');
+        sub = st.pause_reason ? ti('auto.state.pausedReason', { r: st.pause_reason }, '原因：{r}')
+                              : t('auto.state.pausedSub', '托管已暂停，不会开始新的生产');
+    } else if (cur && cur.episode){
+        const stage = apStep(cur.step) || t('auto.state.working', '处理中');
+        title = ti('auto.state.producing', { project: cur.project || '', ep: cur.episode, stage },
+                   '正在生产：{project} 第{ep}集 · {stage}');
+        sub = ti('auto.state.progress',
+                 { msg: cur.message || '', pct: cur.percent || 0, at: cur.started_at || '—' },
+                 '{msg}　进度 {pct}%　开始于 {at}');
+    } else if (running){
+        title = enabled ? t('auto.state.idle', '托管运行中 · 当前无待生产集')
+                        : t('auto.state.standby', '托管待命');
+        sub = enabled
+            ? ti('auto.state.idleSub', { n: enabled }, '已启用 {n} 个项目，全部集次都已完成或待人工处理')
+            : t('auto.state.idleSubNone', '还没有启用任何项目 —— 请在上方「上传小说」并开启自动生产');
+    } else {
+        title = t('auto.state.off', '未开启自动生产');
+        sub = enabled ? t('auto.state.offHasPlan', '已有启用项目，点右侧开关或「恢复」即可继续生产')
+                      : t('auto.state.offSub', '按上方三步走：上传小说 → 总控 AI 定风格 → 开启自动生产');
+    }
+    $('apStateTitle').textContent = title;
+    $('apStateSub').textContent = sub;
+
+    const bar = $('apFlowBar');
+    if (bar) bar.style.width = (cur && cur.episode ? Math.max(3, Math.min(100, cur.percent || 0)) : 0) + '%';
+
+    // 步骤链：让"现在跑到哪一步"一眼可见
+    const chips = $('apStepChips');
+    if (chips){
+        const order = ['script','assets','storyboard','keyframe','video','final','tts','mix'];
+        const curStep = cur.step || '';
+        const done = (cur.steps_done || []);
+        chips.innerHTML = order.map((s, i) => {
+            let cls = '';
+            if (done.indexOf(s) >= 0) cls = 'done';
+            if (curStep === s || (curStep || '').startsWith(s + ':')) cls = 'run';
+            if (!cur.episode) cls = 'skip';
+            return `<span class="ap-stepchip ${cls}">${i+1}.${apStep(s)}</span>`;
+        }).join('') + (cur.retries
+            ? `<span class="ap-stepchip run">${ti('auto.retryN', { n: cur.retries }, '重试 {n} 次')}</span>`
+            : '');
+    }
+
+    // 自检：告诉用户"还差什么才能真正无人值守"
+    const ck = $('apChecks');
+    if (ck){
+        const rd = AP.ready || {};
+        const items = rd.checks || [];
+        ck.innerHTML = items.map(c =>
+            `<span class="ap-check ${c.ok ? 'ok' : 'no'}" title="${esc(c.hint || '')}">
+                <i class="bi ${c.ok ? 'bi-check-circle-fill' : 'bi-exclamation-circle-fill'}"></i>
+                ${esc(t('auto.check.' + c.key, c.label))}${c.ok ? '' : t('auto.needAction', ' · 需处理')}
+            </span>`).join('') +
+            (rd.ok ? `<span class="ap-check ok"><i class="bi bi-shield-check"></i> ${t('auto.check.allOk', '具备无人值守条件')}</span>` : '');
+    }
+}
+
+function apRenderKpis(){
+    const st = AP.state || {};
+    const c = st.curve || {};
+    const pend = (AP.deliverables || []).filter(d => d.review === 'pending').length;
+    const rows = [
+        { k: t('auto.kpiLabel.pending', '待验收成片'), v: pend, cls: pend ? 'warn' : 'ok' },
+        { k: t('auto.kpiLabel.done24', '近24h完成'), v: c.episodes_done || 0, cls:'ok' },
+        { k: t('auto.kpiLabel.fail24', '近24h失败'), v: c.episodes_failed || 0, cls: (c.episodes_failed ? 'err' : '') },
+        { k: t('auto.kpiLabel.exc', '需人工介入'), v: (AP.exceptions || []).length, cls: ((AP.exceptions || []).length ? 'err' : 'ok') },
+        { k: t('auto.kpiLabel.throughput', '吞吐(集/时)'), v: c.throughput_per_hour || 0 },
+        { k: t('auto.kpiLabel.avg', '平均耗时'), v: fmtDuration(c.avg_elapsed_sec) },
+        { k: t('auto.kpiLabel.enabled', '启用项目'), v: (AP.plans || []).filter(p => p.enabled).length },
+        { k: t('auto.kpiLabel.retries', '累计重试'), v: (st.totals || {}).retries || 0 }
+    ];
+    $('apKpis').innerHTML = rows.map(r =>
+        `<div class="ap-kpi ${r.cls || ''}"><div class="k">${esc(r.k)}</div><div class="v">${r.v}</div></div>`
+    ).join('');
+}
+
+function apRenderCurve(){
+    const box = $('apCurve');
+    if (!box) return;
+    const c = (AP.state && AP.state.curve) || {};
+    const buckets = c.buckets || [];
+    if (!buckets.length){
+        box.innerHTML = '<div class="ap-empty" style="width:100%">'
+            + t('auto.curveEmpty', '还没有生产记录。开启托管跑完第一集后，这里会出现每小时产出曲线。')
+            + '</div>';
+        $('apCurveTip').textContent = '—';
+        return;
+    }
+    const max = Math.max(1, ...buckets.map(b => (b.done || 0) + (b.failed || 0)));
+    box.innerHTML = buckets.map(b => {
+        const d = b.done || 0, f = b.failed || 0, tot = d + f;
+        const h = tot ? Math.max(6, Math.round(tot / max * 88)) : 2;
+        const dh = tot ? Math.round(h * d / tot) : 0;
+        const fh = h - dh;
+        return `<div class="col" title="${esc(b.label)} ${ti('auto.curveTitle', { d, f }, '完成 {d} · 失败 {f}')}">
+            ${fh ? `<div class="bar f" style="height:${fh}px"></div>` : ''}
+            <div class="bar" style="height:${dh}px"></div>
+            <div class="lbl">${esc(b.label)}</div>
+        </div>`;
+    }).join('');
+    $('apCurveTip').textContent =
+        ti('auto.curveSummary', { n: c.episodes_done || 0, avg: fmtDuration(c.avg_elapsed_sec), last: c.last_at || '—' },
+           '合计 {n} 集 · 平均 {avg} · 最后 {last}');
+}
+
+function apRenderDeliver(){
+    const box = $('apDeliverBox');
+    if (!box) return;
+    const f = ($('apDeliverFilter') || {}).value || 'pending';
+    let items = AP.deliverables || [];
+    if (f !== 'all') items = items.filter(x => (x.review || 'pending') === f);
+    if (!items.length){
+        box.innerHTML = `<div class="ap-empty">${
+            f === 'pending' ? t('auto.deliverEmpty', '暂无待验收成片。开启托管后，每集完成的成片都会出现在这里。')
+                            : t('auto.filterEmpty', '该筛选下暂无记录。')}</div>`;
+        return;
+    }
+    box.innerHTML = items.map(x => {
+        const rev = x.review || 'pending';
+        const tagText = t('auto.review.' + rev, {pending:'待验收', accepted:'已通过', rejected:'已打回'}[rev] || rev);
+        const missing = x.exists ? '' : `<span class="ap-tag rejected">${t('auto.fileMissing', '文件缺失')}</span>`;
+        const meta = x.meta || {};
+        return `<div class="ap-row">
+            <video class="thumb" src="${esc(x.url)}" muted preload="metadata"></video>
+            <div class="grow">
+                <div class="t">${ti('auto.epN', { n: x.episode_no }, '第 {n} 集')}
+                    <span class="ap-tag ${rev}">${tagText}</span>${missing}
+                    <span class="ap-tag todo">${esc(meta.title || '')}</span>
+                </div>
+                <div class="d">
+                    ${esc(x.filename)} · ${fmtSize(x.size)}
+                    ${meta.elapsed_sec != null ? ' · ' + t('auto.elapsed', '生产耗时') + ' ' + fmtDuration(meta.elapsed_sec) : ''}
+                    ${meta.retries ? ' · ' + ti('auto.retryAuto', { n: meta.retries }, '自动重试 {n} 次') : ''}
+                    <br>${esc(x.project || '')} · ${esc(x.updated_at || x.created_at || '')}
+                </div>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+                <button class="btn btn-ghost btn-sm" onclick="window.open('${esc(x.url)}','_blank')">
+                    <i class="bi bi-play-circle"></i> ${t('auto.play', '播放')}</button>
+                <button class="btn btn-ghost btn-sm"
+                    onclick="window.open('${esc(x.url)}${x.url.includes('?') ? '&' : '?'}download=1','_blank')">
+                    <i class="bi bi-download"></i> ${t('auto.download', '下载')}</button>
+                ${rev !== 'accepted'
+                    ? `<button class="btn btn-primary btn-sm" onclick="apReview(${x.episode_no},'accepted','${esc(x.project || '')}')">
+                        <i class="bi bi-check2"></i> ${t('auto.accept', '通过')}</button>` : ''}
+                ${rev !== 'rejected'
+                    ? `<button class="btn btn-ghost btn-sm" onclick="apReview(${x.episode_no},'rejected','${esc(x.project || '')}')">
+                        <i class="bi bi-arrow-counterclockwise"></i> ${t('auto.reject', '打回重做')}</button>` : ''}
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function apRenderExceptions(){
+    const card = $('apExcCard'), box = $('apExcBox'), cnt = $('apExcCount');
+    const items = AP.exceptions || [];
+    if (cnt) cnt.textContent = items.length;
+    if (card) card.style.display = items.length ? '' : 'none';
+    if (!box) return;
+    box.innerHTML = items.map(x => `
+        <div class="ap-row">
+            <div class="grow">
+                <div class="t">${esc(x.project || '')} ${ti('auto.epN', { n: x.episode_no }, '第 {n} 集')}
+                    <span class="ap-tag rejected">${t('auto.kpiLabel.exc', '需人工介入')}</span></div>
+                <div class="d">${esc(x.reason || t('auto.unknownReason', '未知原因'))}<br>${ti('auto.markedAt', { at: x.marked_at || '—' }, '标记于 {at}')}</div>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+                <button class="btn btn-primary btn-sm" onclick="apResolveExc('${esc(x.project || '')}',${x.episode_no},'retry')">
+                    <i class="bi bi-arrow-repeat"></i> ${t('auto.excRetry', '已处理，重新尝试')}</button>
+                <button class="btn btn-ghost btn-sm" onclick="apResolveExc('${esc(x.project || '')}',${x.episode_no},'ignore')">
+                    <i class="bi bi-slash-circle"></i> ${t('auto.excIgnore', '忽略本集')}</button>
+            </div>
+        </div>`).join('');
+}
+
+function apRenderEpisodes(){
+    const box = $('apEpGrid');
+    if (!box) return;
+    const STAGES = ['script','assets','storyboard','video','final'];
+    const rows = [];
+    let totalDone = 0, totalAll = 0, others = 0;
+    // 分集进度跟随「当前项目」上下文：只看本项目，避免把全部项目的集数加在一起造成误读
+    const curProj = apCurrentProject();
+    (AP.progress || []).forEach(p => {
+        if (curProj && p.project !== curProj){
+            others += (p.episodes || []).filter(e => e.state === 'todo' || e.state === 'rejected').length;
+            return;
+        }
+        totalDone += (p.done || 0); totalAll += (p.total || 0);
+        (p.episodes || []).forEach(e => rows.push({ ...e, project: p.project, plan: p }));
+    });
+    if (!rows.length){
+        box.innerHTML = '<div class="ap-empty">'
+            + t('auto.epEmpty', '该项目还没有可生产的集。请先上传小说并建立项目，系统会自动按章节切分集次。')
+            + '</div>';
+        $('apEpSummary').textContent = '—';
+        return;
+    }
+    // 需要关注（异常/打回）的排前面，其余按项目+集号
+    rows.sort((a,b) => {
+        const w = r => r.state === 'pending_human' ? 0 : (r.state === 'rejected' ? 1 : 2);
+        return (w(a) - w(b)) || String(a.project).localeCompare(String(b.project)) ||
+               ((a.episode_no || 0) - (b.episode_no || 0));
+    });
+    box.innerHTML = rows.slice(0, 240).map(e => {
+        const done = e.state === 'done';
+        const bad = e.state === 'pending_human' || e.state === 'rejected';
+        const tagCls = bad ? 'rejected' : (done ? 'done' : 'todo');
+        const tagTxt = t('auto.epState.' + e.state,
+                         {done:'已完成', pending_human:'需人工', rejected:'已打回', todo:'待生产'}[e.state] || e.state);
+        // 阶段条：已完成 = 全亮；否则按产物存在性给个粗粒度提示（done 集全亮）
+        const bars = STAGES.map((s, i) => {
+            if (done) return '<i class="on"></i>';
+            if (bad) return i === 0 ? '<i class="bad"></i>' : '<i></i>';
+            return '<i></i>';
+        }).join('');
+        return `<div class="ap-epcard">
+            <div class="h">
+                <span class="no">${ti('auto.epN', { n: e.episode_no }, '第 {n} 集')}</span>
+                <span class="ap-tag ${tagCls}">${tagTxt}</span>
+            </div>
+            <div style="font-size:.73rem;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"
+                 title="${esc(e.title || '')}">${esc(e.title || '')} · ${e.char_count || 0} 字</div>
+            <div class="ap-stages">${bars}</div>
+            <div class="ap-stage-lbl"><span>${esc(e.project || '')}</span><span>${esc(e.note || '')}</span></div>
+        </div>`;
+    }).join('') + (rows.length > 240
+        ? `<div class="ap-empty" style="grid-column:1/-1">${ti('auto.epTrunc', { n: rows.length }, '仅显示前 240 集（共 {n} 集）')}</div>` : '');
+    $('apEpSummary').textContent = ti('auto.epSummary', { a: totalDone, b: totalAll }, '{a}/{b} 集已完成')
+        + (others ? ' · ' + ti('auto.epOthers', { n: others }, '其它项目还有 {n} 集待生产') : '');
+}
+
+/** 取某项目的已完成 / 总集数（供配置行展示） */
+function _apDone(project){ const p = (AP.progress || []).find(x => x.project === project); return (p && p.done) || 0; }
+function _apTotal(project){ const p = (AP.progress || []).find(x => x.project === project); return (p && p.total) || 0; }
+
+function apRenderPlans(){
+    const box = $('apPlanBox');
+    if (!box) return;
+    const plans = AP.plans || [];
+    const withNovel = plans.filter(p => (p.novel_id || '').trim());
+    $('apPlanSummary').textContent = ti('auto.planSummary',
+        { a: plans.filter(p => p.enabled).length, b: plans.length }, '{a} / {b} 个项目已启用');
+    if (!plans.length){
+        box.innerHTML = '<div class="ap-empty">'
+            + t('auto.planEmpty', '还没有项目。请先在「上传小说」里导入小说，系统会自动建立项目。')
+            + '</div>';
+        return;
+    }
+    // 可生产的项目优先展示（关联了小说的），其余折叠到最后
+    const sorted = plans.slice().sort((a,b) => {
+        const w = p => ((p.novel_id || '').trim() ? 0 : 1);
+        return (w(a) - w(b)) || String(a.project).localeCompare(String(b.project));
+    });
+    box.innerHTML = sorted.map(p => {
+        const modes = [['per_shot', t('auto.mode.per_shot', '逐镜头')],
+                       ['episode', t('auto.mode.episode', '整集')],
+                       ['keyframe', t('auto.mode.keyframe', '关键帧')]];
+        const noNovel = !(p.novel_id || '').trim();
+        return `<div class="ap-row">
+            <div class="grow">
+                <div class="t">${esc(p.project)}
+                    ${p.enabled ? `<span class="ap-tag running">${t('auto.hosted', '托管中')}</span>`
+                                : `<span class="ap-tag todo">${t('auto.notEnabled', '未启用')}</span>`}
+                    ${noNovel ? `<span class="ap-tag rejected">${t('auto.noNovel', '未关联小说')}</span>` : ''}
+                </div>
+                <div class="d">${t('auto.style', '风格')}：${esc((p.style || t('auto.styleUnset', '（未设定）')).slice(0, 90))}
+                    · ${ti('auto.planProgress', { a: _apDone(p.project), b: _apTotal(p.project) },
+                           '已完成 {a}/{b} 集')}</div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;align-items:center">
+                    <label style="font-size:.72rem;color:var(--muted)">${t('auto.epRange', '集数范围')}
+                        <input class="form-control form-control-sm" style="width:88px" value="${esc(String(p.episodes))}"
+                               onchange="apSetPlan('${esc(p.project)}','episodes',this.value)" placeholder="all"></label>
+                    <label style="font-size:.72rem;color:var(--muted)">${t('auto.shotsPerEp', '每集镜头')}
+                        <input class="form-control form-control-sm" style="width:64px" type="number" min="4" max="40"
+                               value="${p.target_shots || 12}"
+                               onchange="apSetPlan('${esc(p.project)}','target_shots',+this.value)"></label>
+                    <label style="font-size:.72rem;color:var(--muted)">${t('auto.videoMode', '视频模式')}
+                        <select class="form-select form-select-sm" style="width:auto"
+                                onchange="apSetPlan('${esc(p.project)}','video_mode',this.value)">
+                            ${modes.map(m => `<option value="${m[0]}" ${p.video_mode === m[0] ? 'selected' : ''}>${m[1]}</option>`).join('')}
+                        </select></label>
+                    <label style="font-size:.72rem;color:var(--muted)">${t('auto.coverageMin', '覆盖率下限')}
+                        <input class="form-control form-control-sm" style="width:64px" type="number" min="0" max="100"
+                               value="${p.coverage_min_percent ?? 95}"
+                               onchange="apSetPlan('${esc(p.project)}','coverage_min_percent',+this.value)"></label>
+                    <label style="font-size:.72rem;color:var(--muted)">${t('auto.retryMax', '重试上限')}
+                        <input class="form-control form-control-sm" style="width:56px" type="number" min="0" max="5"
+                               value="${p.step_max_retries ?? 2}"
+                               onchange="apSetPlan('${esc(p.project)}','step_max_retries',+this.value)"></label>
+                </div>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+                ${p.enabled
+                    ? `<button class="btn btn-ghost btn-sm" onclick="apEnable('${esc(p.project)}',false)">
+                        <i class="bi bi-stop-circle"></i> ${t('auto.stopHost', '停止托管')}</button>`
+                    : `<button class="btn btn-primary btn-sm" onclick="apEnable('${esc(p.project)}',true)">
+                        <i class="bi bi-play-circle"></i> ${t('auto.startHost', '启用托管')}</button>`}
+                <button class="btn btn-ghost btn-sm" onclick="apRunOnce('${esc(p.project)}')">
+                    <i class="bi bi-lightning-charge"></i> ${t('auto.runOnce', '立即生产一集')}</button>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+/* ---------- 交互动作 ---------- */
+
+async function apToggleHost(){
+    const running = !!(AP.state && AP.state.running && !AP.state.paused);
+    try {
+        if (running) { await apPause(); } else { await apResume(); }
+    } catch(e){ toast('操作失败：' + e.message, 'err'); }
+}
+
+async function apPause(){
+    try { await apPost('/api/autopilot/pause', { reason:'控制台手动暂停' }); toast('已暂停托管', 'ok'); }
+    catch(e){ toast('暂停失败：' + e.message, 'err'); }
+    apRefreshAll();
+}
+
+async function apResume(){
+    try {
+        const enabled = (AP.plans || []).filter(p => p.enabled).length;
+        if (!enabled){
+            toast('还没有启用任何项目，请先「启用托管」', 'warn');
+            return;
+        }
+        await apPost('/api/autopilot/resume', {});
+        toast('托管已恢复，电脑将自动接着生产', 'ok');
+    } catch(e){ toast('恢复失败：' + e.message, 'err'); }
+    apRefreshAll();
+}
+
+async function apEnable(project, on){
+    try {
+        if (on){
+            const d = await apPost('/api/autopilot/enable', { project });
+            if (d.warning) toast(d.warning, 'warn');
+            else toast(`${project} 已纳入托管`, 'ok');
+            await apPost('/api/autopilot/resume', {});
+        } else {
+            await apPost('/api/autopilot/disable', { project });
+            toast(`${project} 已停止托管`, 'ok');
+        }
+    } catch(e){ toast('操作失败：' + e.message, 'err'); }
+    apRefreshAll();
+}
+
+async function apSetPlan(project, key, value){
+    try {
+        // 集数范围允许 "all" 或 "1,2,3"
+        let v = value;
+        if (key === 'episodes'){
+            const s = String(v).trim();
+            if (!s || s.toLowerCase() === 'all') v = 'all';
+            else v = s;
+        }
+        const d = await apPost(`/api/autopilot/plan/${encodeURIComponent(project)}`, { [key]: v });
+        if (key === 'episodes' || key === 'target_shots'){
+            // 这两项会改变"哪些集要生产"，需要重算进度
+            AP.plans = (await apGet('/api/autopilot/plans')).items || [];
+            AP.progress = (await apGet('/api/autopilot/progress')).items || [];
+            apRenderEpisodes(); apRenderPlans();
+        }
+        toast('已更新 ' + project, 'ok');
+    } catch(e){ toast('更新失败：' + e.message, 'err'); }
+}
+
+async function apReview(episodeNo, review, project){
+    // 成品清单是跨项目的，必须用条目自身的项目，而不是当前下拉选中的项目
+    project = project || apCurrentProject();
+    if (!project){ toast('请先在上方选择项目', 'warn'); return; }
+    try {
+        await apPost('/api/autopilot/deliverables/review',
+                     { project, episode_no: episodeNo, review });
+        toast(review === 'accepted' ? `第${episodeNo}集已通过验收` : `第${episodeNo}集已打回，将自动重做`, 'ok');
+    } catch(e){ toast('操作失败：' + e.message, 'err'); }
+    apRefreshAll();
+}
+
+async function apResolveExc(project, episodeNo, action){
+    try {
+        await apPost('/api/autopilot/exceptions/resolve',
+                     { project, episode_no: episodeNo, note: action === 'ignore' ? '用户选择忽略本集' : '用户已处理' });
+        toast(action === 'ignore' ? '已忽略该集' : '已标记处理，托管会重新尝试', 'ok');
+    } catch(e){ toast('操作失败：' + e.message, 'err'); }
+    apRefreshAll();
+}
+
+async function apQuickStart(){
+    const project = apCurrentProject();
+    if (!project){ toast('请先选择或创建项目（第一步：上传小说）', 'warn'); return; }
+    const plan = (AP.plans || []).find(p => p.project === project) || {};
+    if (!(plan.novel_id || '').trim()){
+        toast('该项目未关联小说，无法生产；请先上传小说并建立项目', 'warn');
+        return;
+    }
+    if (AP.ready && AP.ready.ok === false){
+        const bad = (AP.ready.checks || []).filter(c => !c.ok).map(c => c.label + '（' + (c.hint || '') + '）');
+        toast('还有前置项未就绪：' + bad.join('；'), 'warn');
+        return;
+    }
+    await apEnable(project, true);
+    setAppMode('auto', true);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+async function apRunOnce(project){
+    const p = (AP.progress || []).find(x => x.project === project);
+    const next = ((p && p.episodes) || []).find(e => e.state === 'todo' || e.state === 'rejected');
+    if (!next){ toast('该项目没有待生产的集', 'warn'); return; }
+    if (!confirm(`立即生产《${project}》第 ${next.episode_no} 集？\n\n这一步会真实调用模型与 ComfyUI，可能耗时较久（页面会一直等待）。`)) return;
+    toast(`开始生产第 ${next.episode_no} 集…（耗时较长，请留意日志）`, 'ok');
+    try {
+        const d = await apPost('/api/autopilot/run-once', { project, episode_no: next.episode_no });
+        const r = d.result || {};
+        toast(r.ok ? `第${next.episode_no}集生产完成` : `第${next.episode_no}集失败：${r.error || '未知'}`,
+              r.ok ? 'ok' : 'err');
+    } catch(e){ toast('生产失败：' + e.message, 'err'); }
+    apRefreshAll();
+}
+
+// 总控 AI 一键设定：把对话敲定的风格/镜头数写进生产配置
+async function applyStyleToPlan(){
+    const project = apCurrentProject();
+    if (!project){ toast('请先选择项目', 'warn'); return; }
+    try {
+        const d = await apPost(`/api/autopilot/plan-from-settings/${encodeURIComponent(project)}`, {});
+        const applied = d.applied || {};
+        toast(`已把总控 AI 设定写入生产配置：${Object.keys(applied).map(k => k).join('、')}`, 'ok');
+    } catch(e){ toast('一键设定失败：' + e.message + '（请先在「总控 AI 对话」里谈好风格并保存）', 'err'); }
+    apRefreshAll();
+}
+
+function apCurrentProject(){
+    const s = $('projectSelect');
+    const id = (s && s.value) ? s.value : '';
+    // 关键：托管/流水线以「目录键（dir_key）」为项目标识（与产物目录一致），
+    // 而下拉框的 value 是项目注册表 ID（形如 p2026...）。必须换算，
+    // 否则启用托管、一键设定、验收等接口都会因找不到项目而失败。
+    const p = (typeof projects !== 'undefined' && projects || []).find(x => x.id === id);
+    return (p && (p.dir_key || p.name)) || id || '';
+}
+
+function fmtDuration(sec){
+    const n = Number(sec) || 0;
+    if (!n) return '—';
+    if (n < 60) return n.toFixed(0) + ' 秒';
+    if (n < 3600) return (n / 60).toFixed(1) + ' 分钟';
+    return (n / 3600).toFixed(2) + ' 小时';
+}
+
+function fmtSize(b){
+    const n = Number(b) || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1048576).toFixed(2) + ' MB';
+}
+
 /* ===================== 初始化 ===================== */
 document.addEventListener('DOMContentLoaded', () => {
     checkComfyUIStatus();
     statusTimer = setInterval(checkComfyUIStatus, 15000);
     refreshSteps();
+
+    // 界面模式：默认「自动生产」（主视图），可在顶栏切到高级模式；选择会被记住
+    let _mode = 'auto';
+    try { _mode = localStorage.getItem('mj_app_mode') || 'auto'; } catch(e) {}
+    setAppMode(_mode, true);
 
     // 国际化：语言包由后端 /api/i18n 提供（失败时保持中文硬编码，不影响功能）
     loadI18n();
