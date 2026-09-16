@@ -502,3 +502,86 @@ export interface AITestResult {
   error?: string;
   guide?: string;
 }
+
+// ========== 超分（FlashVSR） ==========
+// 后端能力早已完整实现（app/upscale_client.py + 8 个 /api/upscale/* 端点），
+// 但此前没有任何界面入口。以下类型对齐 app.py `api_upscale_*` 的真实返回。
+
+/** GET /api/upscale/env —— 链路自检 */
+export interface UpscaleEnv {
+  available: boolean;
+  /** ComfyUI 是否在线 */
+  comfy_online: boolean;
+  comfy_version?: string;
+  comfy_url?: string;
+  /** FlashVSR 模型文件是否齐备 */
+  model_ready: boolean;
+  model_dir?: string;
+  model_files?: { name: string; exists: boolean; size_mb: number }[];
+  /** TE-Speed 加速链路是否可用 */
+  te_ready: boolean;
+  /** 旧 FlashVSR 链路是否可用 */
+  legacy_ready: boolean;
+  te_nodes?: Record<string, boolean>;
+  nodes?: Record<string, boolean>;
+  /** 不可用原因（给人看的中文说明） */
+  reasons: string[];
+  default_engine?: string;
+  te_defaults?: Record<string, unknown>;
+  defaults?: Record<string, unknown>;
+}
+
+/** GET /api/upscale/sources —— 可作为超分输入的候选视频 */
+export interface UpscaleSource {
+  /** 分类标签：成片 / 视频片段 / 超分产物 / ComfyUI/xxx */
+  kind: string;
+  name: string;
+  path: string;
+  url: string;
+  size_mb: number;
+  mtime: string;
+}
+
+/** POST /api/upscale/video 的返回 */
+export interface UpscaleSubmitResponse {
+  success: boolean;
+  task_id: string;
+  input_path: string;
+  scale: number;
+  engine: string;
+  error?: string;
+}
+
+/** GET /api/upscale/status/<task_id> —— 任务状态（pending/running/done/error） */
+export interface UpscaleTask {
+  task_id: string;
+  status: 'pending' | 'running' | 'done' | 'error';
+  progress: number;
+  message: string;
+  project_name?: string;
+  input_path?: string;
+  scale?: number;
+  engine?: string;
+  error?: string;
+  result?: {
+    output_path?: string;
+    output_url?: string;
+    input_url?: string;
+    output_filename?: string;
+    engine?: string;
+    accelerated?: boolean;
+    elapsed_sec?: number;
+    size_delta_mb?: number;
+    before?: { width?: number; height?: number; duration?: number; size_mb?: number; has_audio?: boolean };
+    after?: { width?: number; height?: number; duration?: number; size_mb?: number; has_audio?: boolean };
+  };
+}
+
+/** GET /api/upscale/list —— 已生成的超分产物 */
+export interface UpscaleArtifact {
+  name: string;
+  path: string;
+  url: string;
+  size_mb: number;
+  mtime: string;
+}

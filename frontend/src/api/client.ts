@@ -19,6 +19,7 @@ import type {
   Deliverable, DeliverablesResponse,
   Provider, ProvidersResponse,
   AIConfigResponse, AITestResult,
+  UpscaleEnv, UpscaleSource, UpscaleSubmitResponse, UpscaleTask, UpscaleArtifact,
 } from '../types';
 
 const API_BASE = '/api';
@@ -471,6 +472,19 @@ export const autopilotApi = {
   plans: () => request<{ success: boolean; plans: any[] }>('/autopilot/plans'),
   plan: (project: string) =>
     request<any>(`/autopilot/plan/${encodeURIComponent(project)}`),
+  /**
+   * 更新某项目的自动生产计划。
+   *
+   * ⚠️ 后端只接受 `autopilot.PLAN_DEFAULTS` 里声明过的字段
+   * （app.py `api_autopilot_plan_set` 用 `k in PLAN_DEFAULTS` 过滤），
+   * 传入未声明的键会被静默丢弃、甚至整体报「没有可更新字段」。
+   * 因此新增可配置项时必须同时加进 PLAN_DEFAULTS。
+   */
+  setPlan: (project: string, patch: Record<string, unknown>) =>
+    request<{ success: boolean; project: string; plan: Record<string, unknown> }>(
+      `/autopilot/plan/${encodeURIComponent(project)}`,
+      { method: 'POST', body: JSON.stringify(patch) }
+    ),
   enable: () => request<{ success: boolean }>('/autopilot/enable', { method: 'POST' }),
   disable: () => request<{ success: boolean }>('/autopilot/disable', { method: 'POST' }),
   pause: () => request<{ success: boolean }>('/autopilot/pause', { method: 'POST' }),
@@ -615,4 +629,54 @@ export const watermarkApi = {
       method: 'POST',
       body: JSON.stringify(patch),
     }),
+};
+
+/**
+ * 超分（FlashVSR）—— app/upscale_client.py 的界面入口。
+ *
+ * 后端 8 个 `/api/upscale/*` 端点早已实现且可用（含 TE-Speed 加速链路与
+ * 旧链路自动回退），但此前前端零引用，属于「建好没入口」的能力。
+ *
+ * ⚠️ attach_audio 必须显式传 true：TE-Speed 链路默认 attach_audio=False，
+ *    对「成片」超分时会把已合成的 TTS 配音整轨丢掉，产出无声视频。
+ *    该参数此前也不在后端白名单里，已一并补上。
+ */
+export const upscaleApi = {
+  /** 链路自检：ComfyUI 在线 / FlashVSR 模型 / 节点是否齐备 */
+  env: () => request<UpscaleEnv>('/upscale/env'),
+
+  /** 可作为超分输入的候选视频（成片、视频片段、已有超分产物、ComfyUI 产出） */
+  sources: (projectName: string) =>
+    request<{ success: boolean; project_name: string; items: UpscaleSource[] }>(
+      `/upscale/sources?project_name=${encodeURIComponent(projectName)}`
+    ),
+
+  /** 已生成的超分产物 */
+  list: (projectName: string) =>
+    request<{ success: boolean; project_name: string; items: UpscaleArtifact[] }>(
+      `/upscale/list?project_name=${encodeURIComponent(projectName)}`
+    ),
+
+  /** 发起超分（异步）：返回 task_id，用 status() 轮询 */
+  submit: (data: {
+    project_name: string;
+    video_path: string;
+    scale?: 2 | 3 | 4;
+    mode?: string;
+    engine?: 'te-speed-flashvsr' | 'legacy-flashvsr';
+    /** 保留源视频音轨（成片必开，否则丢配音） */
+    attach_audio?: boolean;
+    [k: string]: unknown;
+  }) =>
+    request<UpscaleSubmitResponse>('/upscale/video', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  /** 查询单个超分任务进度/结果 */
+  status: (taskId: string) =>
+    request<UpscaleTask>(`/upscale/status/${encodeURIComponent(taskId)}`),
+
+  /** 全部超分任务（按创建时间倒序） */
+  tasks: () => request<{ success: boolean; items: UpscaleTask[] }>('/upscale/tasks'),
 };

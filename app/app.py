@@ -3586,6 +3586,9 @@ def api_upscale_video():
         "max_tile_edge", "blend_overlap", "preprocess_batch",
         "quality_value", "color_fix", "frame_load_cap", "skip_first_frames", "free_vram",
         "seed", "timeout",
+        # ⚠️ 音轨旁路开关：TE-Speed 链路默认 attach_audio=False，对「成片」超分时
+        # 不显式打开会把已合成的配音丢掉，产出无声视频。
+        "attach_audio",
         # 旧 FlashVSR 链路参数（回退时生效）
         "tile_size", "tile_overlap", "tiled_vae", "tiled_dit", "unload_dit",
         "sparse_ratio", "kv_ratio", "local_range", "attention_mode", "force_offload",

@@ -94,6 +94,11 @@ PLAN_DEFAULTS = {
     "enable_final": True,
     "enable_tts": True,
     "enable_mix": True,
+    # 超分（FlashVSR）：默认开启。必须列进 PLAN_DEFAULTS ——
+    # api_autopilot_plan_set 会按 `k in PLAN_DEFAULTS` 过滤入参，
+    # 不在此处的字段无法通过接口关闭，等于没有关掉的入口。
+    "enable_upscale": True,
+    "upscale_scale": 2,
     "coverage_min_percent": 95.0,
     "consistency_min_score": 80,
     "require_consistency": True,

@@ -1,13 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '@/context/AppContext';
-import { projectsApi, keyframesApi, storyboardApi, ttsApi, mixApi, qcApi, exportApi, autopilotApi, chatApi } from '@/api/client';
+import { projectsApi, keyframesApi, storyboardApi, ttsApi, mixApi, qcApi, exportApi, autopilotApi, upscaleApi, chatApi } from '@/api/client';
 import { Button, Loading, EmptyState } from '@/components/ui';
 import { GridPage } from '@/pages/GridPage';
-import type { Project, Deliverable } from '@/types';
+import type { Project, Deliverable, UpscaleEnv, UpscaleSource, UpscaleTask, UpscaleArtifact } from '@/types';
 
 // ========== Workbench Tab Types ==========
 // 注意：'chat' 已移除 —— AI 总控改成了右侧常驻面板，不再是标签页（见 ChatPanel）
-type WorkbenchTab = 'overview' | 'autopilot' | 'keyframes' | 'ninegrid' | 'storyboard' | 'tts' | 'mix' | 'qc' | 'export' | 'deliver';
+type WorkbenchTab = 'overview' | 'autopilot' | 'keyframes' | 'ninegrid' | 'storyboard' | 'tts' | 'mix' | 'qc' | 'export' | 'deliver' | 'upscale';
 
 interface AssetItem {
   name: string;
@@ -76,6 +76,9 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
     // 成品验收：后端 /api/autopilot/deliverables 的成片清单 + 验收/打回，
     // 此前只有已删除的全局 DeliverPage（且它 fetch 了数据却从不渲染）
     { id: 'deliver', icon: '📦', label: t('wb.deliver') },
+    // 超分：后端 upscale_client 与其 8 个端点早已可用，但前端此前零引用 ——
+    // 与已删除的孤儿页面同属「建好没入口」的能力，这里补上手工入口。
+    { id: 'upscale', icon: '🔍', label: t('wb.upscale') },
     // AI总控 不再是标签页 —— 已改为右侧常驻面板（默认展开，见下方 ChatPanel）
   ];
 
@@ -180,6 +183,9 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
         )}
         {activeTab === 'deliver' && (
           <DeliverTab projectKey={projectKey} onGoAutopilot={() => setActiveTab('autopilot')} />
+        )}
+        {activeTab === 'upscale' && (
+          <UpscaleTab projectKey={projectKey} />
         )}
           </div>
         </div>
@@ -1436,6 +1442,533 @@ function DeliverTab({ projectKey, onGoAutopilot }: { projectKey: string; onGoAut
               </div>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ========== 超分（FlashVSR） ==========
+// 接口：
+//   GET  /api/upscale/env             链路自检（ComfyUI 在线 / 模型 / 节点）
+//   GET  /api/upscale/sources         候选输入视频（成片 / 片段 / 已有超分 / ComfyUI）
+//   POST /api/upscale/video           {project_name, video_path, scale, attach_audio} -> task_id
+//   GET  /api/upscale/status/<id>     轮询进度
+//   GET  /api/upscale/list            该项目已生成的超分产物
+//
+// ⚠️ attach_audio 必须传 true：后端 TE-Speed 链路默认 attach_audio=False，
+//    对「成片」超分会把已合成的 TTS 配音整轨丢掉（backend 侧该参数此前也不在白名单，
+//    已一并补上）。
+//
+// ⚠️ 可下载性取决于 URL 前缀：只有 /api/upscale/<project>/<name> 支持 ?download=1；
+//    ComfyUI 侧来源走 /api/upscale/comfyview 是 302 重定向，不能直接当附件下载。
+function UpscaleTab({ projectKey }: { projectKey: string }) {
+  const { t } = useApp();
+  const [env, setEnv] = useState<UpscaleEnv | null>(null);
+  const [sources, setSources] = useState<UpscaleSource[]>([]);
+  const [artifacts, setArtifacts] = useState<UpscaleArtifact[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [selected, setSelected] = useState('');
+  const [scale, setScale] = useState<2 | 3 | 4>(2);
+  const [task, setTask] = useState<UpscaleTask | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [playing, setPlaying] = useState<string | null>(null);
+  /**
+   * 是否把 ComfyUI 侧素材也列进候选。
+   *
+   * 后端 /api/upscale/sources 会把 **全局** COMFYUI_OUTPUT_DIR 下所有 mp4 都返回
+   * （不分项目，实测该项目能列出 300 条），混进下拉框会把本项目的成片淹没，
+   * 原生 select 里 300+ 选项也几乎没法选。故默认只显示项目自己的产物。
+   */
+  const [showComfy, setShowComfy] = useState(false);
+  /** 自动生产是否带超分（项目级计划，存于 autopilot plan） */
+  const [planOn, setPlanOn] = useState<boolean | null>(null);
+  const [planScale, setPlanScale] = useState<2 | 3 | 4>(2);
+  const [savingPlan, setSavingPlan] = useState(false);
+  /** 轮询定时器句柄（卸载/切任务时必须清掉，否则会一直打后端） */
+  const pollRef = React.useRef<number | null>(null);
+
+  const stopPoll = React.useCallback(() => {
+    if (pollRef.current !== null) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  const loadArtifacts = React.useCallback(async () => {
+    try {
+      const d = await upscaleApi.list(projectKey);
+      setArtifacts(d.items || []);
+    } catch {
+      setArtifacts([]);
+    }
+  }, [projectKey]);
+
+  const load = React.useCallback(async () => {
+    if (!projectKey) return;
+    setLoading(true);
+    setError('');
+    try {
+      // env 失败不视为致命：把原因展示出来比整页报错更有用
+      const [envRes, srcRes, planRes] = await Promise.allSettled([
+        upscaleApi.env(),
+        upscaleApi.sources(projectKey),
+        autopilotApi.plan(projectKey),
+      ]);
+      if (envRes.status === 'fulfilled') setEnv(envRes.value);
+      else setEnv(null);
+      if (planRes.status === 'fulfilled') {
+        const pl = (planRes.value?.plan || {}) as Record<string, unknown>;
+        setPlanOn(pl.enable_upscale !== false);
+        const s = Number(pl.upscale_scale);
+        setPlanScale(s === 3 || s === 4 ? (s as 3 | 4) : 2);
+      } else {
+        setPlanOn(null);
+      }
+      if (srcRes.status === 'fulfilled') {
+        const items = srcRes.value.items || [];
+        setSources(items);
+        // 默认优先选「成片」（自动生产刚出的成品），省掉一次手动选择
+        setSelected((prev) => prev || (items.find((i) => i.kind === '成片') || items[0])?.path || '');
+      } else {
+        setError(srcRes.reason instanceof Error ? srcRes.reason.message : t('upscale.loadFailed'));
+        setSources([]);
+      }
+      await loadArtifacts();
+    } finally {
+      setLoading(false);
+    }
+  }, [projectKey, loadArtifacts, t]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  // 组件卸载时停掉轮询
+  useEffect(() => () => stopPoll(), [stopPoll]);
+
+  /** 开始轮询某个任务；done/error 时自动停机并刷新产物列表 */
+  const startPoll = React.useCallback((taskId: string) => {
+    stopPoll();
+    pollRef.current = window.setInterval(async () => {
+      try {
+        const st = await upscaleApi.status(taskId);
+        setTask(st);
+        if (st.status === 'done' || st.status === 'error') {
+          stopPoll();
+          if (st.status === 'done') await loadArtifacts();
+        }
+      } catch (e) {
+        stopPoll();
+        setError(e instanceof Error ? e.message : t('upscale.statusFailed'));
+      }
+    }, 2500);
+  }, [stopPoll, loadArtifacts, t]);
+
+  const submit = async () => {
+    if (!selected) return;
+    setSubmitting(true);
+    setError('');
+    setPlaying(null);
+    try {
+      const res = await upscaleApi.submit({
+        project_name: projectKey,
+        video_path: selected,
+        scale,
+        // 成片含配音，必须保留音轨
+        attach_audio: true,
+      });
+      setTask({ task_id: res.task_id, status: 'pending', progress: 0, message: '' });
+      startPoll(res.task_id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t('upscale.submitFailed'));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  /** 保存「自动生产时是否带超分」到项目计划（后端只认 PLAN_DEFAULTS 里的字段） */
+  const savePlan = async (patch: { enable_upscale?: boolean; upscale_scale?: 2 | 3 | 4 }) => {
+    setSavingPlan(true);
+    setError('');
+    try {
+      const res = await autopilotApi.setPlan(projectKey, patch);
+      const pl = (res?.plan || {}) as Record<string, unknown>;
+      setPlanOn(pl.enable_upscale !== false);
+      const s = Number(pl.upscale_scale);
+      setPlanScale(s === 3 || s === 4 ? (s as 3 | 4) : 2);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t('upscale.planSaveFailed'));
+    } finally {
+      setSavingPlan(false);
+    }
+  };
+
+  if (loading) return <Loading />;
+
+  const ready = !!env?.available;
+  const busy = task?.status === 'pending' || task?.status === 'running';
+  /** 本项目自身产物（成片 / 片段 / 已有超分）；ComfyUI 侧是全局素材池，默认折叠 */
+  const visibleSources = showComfy
+    ? sources
+    : sources.filter((s) => !s.kind.startsWith('ComfyUI'));
+  const source = sources.find((s) => s.path === selected);
+  const srcUrl = source?.url || '';
+  // 仅 /api/upscale/<project>/<name> 支持 ?download=1（comfyview 是 302，不能当附件）
+  const downloadUrl = (u?: string) =>
+    u && u.startsWith('/api/upscale/') && !u.includes('comfyview') ? `${u}?download=1` : '';
+
+  const statusText = () => {
+    if (!task) return '';
+    if (task.status === 'pending') return t('upscale.queued');
+    if (task.status === 'running') return t('upscale.running');
+    if (task.status === 'done') return t('upscale.done');
+    return t('upscale.failed');
+  };
+
+  const res = task?.result;
+  const fmtResolution = (v?: { width?: number; height?: number }) =>
+    v?.width && v?.height ? `${v.width}×${v.height}` : '—';
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{t('upscale.title')}</h3>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">{t('upscale.subtitle')}</p>
+        </div>
+        <Button size="sm" variant="secondary" onClick={load} disabled={loading || busy}>
+          {t('common.refresh')}
+        </Button>
+      </div>
+
+      {/* 链路自检 */}
+      <div
+        className={`p-3 rounded-lg border text-sm ${
+          ready
+            ? 'bg-green-50 dark:bg-green-500/10 border-green-200 dark:border-green-500/30 text-green-700 dark:text-green-300'
+            : 'bg-amber-50 dark:bg-amber-500/10 border-amber-200 dark:border-amber-500/30 text-amber-700 dark:text-amber-300'
+        }`}
+      >
+        <div className="flex items-center justify-between gap-3">
+          <span className="font-medium">
+            {ready ? t('upscale.envOk') : t('upscale.envBad')}
+          </span>
+          <span className="text-xs">
+            {t('upscale.engine')}:{' '}
+            {env?.default_engine === 'legacy-flashvsr'
+              ? t('upscale.engineLegacy')
+              : t('upscale.engineTe')}
+          </span>
+        </div>
+        {env && (
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+            <span>{t('upscale.comfyOnline')}: {env.comfy_online ? '✓' : '✗'}</span>
+            <span>{t('upscale.modelReady')}: {env.model_ready ? '✓' : '✗'}</span>
+            <span>{t('upscale.teReady')}: {env.te_ready ? '✓' : '✗'}</span>
+            <span>{t('upscale.legacyReady')}: {env.legacy_ready ? '✓' : '✗'}</span>
+          </div>
+        )}
+        {!ready && (env?.reasons?.length ?? 0) > 0 && (
+          <div className="mt-2">
+            <p className="text-xs opacity-90">{t('upscale.envHint')}</p>
+            <ul className="mt-1 list-disc list-inside text-xs opacity-90 space-y-0.5">
+              {(env?.reasons || []).map((r) => <li key={r}>{r}</li>)}
+            </ul>
+          </div>
+        )}
+        {/* 说明流水线默认开启超分且失败即跳过，避免用户以为「没超分 = 坏了」 */}
+        <p className="mt-2 text-xs opacity-80">{t('upscale.pipelineTip')}</p>
+      </div>
+
+      {/* 自动生产是否带超分 —— 超分默认开启，且单集耗时会明显变长，
+          必须给一个真正的关闭入口（之前 enable_upscale 不在 PLAN_DEFAULTS 里，
+          接口会把该字段过滤掉，等于关不掉）。 */}
+      {planOn !== null && (
+        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-gray-900 dark:text-white">
+                {t('upscale.planToggle')}
+              </p>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                {t('upscale.planToggleHint')}
+              </p>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              <span className={`text-xs font-medium ${planOn ? 'text-green-600 dark:text-green-400' : 'text-gray-500 dark:text-gray-400'}`}>
+                {planOn ? t('upscale.on') : t('upscale.off')}
+              </span>
+              <button
+                role="switch"
+                aria-checked={planOn}
+                disabled={savingPlan}
+                onClick={() => savePlan({ enable_upscale: !planOn })}
+                className={`relative w-11 h-6 rounded-full transition-colors disabled:opacity-50 ${
+                  planOn ? 'bg-indigo-600' : 'bg-gray-300 dark:bg-gray-600'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                    planOn ? 'translate-x-5' : ''
+                  }`}
+                />
+              </button>
+            </div>
+          </div>
+
+          {/* 自动生产的超分倍率（与手工超分独立配置） */}
+          <div className="mt-3 pt-3 border-t border-gray-100 dark:border-gray-700 flex items-center gap-3">
+            <span className="text-xs text-gray-600 dark:text-gray-300">{t('upscale.planScale')}</span>
+            <div className="flex gap-2">
+              {([2, 3, 4] as const).map((n) => (
+                <button
+                  key={n}
+                  disabled={savingPlan || !planOn}
+                  onClick={() => savePlan({ upscale_scale: n })}
+                  className={`px-3 py-1 rounded-md text-xs font-medium transition-all disabled:opacity-50 ${
+                    planScale === n
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-white/5 dark:text-gray-400 dark:hover:bg-white/10'
+                  }`}
+                >
+                  {t('upscale.scaleTimes', { n })}
+                </button>
+              ))}
+            </div>
+            <span className="text-xs text-gray-400 dark:text-gray-500">{t('upscale.planScaleHint')}</span>
+          </div>
+        </div>
+      )}
+
+      {error && (
+        <div className="p-3 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-lg text-sm text-red-700 dark:text-red-300">
+          {error}
+        </div>
+      )}
+
+      {/* 选择源 + 倍率 + 发起 */}
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-4">
+        {sources.length === 0 ? (
+          <div className="text-center py-8">
+            <div className="text-4xl mb-3">🔍</div>
+            <h4 className="text-base font-medium text-gray-900 dark:text-white mb-1">{t('upscale.sourceEmpty')}</h4>
+            <p className="text-sm text-gray-500 dark:text-gray-400">{t('upscale.sourceEmptyTip')}</p>
+          </div>
+        ) : (
+          <>
+            <div className="grid md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1.5">
+                  {t('upscale.selectSource')}
+                </label>
+                <select
+                  value={selected}
+                  onChange={(e) => { setSelected(e.target.value); setPlaying(null); }}
+                  disabled={busy}
+                  className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-900 text-gray-900 dark:text-white"
+                >
+                  {Array.from(new Set(visibleSources.map((s) => s.kind))).map((kind) => (
+                    <optgroup key={kind} label={kind}>
+                      {visibleSources.filter((s) => s.kind === kind).map((s) => (
+                        <option key={s.path} value={s.path}>
+                          {s.name} · {s.size_mb} MB
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+                {/* ComfyUI 侧是全局素材池（不分项目），默认折叠避免淹没本项目成片 */}
+                <label className="mt-2 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showComfy}
+                    onChange={(e) => setShowComfy(e.target.checked)}
+                    className="rounded border-gray-300 dark:border-gray-600"
+                  />
+                  {t('upscale.showComfy', {
+                    n: sources.length - sources.filter((s) => !s.kind.startsWith('ComfyUI')).length,
+                  })}
+                </label>
+                {source && (
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1.5">
+                    {source.mtime} · {source.size_mb} MB
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1.5">
+                  {t('upscale.scale')}
+                </label>
+                <div className="flex gap-2">
+                  {([2, 3, 4] as const).map((n) => (
+                    <button
+                      key={n}
+                      onClick={() => setScale(n)}
+                      disabled={busy}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                        scale === n
+                          ? 'bg-indigo-600 text-white shadow-lg'
+                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200 hover:text-gray-900 dark:bg-white/5 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-white'
+                      }`}
+                    >
+                      {t('upscale.scaleTimes', { n })}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1.5">
+                  {t('upscale.scaleHint')}
+                </p>
+              </div>
+            </div>
+
+            {/* 源预览：确认选中的是哪一个视频 */}
+            {srcUrl && playing === 'source' && (
+              <video src={srcUrl} controls className="w-full rounded-lg bg-black" />
+            )}
+
+            <div className="flex gap-2 flex-wrap">
+              <Button onClick={submit} disabled={!ready || !selected || submitting || busy}>
+                {busy ? t('upscale.running') : t('upscale.start')}
+              </Button>
+              {srcUrl && (
+                <Button
+                  variant="secondary"
+                  onClick={() => setPlaying(playing === 'source' ? null : 'source')}
+                >
+                  {playing === 'source' ? t('common.close') : t('upscale.preview')}
+                </Button>
+              )}
+              {!ready && (
+                <span className="text-xs text-amber-600 dark:text-amber-400 self-center">
+                  {t('upscale.notReadyTip')}
+                </span>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* 任务进度 / 结果 */}
+      {task && (
+        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-semibold text-gray-900 dark:text-white">{statusText()}</span>
+            <span className="text-xs text-gray-500 dark:text-gray-400">
+              {t('upscale.progress')} {task.progress || 0}%
+            </span>
+          </div>
+
+          <div className="h-2 rounded-full bg-gray-100 dark:bg-gray-700 overflow-hidden">
+            <div
+              className={`h-full transition-all ${
+                task.status === 'error' ? 'bg-red-500' : 'bg-indigo-600'
+              }`}
+              style={{ width: `${Math.min(100, task.progress || 0)}%` }}
+            />
+          </div>
+
+          {task.message && (
+            <p className="text-xs text-gray-500 dark:text-gray-400">{task.message}</p>
+          )}
+          {task.status === 'error' && task.error && (
+            <p className="text-xs text-red-600 dark:text-red-400 break-all">{task.error}</p>
+          )}
+
+          {task.status === 'done' && res && (
+            <div className="pt-3 border-t border-gray-200 dark:border-gray-700 space-y-3">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                <div>
+                  <div className="text-gray-500 dark:text-gray-400">{t('upscale.before')}</div>
+                  <div className="font-medium text-gray-900 dark:text-white">{fmtResolution(res.before)}</div>
+                </div>
+                <div>
+                  <div className="text-gray-500 dark:text-gray-400">{t('upscale.after')}</div>
+                  <div className="font-medium text-gray-900 dark:text-white">{fmtResolution(res.after)}</div>
+                </div>
+                <div>
+                  <div className="text-gray-500 dark:text-gray-400">{t('upscale.elapsed')}</div>
+                  <div className="font-medium text-gray-900 dark:text-white">
+                    {res.elapsed_sec != null ? `${res.elapsed_sec}s` : '—'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-gray-500 dark:text-gray-400">{t('upscale.resolution')}</div>
+                  <div className="font-medium text-gray-900 dark:text-white">
+                    {res.after?.size_mb != null ? `${res.after.size_mb} MB` : '—'}
+                  </div>
+                </div>
+              </div>
+
+              {/* 音轨保留情况：无声超分是这里最容易踩的坑 */}
+              <p className={`text-xs ${res.after?.has_audio ? 'text-green-600 dark:text-green-400' : 'text-amber-600 dark:text-amber-400'}`}>
+                {res.after?.has_audio ? t('upscale.audioKept') : t('upscale.audioLost')}
+              </p>
+
+              {res.output_url && (
+                <>
+                  <video src={res.output_url} controls className="w-full rounded-lg bg-black" />
+                  <div className="flex gap-2">
+                    <a
+                      href={downloadUrl(res.output_url) || res.output_url}
+                      className="inline-flex items-center px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                    >
+                      {t('common.download')}
+                    </a>
+                    <span className="text-xs text-gray-500 dark:text-gray-400 self-center">
+                      {t('upscale.confirmClose')}
+                    </span>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 已生成的超分产物 */}
+      {artifacts.length > 0 && (
+        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+          <h4 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">
+            {t('upscale.artifacts')}（{artifacts.length}）
+          </h4>
+          <div className="space-y-2">
+            {artifacts.map((a) => (
+              <div
+                key={a.name}
+                className="flex items-center justify-between gap-3 py-2 border-b border-gray-100 dark:border-gray-700 last:border-0"
+              >
+                <div className="min-w-0">
+                  <p className="text-sm text-gray-900 dark:text-white truncate">{a.name}</p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">{a.mtime} · {a.size_mb} MB</p>
+                </div>
+                <div className="flex gap-2 shrink-0">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => setPlaying(playing === a.name ? null : a.name)}
+                  >
+                    {playing === a.name ? t('common.close') : t('upscale.preview')}
+                  </Button>
+                  {downloadUrl(a.url) && (
+                    <a
+                      href={downloadUrl(a.url)}
+                      className="inline-flex items-center px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                    >
+                      {t('common.download')}
+                    </a>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+          {playing && artifacts.some((a) => a.name === playing) && (
+            <video
+              src={artifacts.find((a) => a.name === playing)?.url}
+              controls
+              className="w-full mt-3 rounded-lg bg-black"
+            />
+          )}
         </div>
       )}
     </div>

@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import time
 import traceback
 
@@ -48,7 +49,9 @@ logger = logging.getLogger(__name__)
 # ===================== 步骤定义 =====================
 
 #: 步骤顺序（键即步骤 id）
-STEP_SEQUENCE = ("script", "assets", "storyboard", "keyframe", "video", "final", "tts", "mix")
+#: upscale 放在最末：超分针对「已配音混音」的成片做画质增强，放前面会被后续混音覆盖
+STEP_SEQUENCE = ("script", "assets", "storyboard", "keyframe", "video", "final", "tts", "mix",
+                 "upscale")
 
 STEP_LABELS = {
     "script": "剧本生成",
@@ -59,13 +62,14 @@ STEP_LABELS = {
     "final": "成片合成",
     "tts": "配音合成",
     "mix": "音画对齐混音",
+    "upscale": "超分（FlashVSR）",
 }
 
 #: 需要「质检门禁」的步骤（不达标必须重试，不允许静默通过）
 GATED_STEPS = ("script", "storyboard", "video")
 
 #: 单次占用的 GPU 重任务步骤（守护进程据此做资源互斥，避免抢显存）
-GPU_STEPS = ("storyboard", "keyframe", "video")
+GPU_STEPS = ("storyboard", "keyframe", "video", "upscale")
 
 DEFAULT_CONFIG = {
     # ---- 输入 ----
@@ -83,6 +87,11 @@ DEFAULT_CONFIG = {
     "enable_final": True,
     "enable_tts": True,
     "enable_mix": True,
+    # 超分（FlashVSR）：默认开启。⚠️ 这一步是画质增强而非出片必需环节，
+    # step_upscale 全程 fail-open——环境不可用或执行失败一律记 skipped，
+    # 绝不把已经跑通的成片拖成失败。
+    "enable_upscale": True,
+    "upscale_scale": 2,            # 超分倍率，FlashVSR 支持 2 / 3 / 4
     "video_mode": "per_shot",      # per_shot（带质检门禁）/ episode / keyframe
     # ---- 质量阈值 ----
     "coverage_min_percent": 95.0,      # 原文覆盖率下限
@@ -107,13 +116,20 @@ def normalize_config(raw: dict, default_project_key: str = "") -> dict:
             cfg[k] = int(cfg.get(k))
         except (TypeError, ValueError):
             cfg[k] = DEFAULT_CONFIG[k]
+    # 超分倍率：非法值一律回落 2（FlashVSR 只支持 2/3/4，传错会让该步直接跳过）
+    try:
+        cfg["upscale_scale"] = int(cfg.get("upscale_scale"))
+    except (TypeError, ValueError):
+        cfg["upscale_scale"] = DEFAULT_CONFIG["upscale_scale"]
+    if cfg["upscale_scale"] not in (2, 3, 4):
+        cfg["upscale_scale"] = DEFAULT_CONFIG["upscale_scale"]
     try:
         cfg["coverage_min_percent"] = float(cfg.get("coverage_min_percent"))
     except (TypeError, ValueError):
         cfg["coverage_min_percent"] = DEFAULT_CONFIG["coverage_min_percent"]
     for k in ("enable_assets", "enable_keyframe", "enable_video", "enable_final",
-              "enable_tts", "enable_mix", "require_consistency", "auto_repair",
-              "overwrite_script"):
+              "enable_tts", "enable_mix", "enable_upscale", "require_consistency",
+              "auto_repair", "overwrite_script"):
         cfg[k] = bool(cfg.get(k))
     if cfg.get("video_mode") not in ("per_shot", "episode", "keyframe"):
         cfg["video_mode"] = "per_shot"
@@ -356,6 +372,22 @@ def probe_mix(ctx) -> dict:
     return {"total": 1, "ready": 1 if _nonempty(p) else 0, "done": _nonempty(p), "file": p}
 
 
+def upscale_path(ctx) -> str:
+    """超分产物路径（流水线固定命名，便于幂等探测与「成品验收」直接引用）
+
+    VideoUpscaler 自身产出的文件名带时间戳（不可幂等），因此流水线会把结果
+    归档到该确定性路径，重跑时 probe 命中即跳过。
+    """
+    A = _A()
+    return os.path.join(A.UPSCALE_DIR, ctx["project_name"],
+                        f"ep{ctx['episode_no']:02d}_upscaled.mp4")
+
+
+def probe_upscale(ctx) -> dict:
+    p = upscale_path(ctx)
+    return {"total": 1, "ready": 1 if _nonempty(p) else 0, "done": _nonempty(p), "file": p}
+
+
 PROBES = {
     "script": probe_script,
     "assets": probe_assets,
@@ -365,6 +397,7 @@ PROBES = {
     "final": probe_final,
     "tts": probe_tts,
     "mix": probe_mix,
+    "upscale": probe_upscale,
 }
 
 
@@ -720,6 +753,101 @@ def step_mix(ctx) -> dict:
             "artifact": recheck["file"]}
 
 
+def step_upscale(ctx) -> dict:
+    """超分（FlashVSR）：对混音成片做超分，并归档到确定性路径
+
+    设计要点（重要）
+    ----------------
+    这一步是**画质增强**，不是出片的必要环节，因此全程 fail-open：
+    环境不可用（ComfyUI 离线 / FlashVSR 模型缺失 / 节点未安装）或执行失败时，
+    一律返回 ``skipped`` 而非 ``failed``。
+
+    原因：本步骤默认开启，若按普通步骤「失败即 raise」，会把一整集已经跑完的
+    成片拖成失败态，用户既拿不到交付、又要为「锦上添花」的环节买单重跑。
+    """
+    A = _A()
+    pd = probe_upscale(ctx)
+    if pd.get("done"):
+        return {"ok": True, "skipped": True, "detail": {"probe": pd}, "artifact": pd["file"]}
+
+    # 优先超分混音成品（带配音）；没有则退回无配音成片
+    src = mix_output_path(ctx)
+    if not _nonempty(src):
+        src = final_path(ctx)
+    if not _nonempty(src):
+        return {"ok": True, "skipped": True,
+                "detail": {"note": "该集无成片可超分，跳过"}}
+
+    try:
+        import upscale_client
+    except Exception as e:  # noqa: BLE001
+        logger.warning("第%s集超分跳过（模块不可用）：%s", ctx["episode_no"], e)
+        return {"ok": True, "skipped": True,
+                "detail": {"note": f"超分模块不可用，已跳过：{e}"}}
+
+    # 环境自检：不可用直接跳过，不进入重试循环
+    try:
+        env = A.upscale_env_check()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("第%s集超分跳过（环境自检失败）：%s", ctx["episode_no"], e)
+        return {"ok": True, "skipped": True,
+                "detail": {"note": f"超分环境自检失败，已跳过：{e}"}}
+    if not env.get("available"):
+        reason = "；".join(env.get("reasons") or []) or "超分环境不可用"
+        logger.warning("第%s集超分跳过（环境不可用）：%s", ctx["episode_no"], reason)
+        return {"ok": True, "skipped": True,
+                "detail": {"note": f"超分环境不可用，已跳过：{reason}",
+                           "env": {"comfy_online": env.get("comfy_online"),
+                                   "model_ready": env.get("model_ready"),
+                                   "te_ready": env.get("te_ready"),
+                                   "reasons": env.get("reasons") or []}}}
+
+    scale = int(ctx["config"].get("upscale_scale") or 2)
+    if scale not in (2, 3, 4):      # 兜底：配置未经 normalize_config 直连时
+        scale = 2
+    ctx["progress"](f"超分（FlashVSR {scale}x）…", 96, phase="upscale")
+    try:
+        res = upscale_client.VideoUpscaler().upscale(
+            src, project_name=ctx["project_name"], scale=scale,
+            # ⚠️ 成片是带 TTS 配音的，而 TE-Speed 链路默认 attach_audio=False ——
+            # 不显式开启会把音轨丢掉，超分产物变成无声视频。
+            attach_audio=True,
+            progress_cb=lambda msg, pct=None: ctx["progress"](
+                f"超分：{msg}", 96, phase="upscale"),
+        )
+    except Exception as e:  # noqa: BLE001  超分失败不阻断出片
+        logger.warning("第%s集超分失败（已跳过，不影响成片交付）：%s",
+                       ctx["episode_no"], e, exc_info=True)
+        return {"ok": True, "skipped": True,
+                "detail": {"note": f"超分执行失败，已跳过：{type(e).__name__}: {e}",
+                           "source": src}}
+
+    produced = (res or {}).get("output_path") or ""
+    if not _nonempty(produced):
+        return {"ok": True, "skipped": True,
+                "detail": {"note": "超分未产出有效文件，已跳过", "source": src}}
+
+    # 归档到确定性路径（带时间戳的原文件名无法用于幂等探测）
+    out = upscale_path(ctx)
+    try:
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        if os.path.abspath(produced) != os.path.abspath(out):
+            shutil.copy2(produced, out)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": True, "skipped": True,
+                "detail": {"note": f"超分产物归档失败，已跳过：{e}", "produced": produced}}
+    if not _nonempty(out):
+        return {"ok": True, "skipped": True,
+                "detail": {"note": "超分产物归档后为空，已跳过", "produced": produced}}
+
+    return {"ok": True, "artifact": out,
+            "detail": {"source": src, "engine": (res or {}).get("engine"),
+                       "scale": scale, "before": (res or {}).get("before"),
+                       "after": (res or {}).get("after"),
+                       "elapsed_sec": (res or {}).get("elapsed_sec"),
+                       "size": os.path.getsize(out)}}
+
+
 STEP_RUNNERS = {
     "script": step_script,
     "assets": step_assets,
@@ -729,6 +857,7 @@ STEP_RUNNERS = {
     "final": step_final,
     "tts": step_tts,
     "mix": step_mix,
+    "upscale": step_upscale,
 }
 
 
@@ -751,6 +880,8 @@ def step_enabled(step: str, ctx) -> bool:
         return bool(cfg.get("enable_tts"))
     if step == "mix":
         return bool(cfg.get("enable_mix"))
+    if step == "upscale":
+        return bool(cfg.get("enable_upscale"))
     return False
 
 
@@ -805,8 +936,8 @@ def _load_script_into_ctx(ctx) -> dict:
 
 
 def _deliverable_of(ctx, steps: dict) -> str:
-    """该集的最终交付物：优先混音成品，其次成片"""
-    for key in ("mix", "final"):
+    """该集的最终交付物：优先超分成品，其次混音成品，最后成片"""
+    for key in ("upscale", "mix", "final"):
         art = (steps.get(key) or {}).get("artifact") or ""
         if _nonempty(art):
             return art
@@ -935,7 +1066,7 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
 
 #: 步骤在整体进度里的百分比锚点
 _STEP_PCT = {"script": 2, "assets": 18, "storyboard": 32, "keyframe": 44,
-             "video": 48, "final": 70, "tts": 80, "mix": 90}
+             "video": 48, "final": 70, "tts": 80, "mix": 90, "upscale": 96}
 
 
 def result_pct(result: dict, step: str) -> int:
