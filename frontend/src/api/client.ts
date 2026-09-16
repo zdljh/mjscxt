@@ -16,6 +16,7 @@ import type {
   QCConfig, QCResponse,
   Episode, EpisodeListResponse,
   AutopilotStatus, AutopilotProgress,
+  Deliverable, DeliverablesResponse,
   Provider, ProvidersResponse,
   AIConfigResponse, AITestResult,
 } from '../types';
@@ -477,10 +478,26 @@ export const autopilotApi = {
   progress: () => request<{ success: boolean; projects: AutopilotProgress[] }>('/autopilot/progress'),
   progressByProject: (project: string) =>
     request<AutopilotProgress>(`/autopilot/progress/${encodeURIComponent(project)}`),
-  deliverables: () =>
-    request<{ success: boolean; items: any[] }>('/autopilot/deliverables'),
-  reviewDeliverable: (data: { project: string; deliverable: string; verdict: string }) =>
-    request<{ success: boolean }>('/autopilot/deliverables/review', {
+  /** 成片清单。传 project 只取该项目的（工作台用），不传则取全部项目。 */
+  deliverables: (project?: string) =>
+    request<DeliverablesResponse>(
+      project ? `/autopilot/deliverables?project=${encodeURIComponent(project)}` : '/autopilot/deliverables'
+    ),
+  /**
+   * 验收 / 打回成片。打回会在下次托管轮转时自动重跑该集。
+   *
+   * ⚠️ 字段名必须与后端一致（app.py `api_autopilot_review`）：
+   *   project / episode_no(int) / review('accepted'|'rejected'|'pending') / note?
+   * 这里曾经误写成 { project, deliverable, verdict } —— 接口一直是 400，
+   * 即「验收/打回」功能从未真正生效过。
+   */
+  reviewDeliverable: (data: {
+    project: string;
+    episode_no: number;
+    review: 'accepted' | 'rejected' | 'pending';
+    note?: string;
+  }) =>
+    request<{ success: boolean; item: Deliverable }>('/autopilot/deliverables/review', {
       method: 'POST',
       body: JSON.stringify(data),
     }),

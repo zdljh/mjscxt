@@ -3,10 +3,11 @@ import { useApp } from '@/context/AppContext';
 import { projectsApi, keyframesApi, storyboardApi, ttsApi, mixApi, qcApi, exportApi, autopilotApi, chatApi } from '@/api/client';
 import { Button, Loading, EmptyState } from '@/components/ui';
 import { GridPage } from '@/pages/GridPage';
-import type { Project } from '@/types';
+import type { Project, Deliverable } from '@/types';
 
 // ========== Workbench Tab Types ==========
-type WorkbenchTab = 'overview' | 'autopilot' | 'keyframes' | 'ninegrid' | 'storyboard' | 'tts' | 'mix' | 'qc' | 'export' | 'chat';
+// 注意：'chat' 已移除 —— AI 总控改成了右侧常驻面板，不再是标签页（见 ChatPanel）
+type WorkbenchTab = 'overview' | 'autopilot' | 'keyframes' | 'ninegrid' | 'storyboard' | 'tts' | 'mix' | 'qc' | 'export' | 'deliver';
 
 interface AssetItem {
   name: string;
@@ -63,15 +64,18 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
   }, [projectKey, reloadAssets]);
 
   const tabs: { id: WorkbenchTab; icon: string; label: string }[] = [
-    { id: 'overview', icon: '📊', label: '概览' },
-    { id: 'autopilot', icon: '🤖', label: '自动生产' },
-    { id: 'keyframes', icon: '🖼️', label: '关键帧' },
-    { id: 'ninegrid', icon: '🎯', label: '九宫格' },
-    { id: 'storyboard', icon: '🎬', label: '分镜' },
-    { id: 'tts', icon: '🎙️', label: '配音' },
-    { id: 'mix', icon: '🔊', label: '混音' },
-    { id: 'qc', icon: '✅', label: '质检' },
-    { id: 'export', icon: '💾', label: '导出' },
+    { id: 'overview', icon: '📊', label: t('wb.overview') },
+    { id: 'autopilot', icon: '🤖', label: t('wb.autopilot') },
+    { id: 'keyframes', icon: '🖼️', label: t('wb.keyframes') },
+    { id: 'ninegrid', icon: '🎯', label: t('wb.ninegrid') },
+    { id: 'storyboard', icon: '🎬', label: t('wb.storyboard') },
+    { id: 'tts', icon: '🎙️', label: t('wb.tts') },
+    { id: 'mix', icon: '🔊', label: t('wb.mix') },
+    { id: 'qc', icon: '✅', label: t('wb.qc') },
+    { id: 'export', icon: '💾', label: t('wb.export') },
+    // 成品验收：后端 /api/autopilot/deliverables 的成片清单 + 验收/打回，
+    // 此前只有已删除的全局 DeliverPage（且它 fetch 了数据却从不渲染）
+    { id: 'deliver', icon: '📦', label: t('wb.deliver') },
     // AI总控 不再是标签页 —— 已改为右侧常驻面板（默认展开，见下方 ChatPanel）
   ];
 
@@ -130,7 +134,7 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
                   activeTab === tab.id
                     ? 'bg-indigo-600 text-white shadow-lg'
-                    : 'bg-white/5 text-gray-400 hover:bg-white/10 hover:text-white'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200 hover:text-gray-900 dark:bg-white/5 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-white'
                 }`}
               >
                 <span className="text-lg">{tab.icon}</span>
@@ -174,6 +178,9 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
         {activeTab === 'export' && (
           <ExportTab projectKey={projectKey} assets={assets} />
         )}
+        {activeTab === 'deliver' && (
+          <DeliverTab projectKey={projectKey} onGoAutopilot={() => setActiveTab('autopilot')} />
+        )}
           </div>
         </div>
 
@@ -184,7 +191,7 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
           <button
             onClick={() => setChatOpen(true)}
             title="展开 AI总控"
-            className="sticky top-0 shrink-0 w-11 h-[calc(100vh-7rem)] min-h-[420px] flex flex-col items-center gap-3 py-4 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-400 hover:text-indigo-600 hover:border-indigo-400 transition-colors"
+            className="sticky top-0 shrink-0 w-11 h-[calc(100vh-7rem)] min-h-[420px] flex flex-col items-center gap-3 py-4 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:text-indigo-600 hover:border-indigo-400 transition-colors"
           >
             <span className="w-7 h-7 rounded-lg bg-indigo-50 dark:bg-indigo-500/15 flex items-center justify-center text-sm">💬</span>
             <span className="text-xs tracking-wide" style={{ writingMode: 'vertical-rl' }}>AI总控</span>
@@ -292,7 +299,7 @@ function OverviewTab({
   if (total === 0) {
     return (
       <div className="py-12 space-y-6">
-        <div className="text-center text-gray-400">
+        <div className="text-center text-gray-500 dark:text-gray-400">
           <div className="text-4xl mb-3">📁</div>
           <p>暂无资产</p>
           <p className="text-sm mt-1">角色 / 物品 / 场景 会在生产流程中自动生成</p>
@@ -419,14 +426,14 @@ function AssetPreviewModal({
       >
         <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
           <h3 className="font-semibold text-lg text-gray-900 dark:text-white">{item.name}</h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-2xl leading-none">×</button>
+          <button onClick={onClose} className="text-gray-500 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-2xl leading-none">×</button>
         </div>
 
         <div className="p-4 space-y-4">
           {src ? (
             <img src={src} alt={item.name} className="w-full rounded-lg bg-gray-100 dark:bg-gray-900" />
           ) : (
-            <div className="py-16 text-center text-gray-400">图片不可用</div>
+            <div className="py-16 text-center text-gray-500 dark:text-gray-400">图片不可用</div>
           )}
 
           {gallery.length > 1 && (
@@ -564,20 +571,20 @@ function AutopilotTab({ projectKey, novelId }: { projectKey: string; novelId?: s
               {status.running ? '运行中' : status.paused ? '已暂停' : '已停止'}
             </div>
           </div>
-          <div className="bg-white/5 rounded-lg p-4 text-center">
+          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 text-center">
             <div className="text-3xl font-bold text-green-400">{status.totals?.episodes_done || 0}</div>
-            <div className="text-sm text-gray-400">已完成剧集</div>
+            <div className="text-sm text-gray-500 dark:text-gray-400">已完成剧集</div>
           </div>
-          <div className="bg-white/5 rounded-lg p-4 text-center">
+          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 text-center">
             <div className="text-3xl font-bold text-red-400">{status.totals?.episodes_failed || 0}</div>
-            <div className="text-sm text-gray-400">失败剧集</div>
+            <div className="text-sm text-gray-500 dark:text-gray-400">失败剧集</div>
           </div>
         </div>
       )}
 
       {progress && (
         <div className="mb-6">
-          <div className="flex justify-between text-sm text-gray-400 mb-2">
+          <div className="flex justify-between text-sm text-gray-500 dark:text-gray-400 mb-2">
             <span>进度</span>
             <span>{progress.done}/{progress.total_episodes}</span>
           </div>
@@ -675,21 +682,21 @@ function KeyframesTab({ projectKey }: { projectKey: string }) {
 
       {plan && (
         <div className="grid grid-cols-4 gap-4">
-          <div className="bg-white/5 rounded-lg p-4 text-center">
+          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 text-center">
             <div className="text-3xl font-bold text-indigo-400">{plan.shot_count}</div>
-            <div className="text-sm text-gray-400">总镜头数</div>
+            <div className="text-sm text-gray-500 dark:text-gray-400">总镜头数</div>
           </div>
-          <div className="bg-white/5 rounded-lg p-4 text-center">
+          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 text-center">
             <div className="text-3xl font-bold text-green-400">{plan.start_frames_ready}</div>
-            <div className="text-sm text-gray-400">首帧就绪</div>
+            <div className="text-sm text-gray-500 dark:text-gray-400">首帧就绪</div>
           </div>
-          <div className="bg-white/5 rounded-lg p-4 text-center">
+          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 text-center">
             <div className="text-3xl font-bold text-blue-400">{plan.end_frames_ready}</div>
-            <div className="text-sm text-gray-400">尾帧就绪</div>
+            <div className="text-sm text-gray-500 dark:text-gray-400">尾帧就绪</div>
           </div>
-          <div className="bg-white/5 rounded-lg p-4 text-center">
+          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 text-center">
             <div className="text-3xl font-bold text-yellow-400">{plan.to_generate}</div>
-            <div className="text-sm text-gray-400">待生成</div>
+            <div className="text-sm text-gray-500 dark:text-gray-400">待生成</div>
           </div>
         </div>
       )}
@@ -707,17 +714,17 @@ function KeyframesTab({ projectKey }: { projectKey: string }) {
 
       {plan && (
         <div className="space-y-2">
-          <h4 className="font-semibold text-gray-300 mb-3">镜头列表</h4>
+          <h4 className="font-semibold text-gray-700 dark:text-gray-300 mb-3">镜头列表</h4>
           {plan.plan?.map((shot: any) => (
             <div
               key={shot.seq}
               className={`flex items-center gap-4 p-3 rounded-lg ${
                 shot.need_gen ? 'bg-yellow-500/10 border border-yellow-500/30' :
                 shot.has_end ? 'bg-green-500/10 border border-green-500/30' :
-                'bg-white/5'
+                'bg-gray-50 dark:bg-white/5'
               }`}
             >
-              <span className="w-12 font-mono text-gray-400">#{shot.seq}</span>
+              <span className="w-12 font-mono text-gray-500 dark:text-gray-400">#{shot.seq}</span>
               <span className="flex-1">{shot.status || shot.shot_id}</span>
               <div className="flex gap-2">
                 {shot.has_start && <span className="px-2 py-1 bg-green-500/20 text-green-400 rounded text-xs">首帧</span>}
@@ -771,7 +778,7 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
       </div>
 
       {error === 'no-data' && (
-        <div className="py-12 text-center text-gray-400">
+        <div className="py-12 text-center text-gray-500 dark:text-gray-400">
           <div className="text-4xl mb-3">🎬</div>
           <p>暂无分镜数据，请先进行剧本生成</p>
         </div>
@@ -785,7 +792,7 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
         {cards.map((card: any) => (
           <div key={card.seq} className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
             <div className="flex items-center justify-between mb-2">
-              <span className="font-mono text-sm text-gray-400">#{card.seq}</span>
+              <span className="font-mono text-sm text-gray-500 dark:text-gray-400">#{card.seq}</span>
               <span className="text-xs text-gray-500">{card.camera}</span>
             </div>
             <p className="text-sm text-gray-700 dark:text-gray-300 mb-2">{card.description}</p>
@@ -870,19 +877,19 @@ function TtsTab({ projectKey }: { projectKey: string }) {
 
       {plan && (
         <div className="mb-6">
-          <h4 className="font-semibold text-gray-300 mb-3">配音计划预览</h4>
+          <h4 className="font-semibold text-gray-700 dark:text-gray-300 mb-3">配音计划预览</h4>
           <div className="grid grid-cols-3 gap-4 mb-4">
-            <div className="bg-white/5 rounded-lg p-3 text-center">
+            <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-3 text-center">
               <div className="text-2xl font-bold text-indigo-400">{plan.line_count ?? (plan.lines?.length ?? 0)}</div>
-              <div className="text-sm text-gray-400">总台词数</div>
+              <div className="text-sm text-gray-500 dark:text-gray-400">总台词数</div>
             </div>
-            <div className="bg-white/5 rounded-lg p-3 text-center">
+            <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-3 text-center">
               <div className="text-2xl font-bold text-green-400">{plan.characters?.length || 0}</div>
-              <div className="text-sm text-gray-400">涉及角色</div>
+              <div className="text-sm text-gray-500 dark:text-gray-400">涉及角色</div>
             </div>
-            <div className="bg-white/5 rounded-lg p-3 text-center">
+            <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-3 text-center">
               <div className="text-2xl font-bold text-blue-400">{plan.episode}</div>
-              <div className="text-sm text-gray-400">集数</div>
+              <div className="text-sm text-gray-500 dark:text-gray-400">集数</div>
             </div>
           </div>
 
@@ -1001,19 +1008,19 @@ function QcTab({ projectKey }: { projectKey: string }) {
 
       {stats && (
         <div className="grid grid-cols-4 gap-4">
-          <div className="bg-white/5 rounded-lg p-4 text-center">
-            <div className="text-3xl font-bold text-gray-400">{stats.total}</div>
+          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 text-center">
+            <div className="text-3xl font-bold text-gray-500 dark:text-gray-400">{stats.total}</div>
             <div className="text-sm text-gray-500">总检查数</div>
           </div>
-          <div className="bg-white/5 rounded-lg p-4 text-center">
+          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 text-center">
             <div className="text-3xl font-bold text-green-400">{stats.passed}</div>
             <div className="text-sm text-gray-500">通过</div>
           </div>
-          <div className="bg-white/5 rounded-lg p-4 text-center">
+          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 text-center">
             <div className="text-3xl font-bold text-red-400">{stats.failed}</div>
             <div className="text-sm text-gray-500">失败</div>
           </div>
-          <div className="bg-white/5 rounded-lg p-4 text-center">
+          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 text-center">
             <div className="text-3xl font-bold text-yellow-400">{stats.retry_count}</div>
             <div className="text-sm text-gray-500">重试次数</div>
           </div>
@@ -1022,7 +1029,7 @@ function QcTab({ projectKey }: { projectKey: string }) {
 
       {history.length > 0 && (
         <div className="space-y-2">
-          <h4 className="font-semibold text-gray-300 mb-3">检查历史</h4>
+          <h4 className="font-semibold text-gray-700 dark:text-gray-300 mb-3">检查历史</h4>
           {history.map((item: any) => (
             <div
               key={item.seq}
@@ -1032,9 +1039,9 @@ function QcTab({ projectKey }: { projectKey: string }) {
                 'bg-yellow-500/10 border border-yellow-500/30'
               }`}
             >
-              <span className="w-12 font-mono text-gray-400">#{item.seq}</span>
+              <span className="w-12 font-mono text-gray-500 dark:text-gray-400">#{item.seq}</span>
               <span className="flex-1">{item.shot_id}</span>
-              <span className="text-lg font-bold text-white">{item.score}</span>
+              <span className="text-lg font-bold text-gray-900 dark:text-white">{item.score}</span>
               <span className={`px-2 py-1 rounded text-xs ${
                 item.verdict === 'pass' ? 'bg-green-500/20 text-green-400' :
                 item.verdict === 'fail' ? 'bg-red-500/20 text-red-400' :
@@ -1164,7 +1171,7 @@ function ExportTab({ projectKey, assets }: { projectKey: string; assets: Project
             ))}
           </div>
         ) : (
-          <p className="text-sm text-gray-400 py-4">暂无成片，请先完成视频生成与合成</p>
+          <p className="text-sm text-gray-500 dark:text-gray-400 py-4">暂无成片，请先完成视频生成与合成</p>
         )}
       </div>
 
@@ -1192,9 +1199,245 @@ function ExportTab({ projectKey, assets }: { projectKey: string; assets: Project
             ))}
           </div>
         ) : (
-          <p className="text-sm text-gray-400 py-4">暂无导出文件，点击右上角「生成导出文件」</p>
+          <p className="text-sm text-gray-500 dark:text-gray-400 py-4">暂无导出文件，点击右上角「生成导出文件」</p>
         )}
       </div>
+    </div>
+  );
+}
+
+// ========== 成品验收 Tab ==========
+// 后端能力（app.py + pipeline.py）：
+//   GET  /api/autopilot/deliverables?project=X  按集返回成片索引
+//   POST /api/autopilot/deliverables/review     置验收/打回（打回 → 下轮托管自动重跑该集）
+//   GET  /api/autopilot/deliverable/file/...    播放；加 ?download=1 下载
+//   条目自带 exists（文件是否真在磁盘）与 url（后端已防目录穿越）
+//
+// ⚠️ 不要沿用已删除的全局 DeliverPage 的写法：它 fetch 了 deliverables 却从不渲染，
+//    下载靠「猜文件名」（final.mp4 / output.mp4 / 项目名.mp4），也不按项目过滤。
+function DeliverTab({ projectKey, onGoAutopilot }: { projectKey: string; onGoAutopilot: () => void }) {
+  const { t } = useApp();
+  const [items, setItems] = useState<Deliverable[]>([]);
+  const [pending, setPending] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  /** 正在提交验收/打回的集号（防重复点击） */
+  const [busy, setBusy] = useState<number | null>(null);
+  /** 正在填写打回原因的集号 */
+  const [rejecting, setRejecting] = useState<number | null>(null);
+  const [reason, setReason] = useState('');
+  /** 正在内联播放的文件名 */
+  const [playing, setPlaying] = useState<string | null>(null);
+  const [toast, setToast] = useState('');
+
+  const load = React.useCallback(async () => {
+    if (!projectKey) return;
+    setLoading(true);
+    setError('');
+    try {
+      const d = await autopilotApi.deliverables(projectKey);
+      setItems(d.items || []);
+      setPending(d.pending || 0);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t('deliver.actionFailed'));
+      setItems([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [projectKey, t]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  // 验收 / 打回。字段名必须与后端一致（见 client.ts 注释）——
+  // 这里曾因写成 {deliverable, verdict} 导致接口一直 400，功能从未生效。
+  const review = async (episodeNo: number, verdict: 'accepted' | 'rejected', note = '') => {
+    setBusy(episodeNo);
+    setError('');
+    try {
+      await autopilotApi.reviewDeliverable({
+        project: projectKey,
+        episode_no: episodeNo,
+        review: verdict,
+        note,
+      });
+      setToast(verdict === 'accepted' ? t('deliver.acceptedOk') : t('deliver.rejectedOk'));
+      setRejecting(null);
+      setReason('');
+      await load();
+      window.setTimeout(() => setToast(''), 3200);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t('deliver.actionFailed'));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const sizeText = (n?: number) => (n ? `${(n / 1048576).toFixed(1)} MB` : '—');
+
+  const statusBadge = (d: Deliverable) => {
+    if (d.review === 'accepted') {
+      return { text: t('deliver.accepted'), cls: 'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-300' };
+    }
+    if (d.review === 'rejected') {
+      return { text: t('deliver.rejected'), cls: 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-300' };
+    }
+    return { text: t('deliver.pending'), cls: 'bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300' };
+  };
+
+  if (loading) return <Loading />;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{t('deliver.title')}</h3>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
+            {items.length > 0
+              ? t('deliver.counts', { total: items.length, pending })
+              : t('deliver.subtitle')}
+          </p>
+        </div>
+        <Button size="sm" variant="secondary" onClick={load} disabled={loading || busy !== null}>
+          {t('common.refresh')}
+        </Button>
+      </div>
+
+      {error && (
+        <div className="p-3 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-lg text-sm text-red-700 dark:text-red-300">
+          {error}
+        </div>
+      )}
+      {toast && (
+        <div className="p-3 bg-green-50 dark:bg-green-500/10 border border-green-200 dark:border-green-500/30 rounded-lg text-sm text-green-700 dark:text-green-300">
+          {toast}
+        </div>
+      )}
+
+      {items.length === 0 ? (
+        <div className="text-center py-12">
+          <div className="text-5xl mb-4">📦</div>
+          <h4 className="text-lg font-medium text-gray-900 dark:text-white mb-1">{t('deliver.noItems')}</h4>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mb-5">{t('deliver.noItemsTip')}</p>
+          <Button onClick={onGoAutopilot}>{t('deliver.goAutopilot')}</Button>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {items.map((d) => {
+            const b = statusBadge(d);
+            const canReview = busy === null;
+            const playable = !!d.url && d.exists !== false;
+            return (
+              <div
+                key={`${d.project}-${d.episode_no}`}
+                className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-semibold text-gray-900 dark:text-white">
+                        {t('deliver.episodeNo', { n: d.episode_no })}
+                      </span>
+                      {d.meta?.title && (
+                        <span className="text-sm text-gray-500 dark:text-gray-400">{d.meta.title}</span>
+                      )}
+                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${b.cls}`}>{b.text}</span>
+                      {d.exists === false && (
+                        <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-300">
+                          {t('deliver.missing')}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1.5">
+                      {d.filename} · {sizeText(d.size)}
+                    </p>
+                    {d.exists === false && (
+                      <p className="text-xs text-red-600 dark:text-red-400 mt-1">{t('deliver.missingHint')}</p>
+                    )}
+                    {/* 注意字段名是 review_note（后端 pipeline.set_deliverable_review 写的） */}
+                    {d.review === 'rejected' && d.review_note && (
+                      <p className="text-xs text-gray-600 dark:text-gray-300 mt-1">
+                        {t('deliver.note')}: {d.review_note}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="flex gap-2 shrink-0 flex-wrap justify-end">
+                    {playable && (
+                      <>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => setPlaying(playing === d.filename ? null : d.filename)}
+                        >
+                          {playing === d.filename ? t('common.close') : t('deliver.play')}
+                        </Button>
+                        <a
+                          href={`${d.url}?download=1`}
+                          className="inline-flex items-center px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                        >
+                          {t('common.download')}
+                        </a>
+                      </>
+                    )}
+                    <Button
+                      size="sm"
+                      onClick={() => review(d.episode_no, 'accepted')}
+                      disabled={!canReview || d.review === 'accepted'}
+                    >
+                      {t('deliver.accept')}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => {
+                        setRejecting(rejecting === d.episode_no ? null : d.episode_no);
+                        setReason('');
+                      }}
+                      disabled={!canReview || d.review === 'rejected'}
+                    >
+                      {t('deliver.reject')}
+                    </Button>
+                  </div>
+                </div>
+
+                {playing === d.filename && d.url && (
+                  <video src={d.url} controls className="w-full mt-3 rounded-lg bg-black" />
+                )}
+
+                {rejecting === d.episode_no && (
+                  <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700 space-y-2">
+                    <label className="block text-xs text-gray-600 dark:text-gray-300">
+                      {t('deliver.rejectReason')}
+                    </label>
+                    <textarea
+                      value={reason}
+                      onChange={(e) => setReason(e.target.value)}
+                      rows={2}
+                      placeholder={t('deliver.rejectReasonPlaceholder')}
+                      className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-900 text-gray-900 dark:text-white"
+                    />
+                    <div className="flex gap-2">
+                      <Button size="sm" onClick={() => review(d.episode_no, 'rejected', reason)} disabled={!canReview}>
+                        {t('deliver.reject')}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => {
+                          setRejecting(null);
+                          setReason('');
+                        }}
+                      >
+                        {t('common.cancel')}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -1261,14 +1504,14 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
           </span>
           <div className="min-w-0">
             <h3 className="font-semibold text-gray-900 dark:text-white leading-tight">AI总控</h3>
-            <p className="text-[11px] text-gray-400 leading-tight">项目级对话</p>
+            <p className="text-[11px] text-gray-500 dark:text-gray-400 leading-tight">项目级对话</p>
           </div>
         </div>
         <div className="flex items-center gap-0.5 shrink-0">
           <button
             onClick={loadHistory}
             title="刷新对话"
-            className="p-1.5 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-500/15 transition-colors"
+            className="p-1.5 rounded-lg text-gray-500 dark:text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-500/15 transition-colors"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -1278,7 +1521,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
           <button
             onClick={onClose}
             title="收起面板"
-            className="p-1.5 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-500/15 transition-colors"
+            className="p-1.5 rounded-lg text-gray-500 dark:text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-500/15 transition-colors"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
@@ -1303,7 +1546,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
               💬
             </div>
             <p className="text-sm text-gray-600 dark:text-gray-300">用自然语言指挥该项目</p>
-            <p className="text-xs text-gray-400 mt-1 mb-4">也可以直接点下面的例子试试</p>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 mb-4">也可以直接点下面的例子试试</p>
             <div className="w-full space-y-1.5">
               {[
                 '把第 3 镜重生成一次',
@@ -1335,7 +1578,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
               </div>
             ))}
             {sending && (
-              <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 mr-6 px-3 py-2 rounded-lg text-sm text-gray-400 flex items-center gap-2">
+              <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 mr-6 px-3 py-2 rounded-lg text-sm text-gray-500 dark:text-gray-400 flex items-center gap-2">
                 <span className="w-3 h-3 border-2 border-indigo-400/40 border-t-indigo-500 rounded-full animate-spin inline-block" />
                 思考中...
               </div>

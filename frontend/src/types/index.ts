@@ -395,6 +395,48 @@ export interface AutopilotProgress {
   exceptions?: Array<{ episode: number; error: string }>;
 }
 
+// --- Deliverables（成品验收） ---
+/**
+ * 成片清单条目，对应 pipeline.list_deliverables() 的返回。
+ * 真实落盘结构（output/autopilot/<项目>/deliverables.json）里是：
+ *   { project, episode_no, path, filename, size, meta:{title,...} }
+ * 后端另外**计算**出两个字段：
+ *   exists（文件是否真在磁盘上）
+ *   url（/api/autopilot/deliverable/file/<项目>/<文件名>，已防目录穿越）
+ * 播放直接用 url；下载用 url + '?download=1'。**不要自己拼文件名猜路径**。
+ */
+export interface Deliverable {
+  project: string;
+  episode_no: number;
+  filename: string;
+  /** 落盘绝对路径（仅展示用，不要拿去请求） */
+  path?: string;
+  /** 字节数 */
+  size?: number;
+  /** 元信息，含 title（章节标题）等 */
+  meta?: { title?: string; chapter_index?: number; elapsed_sec?: number; retries?: number };
+  /** 验收状态：pending 待验收 / accepted 已验收 / rejected 已打回 */
+  review?: 'pending' | 'accepted' | 'rejected';
+  /** ⚠️ 后端字段名是 `review_note`，不是 `note`（见 pipeline.set_deliverable_review） */
+  review_note?: string;
+  /** 最近一次验收/打回的时间 */
+  reviewed_at?: string;
+  created_at?: string;
+  updated_at?: string;
+  /** 后端计算：文件是否真实存在 */
+  exists?: boolean;
+  /** 后端计算：播放/下载地址 */
+  url?: string;
+}
+
+export interface DeliverablesResponse {
+  success: boolean;
+  count: number;
+  /** 待验收条数 */
+  pending: number;
+  items: Deliverable[];
+}
+
 // --- Providers ---
 export interface Provider {
   id: string;
