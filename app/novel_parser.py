@@ -292,8 +292,60 @@ CHAPTER_PATTERNS = [
 ]
 
 
-def split_chapters(text: str):
-    """切分章节，返回 [{'index','title','start','end','char_count'}]（不含正文，避免重复占用内存）"""
+# 正文没有任何章节标题时的兜底切分粒度（字符数）。
+# 短篇/话本/测试文本常常没有「第X章」标记，若直接返回空章节列表，
+# 会导致「未识别到章节，无法自动分集生产」（缺陷 D3）与「待生产 0 集」（缺陷 D2）。
+FALLBACK_CHAPTER_CHARS = 3000
+
+
+def _fallback_split(text: str, chunk_chars: int):
+    """无章节标记时的兜底切分：按行边界聚合成长度约 chunk_chars 的若干节。
+
+    短文本（<= chunk_chars）自然只会得到 1 节「全文」，正好适配极短测试小说。
+    """
+    total = len(text)
+    if total <= 0:
+        return []
+    n = max(int(chunk_chars or 0), 500)
+    if total <= n:
+        return [{"index": 1, "title": "全文", "start": 0, "end": total, "char_count": total}]
+
+    chapters = []
+    seg_start = 0
+    idx = 1
+    for m in re.finditer(r"(?m)^", text):
+        pos = m.start()
+        if pos <= seg_start:
+            continue
+        if pos - seg_start >= n:
+            chapters.append({
+                "index": idx,
+                "title": f"第{idx}节",
+                "start": seg_start,
+                "end": pos,
+                "char_count": pos - seg_start,
+            })
+            seg_start = pos
+            idx += 1
+            if len(chapters) >= MAX_CHAPTERS_KEPT:
+                break
+    if seg_start < total and len(chapters) < MAX_CHAPTERS_KEPT:
+        chapters.append({
+            "index": idx,
+            "title": f"第{idx}节",
+            "start": seg_start,
+            "end": total,
+            "char_count": total - seg_start,
+        })
+    return chapters
+
+
+def split_chapters(text: str, fallback_chars: int = FALLBACK_CHAPTER_CHARS):
+    """切分章节，返回 [{'index','title','start','end','char_count'}]（不含正文，避免重复占用内存）
+
+    找不到任何章节标题时不再返回空列表，而是走 _fallback_split 兜底切分，
+    保证下游「分集生产」始终有集可产。
+    """
     if not text:
         return []
     marks = []
@@ -304,7 +356,7 @@ def split_chapters(text: str):
                 continue
             marks.append((m.start(), line[:70]))
     if not marks:
-        return []
+        return _fallback_split(text, fallback_chars)
 
     marks.sort()
     dedup = []

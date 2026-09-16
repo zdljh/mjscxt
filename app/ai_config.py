@@ -45,8 +45,8 @@ MODULES = ("text", "qc", "chat")
 
 MODULE_META = {
     "text": {
-        "label": "文本分析模型",
-        "desc": "小说转剧本、剧本 / 提示词分析（纯文本能力即可）",
+        "label": "文本分析模型（= LLM 引擎）",
+        "desc": "就是 LLM 引擎：小说转剧本、章节转剧本、提示词分析等所有纯文本任务都用这一份配置",
         "need_vision": False,
         "placeholder_model": "例如 deepseek-chat / qwen2.5:14b",
         "used_by": ["小说转剧本", "章节转剧本", "提示词分析", "剧本生成"],

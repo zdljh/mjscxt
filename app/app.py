@@ -11,8 +11,9 @@ import random
 import shutil
 import threading
 from datetime import datetime
-from flask import Flask, render_template, request, jsonify, send_file, abort, redirect
+from flask import Flask, render_template, request, jsonify, send_file, abort, redirect, send_from_directory
 from flask_cors import CORS
+from werkzeug.exceptions import BadRequest, HTTPException
 
 from config import (
     COMFYUI_URL, PROJECT_ROOT_DIR, PROJECT_OUTPUT_DIR, SCRIPT_DIR,
@@ -49,6 +50,8 @@ import consistency
 import continuity
 import coverage
 import keyframe
+import export_manager
+from export_manager import ExportManager
 import nle_export
 import pipeline
 import plugin_registry
@@ -61,6 +64,10 @@ import watermark_cleanup
 import upscale_client
 import tts_client
 import dub_mix
+import autonomous
+import ai_memory
+import prompt_memory
+from ai_memory import get_memory_system
 from dub_mix import (
     DubMixError, ffmpeg_available as mix_ffmpeg_check, shot_timeline,
     build_entries, mix_video_with_entries, write_mix_report, mix_out_dir,
@@ -77,6 +84,9 @@ from upscale_client import (
     probe_video as probe_video_info
 )
 from script_prompt_analyzer import analyze_script as analyze_script_prompts, save_script_inplace
+from character_manager import CharacterManager, CharacterConsistencyEngine
+from relation_manager import RelationManager, RelationConflictDetector
+from nine_grid_storyboard import NineGridStoryboard
 
 app = Flask(__name__)
 CORS(app)
@@ -237,8 +247,10 @@ def _episode_schema_defaults(project_name: str, shots: list) -> dict:
 
 # ===== 项目管理（A：每部小说 = 一个独立项目） =====
 
-@app.route('/api/projects', methods=['GET'])
+@app.route('/api/projects', methods=['GET', 'POST'])
 def api_projects_list():
+    if request.method == 'POST':
+        return api_projects_create()
     with_stats = (request.args.get('stats', '1') not in ('0', 'false', 'no'))
     projects = project_store.list_projects(with_stats=with_stats)
     return jsonify({"success": True, "total": len(projects), "projects": projects,
@@ -255,10 +267,22 @@ def api_projects_create():
     existing = project_store.get_project(pid) if pid else None
     if existing:
         return jsonify({"error": f"项目 ID 已存在：{pid}", "project": existing}), 409
+    novel_id = (data.get('novel_id') or '').strip()
+    novel_name = (data.get('novel_name') or '').strip()
+    # 前端只传 novel_id，不传 novel_name。此前直接 `or name` 兜底，等于把
+    # 「小说名」写成了「项目名」（两者通常不同，项目名可以是任意自定义名称）。
+    # 这里回查小说库取真实标题，取不到才退回项目名。
+    if novel_id and not novel_name:
+        try:
+            meta = get_novel(NOVELS_DIR, novel_id) or {}
+        except Exception as e:  # noqa: BLE001
+            app.logger.warning(f"读取小说元信息失败 {novel_id}: {e}")
+            meta = {}
+        novel_name = str(meta.get('title') or meta.get('name') or '').strip()
     rec = project_store.create_project(
         name,
-        novel_id=data.get('novel_id') or '',
-        novel_name=data.get('novel_name') or name,
+        novel_id=novel_id,
+        novel_name=novel_name or name,
         config=data.get('config') if isinstance(data.get('config'), dict) else None,
         pid=pid,
     )
@@ -591,11 +615,30 @@ def api_project_asset_detail(pid):
     })
 
 
-# ===== 页面 =====
+# ===== 页面（Vite SPA）=====
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), 'static')
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return send_from_directory(_STATIC_DIR, 'index.html')
+
+
+@app.route('/assets/<path:filename>')
+def static_assets(filename):
+    """服务 Vite 构建的静态资源"""
+    return send_from_directory(os.path.join(_STATIC_DIR, 'assets'), filename)
+
+
+@app.route('/vite.svg')
+def vite_icon():
+    """Vite favicon 回退（旧版本 index.html 仍可能引用，保留向后兼容）"""
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">⚡</text></svg>'
+
+
+@app.route('/favicon.svg')
+def favicon_svg():
+    """站点图标：由 Vite 从 frontend/public/favicon.svg 复制到 static 根目录"""
+    return send_from_directory(_STATIC_DIR, 'favicon.svg')
 
 
 # ===== 状态 =====
@@ -880,7 +923,15 @@ def api_analytics_reset():
 # ==========================================================================
 
 def _load_script_for(project_name: str, episode_no=None) -> dict:
-    """按项目名（+可选集号）读取剧本；缺集号时取该项目第一集"""
+    """按项目名（+可选集号）读取剧本；缺集号时取该项目第一集
+
+    兼容两种历史布局（否则「迁移项目」会永远读不到剧本）：
+      A. 现行：SCRIPT_DIR/<project_key>/第N集.json
+      B. 迁移遗留：SCRIPT_DIR/<name>_<时间戳>.json（扁平，无子目录）
+    遗留项目在项目索引里登记着 episode_count（例如 10），但按 A 找不到任何一集，
+    于是分镜画布 / 导出 / 质检等全部读到空数据，界面显示「10 集 · 0 分镜」。
+    这里在 A 落空时回退到 B，并优先取时间戳最新的一份。
+    """
     key = project_store.safe_key(project_name)
     script = None
     if episode_no:
@@ -897,7 +948,45 @@ def _load_script_for(project_name: str, episode_no=None) -> dict:
             first = eps[0]
             epno = first if isinstance(first, int) else (first.get("episode_no") or 1)
             script = novel_to_script.load_episode_script(SCRIPT_DIR, key, epno)
+    if not script:
+        script = _load_legacy_flat_script(project_name)
     return script or {}
+
+
+def _load_legacy_flat_script(project_name: str) -> dict:
+    """回退：读取旧版扁平命名的剧本（SCRIPT_DIR/<name>_<时间戳>.json）。
+
+    仅在现行目录布局读不到剧本时调用，因此不会遮蔽正常的第N集.json。
+    按修改时间倒序取第一份「含 shots」的文件，避免命中空壳/中间态产物。
+    """
+    try:
+        names = os.listdir(SCRIPT_DIR)
+    except OSError:
+        return {}
+    cands = []
+    for fn in names:
+        if not fn.lower().endswith(".json"):
+            continue
+        stem = fn[:-5]
+        # 允许 <name>_<时间戳> 与 <name> 本身（例如「剑心初醒_兼容版」）
+        if stem != project_name and not stem.startswith(project_name + "_"):
+            continue
+        path = os.path.join(SCRIPT_DIR, fn)
+        try:
+            cands.append((os.path.getmtime(path), path))
+        except OSError:
+            continue
+    for _, path in sorted(cands, reverse=True):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:  # noqa: BLE001
+            app.logger.warning(f"遗留剧本读取失败 {path}：{e}")
+            continue
+        if isinstance(data, dict) and (data.get("shots") or data.get("episode_no")):
+            app.logger.info("剧本回退：%s 使用遗留扁平剧本 %s", project_name, os.path.basename(path))
+            return data
+    return {}
 
 
 def _chapter_text_for_script(script: dict) -> str:
@@ -1671,7 +1760,54 @@ def api_export_list():
         items = nle_export.list_exports(project)
     except Exception as e:  # noqa: BLE001
         return jsonify({"success": False, "error": str(e)}), 500
-    return jsonify({"success": True, "count": len(items), "items": items})
+    # 前端（ExportPage / 工作台 ExportTab）统一消费 `files` 字段：
+    # 这里在保留 `items` 原始结构的同时，补一份前端可直接渲染的规范化列表。
+    files = []
+    seen_names = set()
+    for it in items:
+        p = it.get("path") or ""
+        name = os.path.basename(p) if p else ""
+        if name:
+            seen_names.add(name)
+        files.append({
+            "format": it.get("format"),
+            "filename": name,
+            "exists": bool(p and os.path.isfile(p)),
+            "path": p,
+            "dir": it.get("dir"),
+            "project": it.get("project"),
+            "exported_at": it.get("exported_at"),
+            "shot_count": it.get("shot_count"),
+            "total_sec": it.get("total_sec"),
+            "size_mb": it.get("size_mb"),
+        })
+
+    # 合并 ExportManager 产物（output/exports/<project>/），
+    # 该目录与 nle_export.EXPORT_DIR（output/export/）不同，需单独扫描，
+    # 否则「生成导出文件」后列表仍显示为空。
+    if project:
+        em_dir = os.path.join(PROJECT_OUTPUT_DIR, "exports", project)
+        known = [
+            ("fcpml", f"{project}_fcpml.xml"),
+            ("edl", f"{project}_edl.edl"),
+            ("json", f"{project}_timeline.json"),
+        ]
+        for fmt, fn in known:
+            fp = os.path.join(em_dir, fn)
+            if os.path.isfile(fp) and fn not in seen_names:
+                files.append({
+                    "format": fmt,
+                    "filename": fn,
+                    "exists": True,
+                    "path": fp,
+                    "dir": em_dir,
+                    "project": project,
+                    "exported_at": datetime.fromtimestamp(
+                        os.path.getmtime(fp)).isoformat(timespec="seconds"),
+                    "size_mb": round(os.path.getsize(fp) / 1048576, 3),
+                })
+
+    return jsonify({"success": True, "count": len(files), "items": items, "files": files})
 
 
 @app.route('/api/export/download/<path:filename>')
@@ -1884,7 +2020,29 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
             for attempt in range(max_retries + 1):
                 if attempt > 0:
                     seed = random.randint(1, 2 ** 31 - 1)
-                    _set_phase(f"{name} 基础图质检不达标，重新生成（第 {attempt}/{max_retries} 次）",
+                    # 从记忆模块获取教训并修改提示词
+                    try:
+                        suggestions = prompt_memory.suggest(
+                            kind="asset",
+                            prompt=prompt_zh,
+                            project=project_name,
+                            root_dir=PROJECT_OUTPUT_DIR
+                        )
+                        if suggestions:
+                            # 根据教训修改提示词
+                            learned_prompt = prompt_memory.learned_prompt(
+                                kind="asset",
+                                prompt=prompt_zh,
+                                project=project_name,
+                                root_dir=PROJECT_OUTPUT_DIR
+                            )
+                            if learned_prompt and learned_prompt != prompt_zh:
+                                app.logger.info(f"根据历史教训修改资产提示词: {suggestions[:2]}")
+                                prompt_zh = learned_prompt
+                    except Exception as mem_err:
+                        app.logger.warning(f"读取记忆模块失败: {mem_err}")
+                    
+                    _set_phase(f"{name} 基础图质检不达标，修改提示词后重新生成（第 {attempt}/{max_retries} 次）",
                                "regenerating")
                 base_files = gen_base(prompt_zh, seed=seed)
                 if not base_files:
@@ -1925,6 +2083,25 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                 if not verdict.get("ok"):
                     break     # 质检接口异常，重生成无意义
             if not base_ok:
+                # 记录教训到AI记忆库
+                if base_attempts and isinstance(base_attempts[-1], dict):
+                    last_attempt = base_attempts[-1]
+                    last_verdict = last_attempt.get("verdict") or {}
+                    score = last_verdict.get("score", 0)
+                    issues = last_verdict.get("issues", [])
+                    try:
+                        prompt_memory.record(
+                            project=project_name,
+                            kind="asset",
+                            prompt=prompt_zh,
+                            issues=issues,
+                            reason=last_verdict.get("reason", ""),
+                            score=score,
+                            root_dir=PROJECT_OUTPUT_DIR
+                        )
+                    except Exception as mem_err:
+                        app.logger.warning(f"记录资产质检教训失败: {mem_err}")
+                
                 results.append({
                     "name": name, "success": False, "dir": asset_dir, "stage": "基础图",
                     "qc_blocked": bool(base_gate and base_gate.get("blocked")),
@@ -2295,9 +2472,32 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     for attempt in range(max_retries + 1):
                         if attempt > 0:
                             seed = random.randint(1, 2 ** 31 - 1)
+                            # 从记忆模块获取教训并修改提示词
+                            try:
+                                suggestions = prompt_memory.suggest(
+                                    kind="storyboard",
+                                    prompt=prompt,
+                                    project=project_name,
+                                    root_dir=PROJECT_OUTPUT_DIR
+                                )
+                                if suggestions:
+                                    # 根据教训修改提示词
+                                    learned_prompt = prompt_memory.learned_prompt(
+                                        kind="storyboard",
+                                        prompt=prompt,
+                                        project=project_name,
+                                        root_dir=PROJECT_OUTPUT_DIR
+                                    )
+                                    if learned_prompt and learned_prompt != prompt:
+                                        app.logger.info(f"根据历史教训修改提示词: {suggestions[:2]}")
+                                        prompt = learned_prompt
+                                        item["prompt"] = prompt
+                            except Exception as mem_err:
+                                app.logger.warning(f"读取记忆模块失败: {mem_err}")
+                            
                             with lock:
                                 generation_state[task_id]["phase"] = \
-                                    f"质检不达标，重新生成（第 {attempt}/{max_retries} 次）"
+                                    f"质检不达标，修改提示词后重新生成（第 {attempt}/{max_retries} 次）"
                                 generation_state[task_id]["qc_phase"] = "regenerating"
                         result = comfyui_client.generate_storyboard(
                             prompt_zh=prompt,
@@ -2354,7 +2554,22 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                                                  int(qc_cfg.get("max_retries", 0)))
                         gate = item.get("qc_gate")
                         if not gate or not gate.get("accept"):
-                            # P0：质检不达标 / 调用异常 → 阻断入库（不写正式目录，仅暂存区留证，不计入成功）
+                            # P0：记录教训到 AI 记忆库
+                            if attempts and isinstance(attempts[-1], dict):
+                                last_verdict = attempts[-1].get("verdict") or {}
+                                score = last_verdict.get("score", 0)
+                                issues = last_verdict.get("issues", [])
+                                # 修复：使用正确的函数名 record 而不是 record_lesson
+                                prompt_memory.record(
+                                    project=project_name,
+                                    kind="storyboard",
+                                    prompt=prompt,
+                                    issues=issues,
+                                    reason=last_verdict.get("reason", ""),
+                                    score=score,
+                                    root_dir=PROJECT_OUTPUT_DIR
+                                )
+                            # P0：质检不达标 / 调用异常 → 阻断入库
                             item["success"] = False
                             item["qc_blocked"] = True
                             item.pop("file", None)
@@ -2556,6 +2771,22 @@ def api_generate_videos():
             "phase": "视频生成", "qc": _qc_brief("video"),
             "episode_stats": episode_stats,
         }
+
+    # 抽取 worker 时这里被截断了：既没启动线程也没有 return，
+    # 导致 POST /api/videos/generate 抛 "did not return a valid response" (500)。
+    # 现在把「启动后台线程 + 返回 task_id」补回路由本身（worker 只负责干活）。
+    thread = threading.Thread(
+        target=_video_generate_worker,
+        args=(task_id, project_name, shots, character_refs, scene_refs,
+              storyboards, use_storyboard, mode, timeout_per_segment, episode_tag,
+              data.get('episode_no')),
+    )
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({"success": True, "task_id": task_id, "status": "started",
+                    "total": len(shots), "mode": mode})
+
 
 def _video_generate_worker(task_id, project_name, shots, character_refs,
                           scene_refs, storyboards, use_storyboard, mode,
@@ -2875,18 +3106,6 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
         app.logger.error(f"视频生成失败: {e}")
         with lock:
             generation_state[task_id].update({"status": "failed", "error": str(e)})
-
-
-    thread = threading.Thread(
-        target=_video_generate_worker,
-        args=(task_id, project_name, shots, character_refs, scene_refs,
-              storyboards, use_storyboard, mode, timeout_per_segment, episode_tag,
-              data.get('episode_no')),
-    )
-    thread.daemon = True
-    thread.start()
-
-    return jsonify({"task_id": task_id, "status": "started"})
 
 
 # ===== 步骤6：成片合成 =====
@@ -3524,6 +3743,13 @@ def _ai_config_view() -> dict:
     view["config_path"] = os.path.abspath(AI_CONFIG_PATH)
     view["legacy_path"] = os.path.abspath(LLM_CONFIG_PATH)
     view["modules_meta"] = ai_config.module_meta()
+    # ComfyUI 地址如实下发：它由环境变量 COMFYUI_URL 决定，写进配置文件也没有任何
+    # 代码读取（历史遗留的死配置）。前端据此只做只读展示，不再给一个「改了没用」的输入框。
+    view["comfyui"] = {
+        "url": COMFYUI_URL,
+        "source": "环境变量 COMFYUI_URL",
+        "editable": False,
+    }
     return view
 
 
@@ -3550,10 +3776,8 @@ def api_ai_config_get():
     return jsonify({"success": True, "config": _ai_config_view()})
 
 
-@app.route('/api/ai/config', methods=['POST'])
-def api_ai_config_save():
-    """保存单个模块：{module: text|qc|chat, base_url, model, api_key?}"""
-    data = request.json or {}
+def _save_ai_module(data: dict):
+    """保存单个 AI 模块的核心实现（/api/ai/config 与兼容路由 /api/llm/config 共用）"""
     module = (data.get("module") or "").strip()
     if module not in AI_MODULES:
         return jsonify({"success": False,
@@ -3582,6 +3806,12 @@ def api_ai_config_save():
         "config_path": os.path.abspath(AI_CONFIG_PATH),
         "message": f"{AI_MODULE_LABEL.get(module, module)}配置已保存" + ("（api_key 保持不变）" if keep else ""),
     })
+
+
+@app.route('/api/ai/config', methods=['POST'])
+def api_ai_config_save():
+    """保存单个模块：{module: text|qc|chat, base_url, model, api_key?}"""
+    return _save_ai_module(request.json or {})
 
 
 @app.route('/api/ai/config/clear', methods=['POST'])
@@ -3659,9 +3889,16 @@ def api_llm_config_get():
 
 @app.route('/api/llm/config', methods=['POST'])
 def api_llm_config_save():
-    data = request.json or {}
+    """兼容旧前端：强制保存 text 模块（= 文本分析模型 = LLM 引擎）
+
+    旧实现是 `data["module"]="text"; return api_ai_config_save()`，
+    但 `api_ai_config_save` 内部会重新从 `request.json` 取值，本地 dict 的修改
+    完全无效 —— 结果是旧接口永远存不进 text 模块（调用方不传 module 时直接报
+    "unknown module：(空)"）。这里改为把改写后的 data 显式传进共用的实现。
+    """
+    data = dict(request.json or {})
     data["module"] = "text"
-    return api_ai_config_save()
+    return _save_ai_module(data)
 
 
 @app.route('/api/llm/config/clear', methods=['POST'])
@@ -3845,10 +4082,55 @@ def api_ai_chat_settings():
                     "settings_file": os.path.abspath(AI_SETTINGS_PATH)})
 
 
-@app.route('/api/ai/settings', methods=['GET'])
+@app.route('/api/ai/settings', methods=['GET', 'POST'])
 def api_ai_settings():
-    """统一读取创作设定（简版）：{project: 可空} → 生效设定 + style_brief"""
+    """统一读取/保存创作设定（简版）"""
     project = (request.args.get("project") or "").strip()
+
+    if request.method == 'POST':
+        data = request.json or {}
+        message = "设置已保存"
+
+        # 「LLM 引擎」= 「文本分析模型」——同一个模块、同一份配置。
+        # 后端自己也标注了：/api/llm/config 返回的 `deprecated` 字段写着
+        # 「等价于 /api/ai/config 的 text 模块」。
+        #
+        # 旧实现在这里调 `load_llm_config(AI_CONFIG_PATH, LLM_CONFIG_PATH)`，
+        # 但这个别名来自 **llm_client**（只需 1 个 path 参数），却被按 ai_config 的
+        # 2 参签名调用 → TypeError → 整个「保存系统设置」按钮必然 500
+        # （实测报错：load_config() takes 1 positional argument but 2 were given）。
+        # 现在统一落到 text 模块，不再往 llm_config 形态的扁平键里写死配置。
+        if 'llm_api_key' in data or 'llm_provider' in data:
+            cur = ai_config.get_module(ai_config.load_config(AI_CONFIG_PATH, LLM_CONFIG_PATH), "text")
+            key = str(data.get('llm_api_key') or '').strip()
+            if key and '*' not in key and cur.get("base_url") and cur.get("model"):
+                ai_config.save_module(AI_CONFIG_PATH, "text",
+                                      base_url=cur["base_url"], model=cur["model"],
+                                      api_key=key, legacy_path=LLM_CONFIG_PATH)
+                message = "LLM 引擎密钥已更新（与「文本分析模型」是同一份配置）"
+            else:
+                message = ("「LLM 引擎」就是「文本分析模型」，"
+                           "请在上方「文本分析模型」卡片里填写 base_url / model / api_key")
+
+        # ComfyUI 地址：全项目只有这里写、没有任何地方读（各 ComfyUI 客户端都直接取
+        # 模块级常量 COMFYUI_URL，来源是环境变量）。所以旧实现只是「假装保存成功」。
+        # 这里如实告知，避免用户以为改了地址就生效。
+        if 'comfyui_url' in data:
+            message = (f"ComfyUI 地址由环境变量 COMFYUI_URL 决定，当前为 {COMFYUI_URL}；"
+                       "如需修改请改环境变量后重启服务")
+
+        # Save watermark config if provided
+        if 'watermark_enabled' in data or 'watermark_text' in data:
+            wm_cfg = _wm_load_cfg()
+            if 'watermark_enabled' in data:
+                wm_cfg['enabled'] = data['watermark_enabled']
+            if 'watermark_text' in data:
+                wm_cfg['text'] = data['watermark_text']
+            video_watermark.save_config(WATERMARK_CONFIG_PATH, wm_cfg)
+            message = "水印设置已保存"
+
+        return jsonify({"success": True, "message": message})
+
     view = ai_chat.settings_view(AI_SETTINGS_PATH, project)
     return jsonify({"success": True, "project_name": view.get("project_name"),
                     "active": view.get("active"), "settings": view.get("settings"),
@@ -4172,6 +4454,83 @@ def api_qc_history(project_name, kind, shot_key):
                     "history_file": os.path.abspath(path)})
 
 
+@app.route('/api/qc/project-summary', methods=['GET'])
+def api_qc_project_summary():
+    """项目级 QC 聚合：列出所有镜头的质检状态，供前端总览页使用"""
+    project = _safe_project(request.args.get('project', ''))
+    if not project:
+        return jsonify({"success": False, "error": "缺少 project 参数"}), 400
+    shots = []
+    passed = 0
+    failed = 0
+    retry_count = 0
+    qc_cfg = _qc_load_cfg()
+    # 扫描所有 shot_xxx 目录
+    for entry in os.listdir(QC_DIR):
+        shot_dir = os.path.join(QC_DIR, entry)
+        if not os.path.isdir(shot_dir) or not entry.startswith('shot_'):
+            continue
+        for kind in ('image', 'video'):
+            hist_path = qc_client.history_path(QC_DIR, project, kind, entry)
+            hist = qc_client.read_history(QC_DIR, project, kind, entry)
+            if hist:
+                latest = hist[-1] if isinstance(hist, list) else hist
+                score = latest.get('score', 0) if isinstance(latest, dict) else 0
+                verdict = latest.get('verdict', 'unknown') if isinstance(latest, dict) else 'unknown'
+                ts = latest.get('timestamp', '') if isinstance(latest, dict) else ''
+                err = latest.get('error', '') if isinstance(latest, dict) else ''
+                shots.append({
+                    'shot_id': entry,
+                    'kind': kind,
+                    'score': score,
+                    'verdict': verdict,
+                    'timestamp': ts,
+                    'error': err,
+                })
+                if verdict == 'pass':
+                    passed += 1
+                elif verdict == 'fail':
+                    failed += 1
+                else:
+                    retry_count += 1
+    # 如果有历史但没有匹配到项目下的 shot，尝试按目录前缀匹配项目名
+    if not shots:
+        for entry in sorted(os.listdir(QC_DIR), reverse=True):
+            shot_dir = os.path.join(QC_DIR, entry)
+            if not os.path.isdir(shot_dir):
+                continue
+            for kind in ('image', 'video'):
+                hist_path = qc_client.history_path(QC_DIR, project, kind, entry)
+                hist = qc_client.read_history(QC_DIR, project, kind, entry)
+                if hist:
+                    latest = hist[-1] if isinstance(hist, list) else hist
+                    score = latest.get('score', 0) if isinstance(latest, dict) else 0
+                    verdict = latest.get('verdict', 'unknown') if isinstance(latest, dict) else 'unknown'
+                    ts = latest.get('timestamp', '') if isinstance(latest, dict) else ''
+                    err = latest.get('error', '') if isinstance(latest, dict) else ''
+                    shots.append({
+                        'shot_id': entry,
+                        'kind': kind,
+                        'score': score,
+                        'verdict': verdict,
+                        'timestamp': ts,
+                        'error': err,
+                    })
+                    if verdict == 'pass':
+                        passed += 1
+                    elif verdict == 'fail':
+                        failed += 1
+                    else:
+                        retry_count += 1
+    view = qc_client.public_view(qc_cfg)
+    return jsonify({
+        "success": True,
+        "config": view,
+        "stats": {"total": passed + failed + retry_count, "passed": passed, "failed": failed, "retry_count": retry_count},
+        "history": shots,
+    })
+
+
 @app.route('/api/qc/frames/<path:filename>')
 def api_qc_frame_file(filename):
     """回显视频质检抽帧图（只读）"""
@@ -4406,7 +4765,7 @@ def api_novel_convert(novel_id):
 
     client = _current_llm_client()
     if not client.configured:
-        return _llm_guide_response("尚未配置自定义 AI 接口，无法把小说转成剧本")
+        return _ai_guide_response("尚未配置自定义 AI 接口，无法把小说转成剧本")
 
     data = request.json or {}
     style = (data.get('style') or '3D动漫渲染').strip()
@@ -4687,7 +5046,7 @@ def api_novel_episodes_generate(novel_id):
 
     client = _current_llm_client()
     if not client.configured:
-        return _llm_guide_response("尚未配置自定义 AI 接口，无法按章生成剧本")
+        return _ai_guide_response("尚未配置自定义 AI 接口，无法按章生成剧本")
 
     all_chapters = meta.get("chapters") or []
     if not all_chapters:
@@ -4940,7 +5299,7 @@ def api_continuity_revalidate(novel_id, episode_no):
         return jsonify({"success": False, "error": str(e)}), 404
     client = _current_llm_client()
     if not client.configured:
-        return _llm_guide_response("尚未配置自定义 AI 接口，无法执行一致性校验")
+        return _ai_guide_response("尚未配置自定义 AI 接口，无法执行一致性校验")
     try:
         script = novel_to_script.load_episode_script(SCRIPT_DIR, key, episode_no)
     except Exception as e:  # noqa: BLE001
@@ -5054,7 +5413,7 @@ def api_analyze_prompts():
 
     client = _current_llm_client()
     if not client.configured:
-        return _llm_guide_response("尚未配置自定义 AI 接口，无法生成提示词")
+        return _ai_guide_response("尚未配置自定义 AI 接口，无法生成提示词")
 
     mode = data.get('mode') or 'all'
     if mode not in ('shots', 'assets', 'all'):
@@ -5134,8 +5493,17 @@ def _dub_resolve_script(data: dict) -> dict:
             cands.append({"path": p, "mtime": os.path.getmtime(p), "script": s,
                           "episode_no": s.get("episode_no") or (s.get("metadata") or {}).get("episode_no")})
     if not cands:
-        raise TTSError("未找到可用剧本（output/scripts 下无含 shots 的 JSON），请显式提供 script_path")
-    hit = [c for c in cands if project_name and project_name in c["path"]] or cands
+        raise TTSError("未找到可用剧本（output/scripts 下无含 shots 的 JSON），请先生成剧本")
+
+    # 严格匹配：有 project_name 时必须属于该项目，禁止跨项目回退
+    if project_name:
+        project_cands = [c for c in cands if project_name in c["path"]]
+        if not project_cands:
+            raise TTSError(f"项目 '{project_name}' 暂无剧本，请先生成剧本后再使用 TTS 功能")
+        hit = project_cands
+    else:
+        hit = cands
+
     if episode:
         hit2 = [c for c in hit if str(c["episode_no"]) == str(episode)]
         if hit2:
@@ -5624,7 +5992,7 @@ def _mix_worker(task_id: str, prepared: dict, out_name: str):
             mix_tasks[task_id].update({"status": "failed", "phase": "合成失败",
                                        "message": str(e), "progress": 100})
     except Exception as e:  # pragma: no cover - 兜底
-        logger.exception("音画合成异常")
+        app.logger.exception("音画合成异常")
         with mix_lock:
             mix_tasks[task_id].update({"status": "failed", "phase": "合成异常",
                                        "message": f"{type(e).__name__}: {e}", "progress": 100})
@@ -5789,18 +6157,69 @@ def api_mix_file(project_name, filename):
 #   手动触发 → run-once（用于验证与补跑单集）
 
 
+def _friendly_error(msg, fallback: str = "服务内部错误，请稍后重试（详情见后端日志）") -> str:
+    """把后端异常整理成可安全展示给前端的文案（对应测试缺陷 D5）。
+
+    前端错误框不应出现 traceback、文件路径、模块名等实现细节。
+    这里做一次归一化：截掉 traceback 段、去掉 File/line 与模块来源、
+    压缩空白并限长；若仍残留实现细节特征，则整体降级为通用文案。
+    业务类友好错误（中文短句）会原样保留。
+    """
+    text = str(msg or "").strip()
+    if not text:
+        return fallback
+    idx = text.find("Traceback (most recent call last)")
+    if idx != -1:
+        text = text[:idx].strip()
+    text = text.splitlines()[-1].strip() if text else ""
+    text = re.sub(r'File\s+"[^"]*",\s*line\s*\d+', "", text)
+    text = re.sub(r"\s*from\s+'[^']*'", "", text)          # cannot import name 'X' from 'mod'
+    text = re.sub(r"\s*\([^()]*\.py[^()]*\)", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    # 仍残留实现细节（模块/导入语句/文件路径）→ 一律降级，避免外泄内部结构
+    if re.search(r"\.py\b|\bimport\b|\bmodule\b|site-packages|[\\/]", text):
+        return fallback
+    if len(text) > 160:
+        text = text[:160] + "…"
+    return text or fallback
+
+
 def _autopilot_guard(fn):
-    """统一异常兜底：托管接口不应把 500 抛给前端，而是返回可读错误"""
+    """统一异常兜底：托管接口不应把 500 抛给前端，而是返回可读错误
+
+    注意不要把客户端错误（HTTPException，例如请求体不是合法 JSON 时
+    werkzeug 抛出的 400 BadRequest）误判成服务端 500——否则前端会看到
+    「500 服务内部错误」，而真实原因是自己发了个畸形请求，排查方向会被带偏。
+    """
     def _wrap(*a, **k):
         try:
             return fn(*a, **k)
         except KeyError as e:
             return jsonify({"success": False, "error": f"对象不存在：{e}"}), 404
+        except HTTPException as e:
+            # 保留 werkzeug 原本的语义状态码（400/404/405…），不要降级成 500
+            return jsonify({
+                "success": False,
+                "error": e.description or e.name,
+            }), (e.code or 400)
         except Exception as e:  # noqa: BLE001
             app.logger.exception("托管接口异常")
-            return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
+            return jsonify({"success": False, "error": _friendly_error(e)}), 500
     _wrap.__name__ = fn.__name__
     return _wrap
+
+
+@app.errorhandler(BadRequest)
+def _handle_bad_request(e):
+    """请求体无法解析（非合法 JSON / Content-Type 不匹配）→ 400。
+
+    没有这个兜底时，未被 _autopilot_guard 包裹的路由会直接把 werkzeug 的
+    400 渲染成 HTML 错误页，前端拿到一坨 HTML 而无法解析成 JSON。
+    """
+    return jsonify({
+        "success": False,
+        "error": "请求体格式不正确：需要合法的 JSON（并带上 Content-Type: application/json）",
+    }), 400
 
 
 @app.route('/api/autopilot/status', methods=['GET'])
@@ -6076,6 +6495,811 @@ def api_autopilot_plan_from_settings(project_name):
                     "style_brief": brief})
 
 
+# ==================== 全自动生产主控路由 ====================
+
+@app.route('/api/autonomous/start', methods=['POST'])
+@_autopilot_guard
+def api_autonomous_start():
+    """一键启动全自动生产：上传小说后，AI对话定风格，然后一键启动24h自动生产"""
+    data = request.json or {}
+    project_name = _safe_project(data.get('project_name') or '')
+    novel_id = str(data.get('novel_id') or '').strip()
+    plan_overrides = {k: v for k, v in data.items()
+                      if k in ('style', 'target_shots', 'video_mode', 'enable_assets',
+                               'enable_keyframe', 'enable_video', 'enable_final',
+                               'enable_tts', 'enable_mix', 'step_max_retries')}
+
+    if not novel_id and project_name:
+        # 尝试从现有计划获取 novel_id
+        import autopilot as _ap
+        plan = _ap.get_plan(project_name)
+        novel_id = plan.get('novel_id', '')
+
+    if not novel_id:
+        return jsonify({"success": False, "error": "缺少 novel_id，请先上传小说"}), 400
+
+    result = autonomous.start_autonomous(project_name or novel_id, novel_id, plan_overrides)
+    # D5：返回给前端的错误统一脱敏，避免把异常栈/模块名直接显示在错误框里
+    if isinstance(result, dict) and result.get('error'):
+        result['error'] = _friendly_error(result['error'])
+    status_code = 200 if result.get('success') else 400
+    return jsonify(result), status_code
+
+
+@app.route('/api/autonomous/stop', methods=['POST'])
+@_autopilot_guard
+def api_autonomous_stop():
+    """停止全自动生产"""
+    data = request.json or {}
+    project = _safe_project(data.get('project_name') or '')
+    result = autonomous.stop_autonomous(project)
+    return jsonify(result)
+
+
+@app.route('/api/autonomous/resume', methods=['POST'])
+@_autopilot_guard
+def api_autonomous_resume():
+    """恢复全自动生产"""
+    data = request.json or {}
+    project = _safe_project(data.get('project_name') or '')
+    result = autonomous.resume_autonomous(project)
+    return jsonify(result)
+
+
+@app.route('/api/autonomous/status', methods=['GET'])
+@_autopilot_guard
+def api_autonomous_status():
+    """查询全自动生产状态"""
+    project = _safe_project(request.args.get('project_name', ''))
+    result = autonomous.status(project)
+    return jsonify({"success": True, **result})
+
+
+@app.route('/api/autonomous/chat', methods=['POST'])
+@_autopilot_guard
+def api_autonomous_chat():
+    """AI 对话指令解析：将用户的自然语言指令转化为生产动作"""
+    data = request.json or {}
+    message = str(data.get('message') or '').strip()
+    project = _safe_project(data.get('project_name') or '')
+
+    if not message:
+        return jsonify({"success": False, "error": "消息不能为空"}), 400
+
+    result = autonomous.interpret_chat_command(message, project)
+    return jsonify(result)
+
+
+@app.route('/api/autonomous/report/<project_name>', methods=['GET'])
+@_autopilot_guard
+def api_autonomous_report(project_name):
+    """获取生产报告"""
+    project = _safe_project(project_name)
+    episode_no = request.args.get('episode_no', type=int)
+    result = autonomous.generate_report(project, episode_no)
+    return jsonify(result)
+
+
+@app.route('/api/autonomous/report/export/<project_name>', methods=['GET'])
+@_autopilot_guard
+def api_autonomous_report_export(project_name):
+    """导出生产报告"""
+    project = _safe_project(project_name)
+    fmt = request.args.get('format', 'json')
+    filepath = autonomous.export_report(project, fmt)
+    if not filepath:
+        return jsonify({"success": False, "error": "暂无生产记录"}), 404
+    return send_file(filepath, as_attachment=True,
+                     download_name=os.path.basename(filepath))
+
+
+@app.route('/api/autonomous/projects', methods=['GET'])
+@_autopilot_guard
+def api_autonomous_projects():
+    """列出所有有生产记录的项目"""
+    projects = autonomous.list_all_projects()
+    return jsonify({"success": True, "projects": projects})
+
+
+@app.route('/api/autonomous/deliverables/<project_name>', methods=['GET'])
+@_autopilot_guard
+def api_autonomous_deliverables(project_name):
+    """获取项目的交付物列表"""
+    project = _safe_project(project_name)
+    deliverables = autonomous.get_deliverables(project)
+    return jsonify({"success": True, "project": project, "deliverables": deliverables})
+
+
+# ===================== 角色管理API =====================
+
+@app.route('/api/characters', methods=['GET'])
+@_autopilot_guard
+def api_list_characters():
+    """列出项目所有角色"""
+    project_name = request.args.get('project')
+    if not project_name:
+        return jsonify({"success": False, "error": "缺少 project 参数"}), 400
+
+    project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
+    mgr = CharacterManager(project_name, project_dir)
+    characters = mgr.get_all_characters()
+    return jsonify({"success": True, "characters": characters})
+
+
+@app.route('/api/characters', methods=['POST'])
+@_autopilot_guard
+def api_add_character():
+    """添加新角色"""
+    data = request.get_json(silent=True) or {}
+    project_name = data.get('project')
+    name = data.get('name', '')
+    role = data.get('role', '配角')
+    description = data.get('description', '')
+    outfit = data.get('outfit', '')
+
+    if not project_name or not name:
+        return jsonify({"success": False, "error": "缺少必要参数"}), 400
+
+    project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
+    mgr = CharacterManager(project_name, project_dir)
+    char_id = mgr.add_character(name, role, description, outfit)
+
+    return jsonify({"success": True, "character_id": char_id, "name": name})
+
+
+@app.route('/api/characters/<char_id>', methods=['PUT'])
+@_autopilot_guard
+def api_update_character(char_id):
+    """更新角色信息"""
+    data = request.get_json(silent=True) or {}
+    project_name = data.get('project')
+
+    project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
+    mgr = CharacterManager(project_name, project_dir)
+    mgr.update_character(
+        char_id,
+        name=data.get('name'),
+        role=data.get('role'),
+        description=data.get('description'),
+        outfit=data.get('outfit'),
+        status=data.get('status')
+    )
+    return jsonify({"success": True})
+
+
+@app.route('/api/characters/<char_id>/reference', methods=['POST'])
+@_autopilot_guard
+def api_upload_character_reference(char_id):
+    """上传角色参考图"""
+    project_name = request.form.get('project')
+    view_type = request.form.get('view_type', 'front')
+    file = request.files.get('image')
+
+    if not file or not project_name:
+        return jsonify({"success": False, "error": "缺少必要参数"}), 400
+
+    project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
+    mgr = CharacterManager(project_name, project_dir)
+
+    # 保存上传的文件
+    upload_dir = os.path.join(project_dir, "characters", "references")
+    os.makedirs(upload_dir, exist_ok=True)
+    ext = os.path.splitext(file.filename)[1]
+    filename = f"{char_id}_{view_type}{ext}"
+    filepath = os.path.join(upload_dir, filename)
+    file.save(filepath)
+
+    mgr.set_reference(char_id, view_type, filepath)
+    return jsonify({"success": True, "path": filepath})
+
+
+@app.route('/api/characters/<char_id>/prompt', methods=['GET'])
+@_autopilot_guard
+def api_get_character_prompt(char_id):
+    """获取角色生成提示词"""
+    project_name = request.args.get('project')
+    project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
+    mgr = CharacterManager(project_name, project_dir)
+    prompt = mgr.get_character_prompt(char_id)
+    return jsonify({"success": True, "prompt": prompt})
+
+
+# ===================== 九宫格分镜API =====================
+
+@app.route('/api/storyboard/nine-grid', methods=['POST'])
+@_autopilot_guard
+def api_generate_nine_grid():
+    """生成九宫格分镜"""
+    data = request.get_json(silent=True) or {}
+    project_name = data.get('project')
+    scene_description = data.get('scene_description', '')
+    character_ids = data.get('character_ids', [])
+    emotion = data.get('emotion', 'neutral')
+
+    if not project_name or not scene_description:
+        return jsonify({"success": False, "error": "缺少必要参数"}), 400
+
+    project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
+    sb = NineGridStoryboard(project_name, project_dir)
+    nine_grid = sb.generate_nine_grid(scene_description, character_ids, emotion)
+
+    # 关键：必须把 grid_id 返回给前端，且落盘文件名要与 grid_id 一致。
+    # 之前 save_nine_grid() 存成 nine_grid_<时间戳>.json，却没有任何字段告诉前端这个名字，
+    # 于是「选最佳构图」只能拼出 .../nine-grid/undefined/select → 404，功能等于不可用。
+    grid_id = f"nine_grid_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    grid_dir = os.path.join(project_dir, "storyboards")
+    os.makedirs(grid_dir, exist_ok=True)
+    filepath = os.path.join(grid_dir, f"{grid_id}.json")
+    nine_grid["grid_id"] = grid_id
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(nine_grid, f, ensure_ascii=False, indent=2)
+
+    return jsonify({
+        "success": True,
+        "grid_id": grid_id,
+        "project": project_name,
+        "scene_description": scene_description,
+        "created_at": nine_grid.get("created_at"),
+        "filepath": filepath,
+        "shots": nine_grid["shots"],
+    })
+
+
+@app.route('/api/storyboard/nine-grid/<grid_id>/select', methods=['POST'])
+@_autopilot_guard
+def api_select_nine_grid_shot(grid_id):
+    """选择九宫格中的最佳镜头"""
+    data = request.get_json(silent=True) or {}
+    project_name = data.get('project')
+    selected_index = data.get('selected_index')
+
+    if not project_name:
+        return jsonify({"success": False, "error": "缺少 project"}), 400
+    if selected_index is None:
+        return jsonify({"success": False, "error": "缺少 selected_index"}), 400
+
+    project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
+    sb = NineGridStoryboard(project_name, project_dir)
+    # 加载九宫格数据
+    grid_file = os.path.join(project_dir, "storyboards", f"{grid_id}.json")
+    if not os.path.exists(grid_file):
+        return jsonify({"success": False, "error": f"分镜文件不存在：{grid_id}"}), 404
+
+    with open(grid_file, 'r', encoding='utf-8') as f:
+        nine_grid = json.load(f)
+
+    try:
+        selected = sb.select_best_shot(nine_grid, int(selected_index))
+    except (ValueError, IndexError, TypeError) as e:  # noqa: BLE001
+        return jsonify({"success": False, "error": f"无效的选择：{e}"}), 400
+
+    # 把选择结果落盘，否则「已选最佳构图」刷新后就丢了
+    nine_grid["selected_index"] = int(selected_index)
+    nine_grid["selected_at"] = datetime.now().isoformat()
+    with open(grid_file, 'w', encoding='utf-8') as f:
+        json.dump(nine_grid, f, ensure_ascii=False, indent=2)
+
+    return jsonify({"success": True, "grid_id": grid_id, "shot": selected})
+
+
+# ===================== 导出API =====================
+
+def _timeline_for_export(project_name: str, episode_no=None,
+                         provided: dict = None) -> dict:
+    """把项目剧本适配成 ExportManager 需要的时间轴结构。
+
+    为什么需要这层适配（对应「导出结果是空壳」缺陷）：
+        ExportManager 期望 {project_name, duration, resolution, fps,
+        sequences:[{clips:[{name,start,end}]}]}；
+        而 nle_export.build_timeline 产出的是 {shots:[{start,end,video,...}], total_sec}。
+        两者结构不同，前端又只发 formats 不发 timeline，
+        于是 export_all({}) 写出的是 name="项目"、<clips/> 为空的无效文件，
+        用户下载下来却以为导出成功。
+    """
+    if provided and provided.get("sequences"):
+        provided.setdefault("project_name", project_name)
+        return provided
+
+    script = _load_script_for(project_name, episode_no)
+    tl = nle_export.build_timeline(script or {}, project_name)
+    rows = tl.get("shots") or []
+    clips = [
+        {
+            "name": f"shot_{int(r.get('index', i)) + 1:02d}",
+            "start": r.get("start", 0),
+            "end": r.get("end", 0),
+            "asset_path": r.get("video") or "",
+        }
+        for i, r in enumerate(rows)
+    ]
+    return {
+        "project_name": project_name,
+        "duration": tl.get("total_sec", 0),
+        "resolution": {
+            "width": nle_export.JY_CANVAS["width"],
+            "height": nle_export.JY_CANVAS["height"],
+        },
+        "fps": 30,
+        "shots": rows,
+        "sequences": [{"name": project_name, "clips": clips}],
+    }
+
+
+@app.route('/api/export/<project_name>', methods=['POST'])
+@_autopilot_guard
+def api_export_project(project_name):
+    """导出项目为多种格式"""
+    data = request.get_json(silent=True) or {}
+    formats = data.get('formats', ['fcpml', 'edl', 'json'])
+    # 前端不传 timeline（工作台 ExportTab 就只传 formats）。此处必须自己从剧本
+    # 构建时间轴，否则会导出成空的占位文件。
+    timeline = _timeline_for_export(project_name, data.get('episode_no'),
+                                    data.get('timeline'))
+
+    em = ExportManager(project_name, PROJECT_OUTPUT_DIR)
+    exports = em.export_all(timeline)
+
+    # 转换为前端期望的格式
+    result_files = []
+    for fmt in formats:
+        if fmt in exports:
+            filepath = exports[fmt]
+            exists = os.path.isfile(filepath)
+            filename = os.path.basename(filepath) if exists else f"{project_name}_{fmt}.xml"
+            result_files.append({
+                "format": fmt,
+                "filename": filename,
+                "exists": exists,
+                "path": filepath
+            })
+
+    return jsonify({
+        "success": True,
+        "files": result_files,
+        "shot_count": len(timeline.get("shots") or timeline.get("sequences", [{}])[0].get("clips", [])),
+        "total_sec": timeline.get("duration", 0),
+    })
+
+
+@app.route('/api/export/<project_name>/<format>', methods=['GET'])
+@_autopilot_guard
+def api_get_export_file(project_name, format):
+    """获取导出的文件"""
+    export_dir = os.path.join(PROJECT_OUTPUT_DIR, "exports", project_name)
+    if format == 'fcpml':
+        filename = f"{project_name}_fcpml.xml"
+    elif format == 'edl':
+        filename = f"{project_name}_edl.edl"
+    elif format == 'json':
+        filename = f"{project_name}_timeline.json"
+    else:
+        return jsonify({"success": False, "error": "不支持的格式"}), 400
+
+    filepath = os.path.join(export_dir, filename)
+    if not os.path.exists(filepath):
+        return jsonify({"success": False, "error": "文件不存在"}), 404
+
+    return send_file(filepath, as_attachment=True)
+
+
+@app.route('/api/export/current', methods=['POST'])
+@_autopilot_guard
+def api_export_current():
+    """导出当前项目的所有格式"""
+    data = request.get_json(silent=True) or {}
+    project_name = data.get('project_name', '')
+    formats = data.get('formats', ['fcpml', 'edl', 'json'])
+
+    if not project_name:
+        return jsonify({"success": False, "error": "未指定项目"}), 400
+
+    export_dir = os.path.join(PROJECT_OUTPUT_DIR, "exports", project_name)
+    os.makedirs(export_dir, exist_ok=True)
+
+    result = {}
+    for fmt in formats:
+        if fmt == 'fcpml':
+            filename = f"{project_name}_fcpml.xml"
+        elif fmt == 'edl':
+            filename = f"{project_name}_edl.edl"
+        elif fmt == 'json':
+            filename = f"{project_name}_timeline.json"
+        else:
+            continue
+        filepath = os.path.join(export_dir, filename)
+        if os.path.exists(filepath):
+            result[fmt] = filepath
+
+    return jsonify({"success": True, "files": result})
+
+
+# ===================== 角色关系图谱API =====================
+
+@app.route('/api/relations/graph', methods=['GET'])
+@_autopilot_guard
+def api_get_relation_graph():
+    """获取角色关系图谱数据"""
+    project_name = request.args.get('project')
+    if not project_name:
+        return jsonify({"success": False, "error": "缺少 project 参数"}), 400
+
+    project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
+    rmgr = RelationManager(project_name, project_dir)
+    graph = rmgr.get_graph_data()
+    return jsonify({"success": True, "graph": graph})
+
+
+@app.route('/api/relations', methods=['GET'])
+@_autopilot_guard
+def api_list_relations():
+    """列出项目所有角色关系"""
+    project_name = request.args.get('project')
+    if not project_name:
+        return jsonify({"success": False, "error": "缺少 project 参数"}), 400
+
+    project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
+    rmgr = RelationManager(project_name, project_dir)
+    relations = rmgr.get_all_relations()
+    return jsonify({"success": True, "relations": relations})
+
+
+@app.route('/api/relations', methods=['POST'])
+@_autopilot_guard
+def api_add_relation():
+    """添加角色关系"""
+    data = request.get_json(silent=True) or {}
+    project_name = data.get('project')
+    char_a = data.get('char_a', '')
+    char_b = data.get('char_b', '')
+    rel_type = data.get('type', 'friend')
+    strength = data.get('strength', 'medium')
+    note = data.get('note', '')
+
+    if not project_name or not char_a or not char_b:
+        return jsonify({"success": False, "error": "缺少必要参数"}), 400
+
+    project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
+    rmgr = RelationManager(project_name, project_dir)
+    rel_id = rmgr.add_relation(char_a, char_b, rel_type, strength, note)
+    return jsonify({"success": True, "relation_id": rel_id})
+
+
+@app.route('/api/relations/<rel_id>', methods=['PUT'])
+@_autopilot_guard
+def api_update_relation(rel_id):
+    """更新角色关系"""
+    data = request.get_json(silent=True) or {}
+    project_name = data.get('project')
+
+    if not project_name:
+        return jsonify({"success": False, "error": "缺少 project 参数"}), 400
+
+    project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
+    rmgr = RelationManager(project_name, project_dir)
+    try:
+        rmgr.update_relation(rel_id, **{k: v for k, v in data.items() if k != 'project'})
+        return jsonify({"success": True})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 404
+
+
+@app.route('/api/relations/<rel_id>', methods=['DELETE'])
+@_autopilot_guard
+def api_delete_relation(rel_id):
+    """删除角色关系"""
+    data = request.get_json(silent=True) or {}
+    project_name = data.get('project')
+
+    if not project_name:
+        return jsonify({"success": False, "error": "缺少 project 参数"}), 400
+
+    project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
+    rmgr = RelationManager(project_name, project_dir)
+    try:
+        rmgr.delete_relation(rel_id)
+        return jsonify({"success": True})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 404
+
+
+@app.route('/api/relations/sync', methods=['POST'])
+@_autopilot_guard
+def api_sync_relations():
+    """同步角色数据到关系库"""
+    data = request.get_json(silent=True) or {}
+    project_name = data.get('project')
+    characters = data.get('characters', {})
+
+    if not project_name:
+        return jsonify({"success": False, "error": "缺少 project 参数"}), 400
+
+    project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
+    rmgr = RelationManager(project_name, project_dir)
+    rmgr.sync_characters(characters)
+    return jsonify({"success": True})
+
+
+@app.route('/api/relations/conflicts', methods=['GET'])
+@_autopilot_guard
+def api_check_relation_conflicts():
+    """检测关系冲突"""
+    project_name = request.args.get('project')
+    if not project_name:
+        return jsonify({"success": False, "error": "缺少 project 参数"}), 400
+
+    project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
+    rmgr = RelationManager(project_name, project_dir)
+    detector = RelationConflictDetector(rmgr)
+    summary = detector.get_conflict_summary()
+    return jsonify({"success": True, "conflicts": summary})
+
+
+@app.route('/api/relations/svg', methods=['GET'])
+@_autopilot_guard
+def api_export_relation_svg():
+    """导出关系图谱为SVG"""
+    project_name = request.args.get('project')
+    width = int(request.args.get('width', 800))
+    height = int(request.args.get('height', 600))
+
+    if not project_name:
+        return jsonify({"success": False, "error": "缺少 project 参数"}), 400
+
+    project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
+    rmgr = RelationManager(project_name, project_dir)
+    svg_content = rmgr.export_svg(width, height)
+    return jsonify({"success": True, "svg": svg_content})
+
+
+# ==================== AI Memory API ====================
+
+@app.route('/api/memory/stats', methods=['GET'])
+@_autopilot_guard
+def api_memory_stats():
+    """获取 AI 记忆统计"""
+    mem = get_memory_system()
+    stats = mem.get_stats()
+    trends = mem.evolution.analyze_trends()
+    insights = mem.evolution.generate_insights(limit=5)
+    return jsonify({
+        "success": True,
+        "stats": stats,
+        "trends": trends,
+        "insights": insights,
+    })
+
+
+@app.route('/api/memory/list', methods=['GET'])
+@_autopilot_guard
+def api_memory_list():
+    """列出记忆"""
+    mem_type = request.args.get('type')
+    limit = int(request.args.get('limit', 50))
+    mem = get_memory_system()
+    entries = mem.list_all(mem_type=mem_type, limit=limit)
+    return jsonify({
+        "success": True,
+        "memories": [e.to_dict() for e in entries],
+        "total": len(entries),
+    })
+
+
+@app.route('/api/memory/search', methods=['GET'])
+@_autopilot_guard
+def api_memory_search():
+    """搜索记忆"""
+    query = request.args.get('query', '')
+    mem_type = request.args.get('type')
+    limit = int(request.args.get('limit', 10))
+    if not query:
+        return jsonify({"success": False, "error": "缺少 query 参数"}), 400
+    mem = get_memory_system()
+    results = mem.search_by_pattern(query, mem_type=mem_type, limit=limit)
+    return jsonify({
+        "success": True,
+        "memories": [e.to_dict() for e in results],
+        "total": len(results),
+    })
+
+
+@app.route('/api/memory/record', methods=['POST'])
+@_autopilot_guard
+def api_memory_record():
+    """记录记忆"""
+    data = request.get_json(silent=True) or {}
+    if not data:
+        return jsonify({"success": False, "error": "缺少请求体"}), 400
+
+    mem_type = data.get('type', 'insight')
+    content = data.get('content', '')
+    context = data.get('context', {})
+    confidence = data.get('confidence', 1.0)
+    tags = data.get('tags', [])
+    source = data.get('source', 'manual')
+
+    if not content:
+        return jsonify({"success": False, "error": "缺少 content"}), 400
+
+    mem = get_memory_system()
+    entry = mem.add_memory(
+        mem_type=mem_type,
+        content=content,
+        context=context,
+        confidence=confidence,
+        tags=tags,
+        source=source,
+    )
+    return jsonify({"success": True, "memory": entry.to_dict()})
+
+
+@app.route('/api/memory/record-lesson', methods=['POST'])
+@_autopilot_guard
+def api_memory_record_lesson():
+    """记录质检教训"""
+    data = request.get_json(silent=True) or {}
+    if not data:
+        return jsonify({"success": False, "error": "缺少请求体"}), 400
+
+    project = data.get('project', '')
+    episode = data.get('episode', 0)
+    prompt = data.get('prompt', '')
+    issues = data.get('issues', [])
+    category = data.get('category', 'quality')
+
+    if not project or not issues:
+        return jsonify({"success": False, "error": "缺少必要参数"}), 400
+
+    mem = get_memory_system()
+    entry = mem.record_lesson(
+        project=project,
+        episode=episode,
+        prompt=prompt,
+        issues=issues,
+        category=category,
+    )
+    return jsonify({"success": True, "memory": entry.to_dict()})
+
+
+@app.route('/api/memory/record-success', methods=['POST'])
+@_autopilot_guard
+def api_memory_record_success():
+    """记录成功经验"""
+    data = request.get_json(silent=True) or {}
+    if not data:
+        return jsonify({"success": False, "error": "缺少请求体"}), 400
+
+    project = data.get('project', '')
+    episode = data.get('episode', 0)
+    prompt = data.get('prompt', '')
+    highlights = data.get('highlights', [])
+    category = data.get('category', 'quality')
+
+    if not project or not highlights:
+        return jsonify({"success": False, "error": "缺少必要参数"}), 400
+
+    mem = get_memory_system()
+    entry = mem.record_success(
+        project=project,
+        episode=episode,
+        prompt=prompt,
+        highlights=highlights,
+        category=category,
+    )
+    return jsonify({"success": True, "memory": entry.to_dict()})
+
+
+@app.route('/api/memory/optimize-prompt', methods=['POST'])
+@_autopilot_guard
+def api_memory_optimize_prompt():
+    """基于记忆优化提示词"""
+    data = request.get_json(silent=True) or {}
+    if not data:
+        return jsonify({"success": False, "error": "缺少请求体"}), 400
+
+    base_prompt = data.get('prompt', '')
+    issues = data.get('issues', [])
+
+    if not base_prompt:
+        return jsonify({"success": False, "error": "缺少 prompt"}), 400
+
+    mem = get_memory_system()
+    optimized = mem.evolution.auto_optimize_prompt(base_prompt, issues)
+    return jsonify({
+        "success": True,
+        "original": base_prompt,
+        "optimized": optimized,
+        "improvements": len(issues),
+    })
+
+
+@app.route('/api/memory/insights', methods=['GET'])
+@_autopilot_guard
+def api_memory_insights():
+    """获取 AI 洞察和建议"""
+    limit = int(request.args.get('limit', 5))
+    mem = get_memory_system()
+    insights = mem.evolution.generate_insights(limit=limit)
+    return jsonify({
+        "success": True,
+        "insights": insights,
+        "total": len(insights),
+    })
+
+
+@app.route('/api/memory/clear-old', methods=['POST'])
+@_autopilot_guard
+def api_memory_clear_old():
+    """清理过期记忆"""
+    data = request.get_json(silent=True) or {}
+    days = int(data.get('days', 90))
+    mem = get_memory_system()
+    cleared = mem.clear_old(days=days)
+    return jsonify({
+        "success": True,
+        "cleared": cleared,
+        "days": days,
+    })
+
+
+@app.route('/api/memory/export', methods=['GET'])
+@_autopilot_guard
+def api_memory_export():
+    """导出记忆数据"""
+    mem_type = request.args.get('type')
+    mem = get_memory_system()
+    entries = mem.list_all(mem_type=mem_type) if mem_type else mem.list_all()
+    return jsonify({
+        "success": True,
+        "memories": [e.to_dict() for e in entries],
+        "total": len(entries),
+        "exported_at": datetime.now().isoformat(),
+    })
+
+
+@app.route('/api/memory/trends', methods=['GET'])
+@_autopilot_guard
+def api_memory_trends():
+    """获取趋势分析"""
+    mem = get_memory_system()
+    trends = mem.evolution.analyze_trends()
+    return jsonify({
+        "success": True,
+        "trends": trends,
+    })
+
+
 if __name__ == '__main__':
     app.logger.info(f"漫剧生成系统启动: http://{APP_HOST}:{APP_PORT} (debug={APP_DEBUG})")
     app.run(host=APP_HOST, port=APP_PORT, debug=APP_DEBUG, threaded=True)
+
+
+# ===== SPA 路由（必须在所有 API 路由之后，Flask 默认静态路由之前）=====
+# 显式注册每个 SPA 页面，避免与 Flask 默认 /static 路由冲突
+_SPA_PAGES = ['projects', 'upload', 'auto', 'memory', 'characters', 'grid', 'deliver', 'export', 'settings']
+
+for _page in _SPA_PAGES:
+    _endpoint = f'spa_{_page}'
+    def _make_spa_page(_p=_page, _ep=_endpoint):
+        @app.route(f'/{_p}', endpoint=_ep)
+        def _spa_page():
+            return send_from_directory(_STATIC_DIR, 'index.html')
+        return _spa_page
+    _make_spa_page()
+
+# 通用回退：任意未匹配路径返回 index.html（用于 SPA 客户端路由）
+@app.route('/<path:path>')
+def spa_fallback(path):
+    """SPA 路由回退：非 API、非静态文件请求返回 Vite index.html"""
+    # 放行 API 前缀
+    if path.startswith('api/'):
+        abort(404)
+    # 若 static 目录下确实存在该文件（favicon.svg / robots.txt 等），直接返回真实文件，
+    # 避免被下面的「带扩展名一律 404」误伤。
+    # 用 normpath + 前缀校验防目录穿越；send_from_directory 自身也会做安全校验。
+    safe = os.path.normpath(os.path.join(_STATIC_DIR, path))
+    if safe.startswith(os.path.abspath(_STATIC_DIR)) and os.path.isfile(safe):
+        return send_from_directory(_STATIC_DIR, path)
+    # 放行带扩展名的静态资源
+    if '.' in path.split('/')[-1]:
+        abort(404)
+    return send_from_directory(_STATIC_DIR, 'index.html')

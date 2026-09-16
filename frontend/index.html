@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title data-i18n="app.title">漫剧生成系统</title>
+    <!-- Tailwind 已改为构建期编译（见 tailwind.config.js / postcss.config.js），
+         不再运行时拉取 cdn.tailwindcss.com —— 保证断网与离线打包可用。 -->
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+      #root { height: 100vh; }
+      /* ⚠️ 与 src/index.css 的 .fade-in 必须保持一致。
+         结束帧不能残留 transform，否则会让本元素成为 position:fixed 后代
+         的包含块，Modal / Toast 会被定位到屏幕之外。
+         fill-mode 用 backwards（不可用 both/forwards）。 */
+      .fade-in { animation: fadeIn 0.4s cubic-bezier(0.4, 0, 0.2, 1) backwards; }
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(12px); }
+        to { opacity: 1; }
+      }
+      ::-webkit-scrollbar { width: 6px; height: 6px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
+      .dark ::-webkit-scrollbar-thumb { background: #374151; }
+    </style>
+  </head>
+  <body class="bg-gray-50 dark:bg-gray-950">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

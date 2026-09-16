@@ -1,0 +1,601 @@
+// ============================================
+// API 客户端（TypeScript）
+// ============================================
+import type {
+  Project, ProjectsResponse,
+  Novel, NovelsResponse,
+  Task, TasksResponse,
+  Character, Relation,
+  Memory, MemoryStats,
+  AppSettings, I18nData,
+  AnalyticsData,
+  KeyframePlanResponse,
+  StoryboardCanvasResponse,
+  TTSEnv, TTSPlanResponse, TTSTask,
+  MixEnv, MixPlanResponse, MixTask,
+  QCConfig, QCResponse,
+  Episode, EpisodeListResponse,
+  AutopilotStatus, AutopilotProgress,
+  Provider, ProvidersResponse,
+  AIConfigResponse, AITestResult,
+} from '../types';
+
+const API_BASE = '/api';
+
+// 后端统一返回 {success, error?, message?}。此前 request() 直接抛
+// `HTTP 500: Internal Server Error`，把后端精心脱敏过的中文错误丢掉了，
+// 界面上只能看到无信息的英文报错。这里优先取后端的可读文案。
+async function readError(response: Response): Promise<string> {
+  let detail = '';
+  try {
+    const data = await response.clone().json();
+    const raw = data?.error || data?.message || data?.detail;
+    if (typeof raw === 'string' && raw.trim()) detail = raw.trim();
+    else if (raw) detail = JSON.stringify(raw);
+  } catch {
+    try {
+      const text = (await response.text()).trim();
+      if (text) detail = text;
+    } catch {
+      /* 响应体不可读，退化为状态码 */
+    }
+  }
+  const status = `HTTP ${response.status}`;
+  return detail ? `${detail}` : `${status} ${response.statusText || ''}`.trim();
+}
+
+async function request<T>(
+  path: string,
+  options: RequestInit = {}
+): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    headers: { 'Content-Type': 'application/json', ...options.headers },
+    ...options,
+  });
+  if (!response.ok) {
+    throw new Error(await readError(response));
+  }
+  return response.json() as Promise<T>;
+}
+
+// --- Projects ---
+export const projectsApi = {
+  list: () => request<ProjectsResponse>('/projects'),
+  get: (id: string) => request<{ success: boolean; project: Project }>(`/projects/${id}`).then(d => d.project),
+  // 后端实际返回 {success, project, created}，此前类型写成 Project 会误导调用方
+  create: (data: Partial<Project>) => request<{ success: boolean; project: Project; created?: boolean }>('/projects', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
+  delete: (id: string) => request<void>(`/projects/${id}`, { method: 'DELETE' }),
+};
+
+// --- Novels ---
+export interface NovelUploadItem {
+  filename: string;
+  success: boolean;
+  error?: string;
+  novel?: Novel & { title?: string };
+  project_id?: string;
+  project_key?: string;
+}
+export interface NovelUploadResponse {
+  success: boolean;
+  uploaded: number;
+  failed: number;
+  results: NovelUploadItem[];
+  supported_exts: string[];
+}
+
+export const novelsApi = {
+  list: (projectId?: string) => {
+    // 后端只认 project_id / project_name；原来的 ?project= 会被静默忽略，
+    // 导致「按项目筛选小说」实际返回全量。
+    const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
+    return request<NovelsResponse>(`/novels${query}`);
+  },
+  /** 上传小说文件（后端路由是 /novels/upload，且要求 multipart 的 file 字段） */
+  upload: async (
+    file: File,
+    opts: { projectId?: string; autoProject?: boolean } = {}
+  ): Promise<NovelUploadResponse> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (opts.projectId) formData.append('project_id', opts.projectId);
+    if (opts.autoProject === false) formData.append('auto_project', '0');
+    const response = await fetch(`${API_BASE}/novels/upload`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!response.ok) {
+      throw new Error(await readError(response));
+    }
+    return response.json() as Promise<NovelUploadResponse>;
+  },
+};
+
+// --- Tasks ---
+export const tasksApi = {
+  list: () => request<TasksResponse>('/tasks'),
+  get: (id: string) => request<Task>(`/tasks/${id}`),
+};
+
+// --- Characters ---
+/**
+ * 后端资产接口的返回形态并不统一：
+ *  - /api/characters → { success, characters: { "<id>": {...} } }   （**字典**）
+ *  - /api/items      → { success, items: { ... } } / { items: [ ... ] }
+ *  - /api/scenes     → 同上
+ * 早先 client.ts 把 list() 的返回类型直接声明成 Character[]，与运行时不符，
+ * 调用方只能自己 `Object.values(res.characters)`。一旦后端少给一层字段，
+ * `Object.values(undefined)` 就会抛错并导致整页白屏（测试报告 #1）。
+ * 这里在 API 层统一归一化成数组，且对任何异常形态都退化为空数组，不再抛错。
+ */
+function toAssetArray<T>(payload: unknown, ...keys: string[]): T[] {
+  if (Array.isArray(payload)) return payload as T[];
+  if (!payload || typeof payload !== 'object') return [];
+  const obj = payload as Record<string, unknown>;
+  let inner: unknown = obj;
+  for (const k of keys) {
+    if (obj[k] !== undefined) { inner = obj[k]; break; }
+  }
+  if (Array.isArray(inner)) return inner as T[];
+  if (inner && typeof inner === 'object') return Object.values(inner) as T[];
+  return [];
+}
+
+export const charactersApi = {
+  /** 后端返回字典，这里统一解包成数组（见 toAssetArray 说明） */
+  list: async (projectId: string): Promise<Character[]> =>
+    toAssetArray<Character>(
+      await request<unknown>(`/characters?project=${encodeURIComponent(projectId)}`),
+      'characters'
+    ),
+  add: (data: Partial<Character>) =>
+    request<Character>('/characters', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: Partial<Character>) =>
+    request<Character>(`/characters/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  delete: (id: string) =>
+    request<void>(`/characters/${id}`, { method: 'DELETE' }),
+};
+
+// --- Relations ---
+export const relationsApi = {
+  list: (projectId: string) =>
+    request<Relation[]>(`/relations?project=${encodeURIComponent(projectId)}`),
+  graph: (projectId: string) =>
+    request<Record<string, unknown>>(
+      `/relations/graph?project=${encodeURIComponent(projectId)}`
+    ),
+  add: (data: Partial<Relation>) =>
+    request<Relation>('/relations', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: Partial<Relation>) =>
+    request<Relation>(`/relations/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  delete: (id: string) =>
+    request<void>(`/relations/${id}`, { method: 'DELETE' }),
+};
+
+// --- AI Chat ---
+export const chatApi = {
+  send: (message: string, project?: string) =>
+    request<{ success: boolean; reply: string; settings?: Record<string, unknown> }>(
+      '/ai/chat',
+      { method: 'POST', body: JSON.stringify({ message, project_name: project }) }
+    ),
+  history: (project?: string) =>
+    request<{ messages: Array<{ role: string; content: string; timestamp: string }> }>(
+      `/ai/chat/history${project ? `?project=${encodeURIComponent(project)}` : ''}`
+    ),
+  clearHistory: (project?: string) =>
+    request<void>('/ai/chat/clear', {
+      method: 'POST',
+      body: JSON.stringify({ project: project || '' }),
+    }),
+  applySettings: () =>
+    request<{ success: boolean }>('/ai/chat/apply', { method: 'POST' }),
+};
+
+// --- Autonomous ---
+export const autonomousApi = {
+  status: () => request<{ running: boolean; project?: string; message?: string }>('/autonomous/status'),
+  start: (projectName: string, novelId: string, overrides?: Record<string, unknown>) =>
+    request<{ success: boolean; message?: string }>('/autonomous/start', {
+      method: 'POST',
+      body: JSON.stringify({ project_name: projectName, novel_id: novelId, ...(overrides || {}) }),
+    }),
+  stop: () => request<{ success: boolean }>('/autonomous/stop', { method: 'POST' }),
+  resume: () => request<{ success: boolean }>('/autonomous/resume', { method: 'POST' }),
+  chat: (message: string) =>
+    request<{ success: boolean; reply: string }>('/autonomous/chat', {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    }),
+};
+
+// --- Memory ---
+//
+// 注意：后端 /api/memory/list 返回的是信封对象 { success, memories: [...], total }，
+// /api/memory/stats 返回 { success, stats: { total, by_type: {...} }, ... }。
+// 这里必须在这一层拆封，否则页面拿到的是对象而非数组（列表渲染会崩），
+// 统计卡片也会因为读不到 total/lessons 而全部显示为空——这正是导航恢复后
+// 记忆页「数字全空 + 列表崩溃」的根因。
+export const memoryApi = {
+  stats: async (): Promise<MemoryStats> => {
+    const d = await request<{ success?: boolean; stats?: Record<string, unknown> }>('/memory/stats');
+    const s = (d?.stats || {}) as Record<string, unknown>;
+    const by = (s.by_type || {}) as Record<string, number>;
+    return {
+      total: Number(s.total ?? 0),
+      lessons: Number(by.lesson ?? 0),
+      successes: Number(by.success ?? 0),
+      insights: Number(by.insight ?? 0),
+    };
+  },
+  list: async (params?: { query?: string; type?: string }): Promise<Memory[]> => {
+    const qs = new URLSearchParams();
+    if (params?.query) qs.set('query', params.query);
+    if (params?.type) qs.set('type', params.type);
+    const query = qs.toString() ? `?${qs.toString()}` : '';
+    const d = await request<{ memories?: Memory[] } | Memory[]>(`/memory/list${query}`);
+    if (Array.isArray(d)) return d;
+    return d?.memories || [];
+  },
+  record: (data: Partial<Memory>) =>
+    request<Memory>('/memory/record', { method: 'POST', body: JSON.stringify(data) }),
+  recordLesson: (lesson: string, tags: string[]) =>
+    request<Memory>('/memory/record-lesson', {
+      method: 'POST',
+      body: JSON.stringify({ lesson, tags }),
+    }),
+  recordSuccess: (content: string, tags: string[]) =>
+    request<Memory>('/memory/record-success', {
+      method: 'POST',
+      body: JSON.stringify({ content, tags }),
+    }),
+  clearOld: (days: number = 90) =>
+    request<void>('/memory/clear-old', {
+      method: 'POST',
+      body: JSON.stringify({ days }),
+    }),
+  insights: () => request<Record<string, unknown>>('/memory/insights'),
+};
+
+// --- i18n ---
+export const i18nApi = {
+  get: (lang: string) => request<I18nData>(`/i18n/${lang}`),
+};
+
+// --- Analytics ---
+export const analyticsApi = {
+  // 后端没有 /api/analytics，聚合数据在 /api/analytics/summary
+  get: () => request<AnalyticsData>('/analytics/summary'),
+  // 手工登记一条耗时事件（字段与后端 api_analytics_record 对齐）
+  record: (data: {
+    kind?: string;
+    project?: string;
+    label?: string;
+    duration_sec?: number;
+    units?: number;
+    success?: boolean;
+    meta?: Record<string, unknown>;
+  }) =>
+    request<{ success: boolean }>('/analytics/event', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+};
+
+// --- Keyframes ---
+export const keyframesApi = {
+  plan: (project: string, episode?: number) =>
+    request<KeyframePlanResponse>(
+      `/keyframes/plan?project_name=${encodeURIComponent(project)}${episode ? `&episode_no=${episode}` : ''}`
+    ),
+  generate: (data: { project_name: string; episode_no?: number; shots?: any[]; only_missing?: boolean }) =>
+    request<{ success: boolean; task_id: string; total: number }>(
+      '/keyframes/generate',
+      { method: 'POST', body: JSON.stringify(data) }
+    ),
+  list: (project: string, episode?: number) =>
+    request<any>(
+      `/keyframes/list/${encodeURIComponent(project)}${episode ? `?episode_no=${episode}` : ''}`
+    ),
+  file: (filename: string) => `${API_BASE}/keyframes/file/${filename}`,
+};
+
+// --- Storyboard ---
+export const storyboardApi = {
+  canvas: (project: string, episode?: number) =>
+    request<StoryboardCanvasResponse>(
+      `/storyboard/canvas/${encodeURIComponent(project)}${episode ? `?episode_no=${episode}` : ''}`
+    ),
+  reorder: (data: { project_name: string; episode_no?: number; order: string[] }) =>
+    request<{ success: boolean; shot_order: string[] }>(
+      '/storyboard/shot/reorder',
+      { method: 'POST', body: JSON.stringify(data) }
+    ),
+  retryShot: (data: { project_name: string; shot_id: string; episode_no?: number }) =>
+    request<{ success: boolean }>(
+      '/storyboard/retry-shot',
+      { method: 'POST', body: JSON.stringify(data) }
+    ),
+  file: (project: string, filename: string) =>
+    `${API_BASE}/storyboards/file/${encodeURIComponent(project)}/${filename}`,
+  generateNineGrid: (project: string, scene_description: string) =>
+    request<{
+      success: boolean;
+      grid_id: string;
+      project: string;
+      scene_description: string;
+      created_at?: string;
+      filepath: string;
+      shots: any[];
+    }>(
+      '/storyboard/nine-grid',
+      { method: 'POST', body: JSON.stringify({ project, scene_description }) }
+    ),
+  selectNineGridShot: (grid_id: string, project: string, selected_index: number) =>
+    request<{ success: boolean; shot: any }>(
+      `/storyboard/nine-grid/${encodeURIComponent(grid_id)}/select`,
+      { method: 'POST', body: JSON.stringify({ project, selected_index }) }
+    ),
+};
+
+// --- TTS ---
+export const ttsApi = {
+  env: (project?: string) =>
+    request<TTSEnv>(`/tts/env${project ? `?project_name=${encodeURIComponent(project)}` : ''}`),
+  plan: (data: { project_name: string; episode?: number }) =>
+    request<TTSPlanResponse>('/tts/plan', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  voiceMap: (project: string, voiceMap: Record<string, unknown>) =>
+    request<{ success: boolean }>('/tts/voice-map', {
+      method: 'POST',
+      body: JSON.stringify({ project_name: project, voice_map: voiceMap }),
+    }),
+  preview: (data: { project_name: string; text: string; character?: string }) =>
+    request<{ success: boolean; url: string }>(
+      '/tts/preview',
+      { method: 'POST', body: JSON.stringify(data) }
+    ),
+  generate: (data: { project_name: string; episode?: number }) =>
+    request<{ success: boolean; task_id: string; line_count: number }>(
+      '/tts/generate',
+      { method: 'POST', body: JSON.stringify(data) }
+    ),
+  status: (taskId: string) => request<TTSTask>(`/tts/status/${taskId}`),
+  tasks: () => request<{ success: boolean; items: TTSTask[] }>('/tts/tasks'),
+  list: (project: string) =>
+    request<{ success: boolean; lines: any[]; merged: any[] }>(
+      `/tts/list?project_name=${encodeURIComponent(project)}`
+    ),
+  file: (project: string, filename: string) =>
+    `${API_BASE}/tts/file/${encodeURIComponent(project)}/${filename}`,
+};
+
+// --- Mix ---
+export const mixApi = {
+  env: () => request<MixEnv>('/mix/env'),
+  plan: (data: { project_name: string; episode?: number }) =>
+    request<MixPlanResponse>('/mix/plan', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  generate: (data: { project_name: string; episode?: number }) =>
+    request<{ success: boolean; task_id: string }>(
+      '/mix/generate',
+      { method: 'POST', body: JSON.stringify(data) }
+    ),
+  status: (taskId: string) => request<MixTask>(`/mix/status/${taskId}`),
+  tasks: () => request<{ success: boolean; items: MixTask[] }>('/mix/tasks'),
+  list: (project: string) =>
+    request<{ success: boolean; items: any[] }>(
+      `/mix/list?project_name=${encodeURIComponent(project)}`
+    ),
+  file: (project: string, filename: string) =>
+    `${API_BASE}/mix/file/${encodeURIComponent(project)}/${filename}`,
+};
+
+// --- QC ---
+export const qcApi = {
+  config: () => request<QCResponse>('/qc/config'),
+  updateConfig: (config: QCConfig) =>
+    request<{ success: boolean }>('/qc/config', {
+      method: 'POST',
+      body: JSON.stringify({ config }),
+    }),
+  clearConfig: () => request<{ success: boolean }>('/qc/config/clear', { method: 'POST' }),
+  resetEndpoint: () => request<{ success: boolean }>('/qc/config/reset-endpoint', { method: 'POST' }),
+  syncFromAI: () => request<{ success: boolean }>('/qc/config/sync-from-ai', { method: 'POST' }),
+  test: (data: { project: string; shot_id: string }) =>
+    request<{ success: boolean; verdict: string; score: number }>(
+      '/qc/test',
+      { method: 'POST', body: JSON.stringify(data) }
+    ),
+  history: (project: string) =>
+    request<QCResponse>(`/qc/project-summary?project=${encodeURIComponent(project)}`),
+  frames: (project: string) =>
+    request<{ success: boolean; frames: any[] }>(
+      `/qc/frames/${encodeURIComponent(project)}`
+    ),
+};
+
+// --- Episodes ---
+export const episodesApi = {
+  list: (novelId: string) =>
+    request<EpisodeListResponse>(`/episodes/${encodeURIComponent(novelId)}`),
+  get: (novelId: string, episodeNo: number) =>
+    request<Episode>(`/episodes/${encodeURIComponent(novelId)}/${episodeNo}`),
+  generate: (novelId: string) =>
+    request<{ success: boolean; episode_count: number }>(
+      `/novels/${encodeURIComponent(novelId)}/episodes/generate`,
+      { method: 'POST' }
+    ),
+};
+
+// --- Continuity ---
+export const continuityApi = {
+  get: (novelId: string) =>
+    request<any>(`/continuity/${encodeURIComponent(novelId)}`),
+  getByEpisode: (novelId: string, episodeNo: number) =>
+    request<any>(`/continuity/${encodeURIComponent(novelId)}/${episodeNo}`),
+  revalidate: (novelId: string, episodeNo: number) =>
+    request<{ success: boolean }>(
+      `/continuity/${encodeURIComponent(novelId)}/${episodeNo}/revalidate`,
+      { method: 'POST' }
+    ),
+};
+
+// --- Coverage ---
+export const coverageApi = {
+  get: (novelId: string) =>
+    request<any>(`/coverage/${encodeURIComponent(novelId)}`),
+  getByEpisode: (novelId: string, episodeNo: number) =>
+    request<any>(`/coverage/${encodeURIComponent(novelId)}/${episodeNo}`),
+};
+
+// --- Autopilot ---
+export const autopilotApi = {
+  status: () => request<AutopilotStatus>('/autopilot/status'),
+  ready: () => request<{ ready: boolean }>('/autopilot/ready'),
+  curve: () => request<any>('/autopilot/curve'),
+  plans: () => request<{ success: boolean; plans: any[] }>('/autopilot/plans'),
+  plan: (project: string) =>
+    request<any>(`/autopilot/plan/${encodeURIComponent(project)}`),
+  enable: () => request<{ success: boolean }>('/autopilot/enable', { method: 'POST' }),
+  disable: () => request<{ success: boolean }>('/autopilot/disable', { method: 'POST' }),
+  pause: () => request<{ success: boolean }>('/autopilot/pause', { method: 'POST' }),
+  resume: () => request<{ success: boolean }>('/autopilot/resume', { method: 'POST' }),
+  progress: () => request<{ success: boolean; projects: AutopilotProgress[] }>('/autopilot/progress'),
+  progressByProject: (project: string) =>
+    request<AutopilotProgress>(`/autopilot/progress/${encodeURIComponent(project)}`),
+  deliverables: () =>
+    request<{ success: boolean; items: any[] }>('/autopilot/deliverables'),
+  reviewDeliverable: (data: { project: string; deliverable: string; verdict: string }) =>
+    request<{ success: boolean }>('/autopilot/deliverables/review', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  exceptions: () =>
+    request<{ success: boolean; exceptions: any[] }>('/autopilot/exceptions'),
+  resolveException: (data: { project: string; exception_id: string; action: string }) =>
+    request<{ success: boolean }>('/autopilot/exceptions/resolve', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  runOnce: (data: { project_name: string }) =>
+    request<{ success: boolean; task_id: string }>(
+      '/autopilot/run-once',
+      { method: 'POST', body: JSON.stringify(data) }
+    ),
+  planFromSettings: (project: string) =>
+    request<{ success: boolean; plan: any }>(
+      `/autopilot/plan-from-settings/${encodeURIComponent(project)}`,
+      { method: 'POST' }
+    ),
+};
+
+// --- Providers ---
+export const providersApi = {
+  list: () => request<ProvidersResponse>('/providers'),
+  select: (providerId: string) =>
+    request<{ success: boolean }>('/providers/select', {
+      method: 'POST',
+      body: JSON.stringify({ provider_id: providerId }),
+    }),
+};
+
+// --- Generation ---
+export const generationApi = {
+  status: (taskId: string) =>
+    request<{ success: boolean; task: any }>(`/generation/status/${taskId}`),
+};
+
+// --- Export ---
+export interface ExportedFile {
+  format: string;
+  filename: string;
+  exists: boolean;
+  path?: string;
+  dir?: string;
+  project?: string;
+  exported_at?: string | null;
+  shot_count?: number | null;
+  total_sec?: number | null;
+  size_mb?: number | null;
+}
+export const exportApi = {
+  generate: (projectName: string, formats: string[]) =>
+    request<{
+      success: boolean;
+      files: ExportedFile[];
+      /** 后端据剧本实际构建出的镜头数，0 表示导出内容为空 */
+      shot_count?: number;
+      total_sec?: number;
+    }>(
+      `/export/${encodeURIComponent(projectName)}`,
+      { method: 'POST', body: JSON.stringify({ formats }) }
+    ),
+  listFiles: (projectName: string) =>
+    request<{ success: boolean; files: ExportedFile[]; items?: any[] }>(
+      `/export/list?project=${encodeURIComponent(projectName)}`
+    ),
+};
+
+// --- AI Config (Unified: text / qc / chat) ---
+// 注意：这里的路径不要再写 '/api' 前缀——request() 已经统一加了 API_BASE('/api')，
+// 之前写成 '/api/ai/config' 实际会请求 /api/api/ai/config → 404，AI 配置页整体不可用。
+export const aiConfigApi = {
+  get: () => request<AIConfigResponse>('/ai/config'),
+  save: (module: string, base_url: string, model: string, api_key?: string) =>
+    request<{ success: boolean; module_config: any; config: AIConfigResponse['config']; message: string }>(
+      '/ai/config',
+      { method: 'POST', body: JSON.stringify({ module, base_url, model, api_key }) }
+    ),
+  clear: (module?: string) =>
+    request<{ success: boolean; config: AIConfigResponse['config']; message: string }>(
+      '/ai/config/clear',
+      { method: 'POST', body: JSON.stringify({ module }) }
+    ),
+  test: (module: string, base_url: string, model: string, api_key?: string, probe?: string, timeout?: number) =>
+    request<AITestResult>(
+      '/ai/test',
+      { method: 'POST', body: JSON.stringify({ module, base_url, model, api_key, probe, timeout }) }
+    ),
+};
+
+// --- System Settings (LLM engine, ComfyUI, Watermark) ---
+export const settingsApi = {
+  get: () => request<{ success: boolean; settings: Record<string, unknown> }>('/ai/settings'),
+  update: (data: Record<string, unknown>) =>
+    request<{ success: boolean; message?: string }>('/ai/settings', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+};
+
+/**
+ * 视频水印配置。此前 AI 配置页把水印开关塞进 `/ai/settings`，
+ * 而那个接口的 GET 返回的是「创作设定」（art_style/genre/tone…），
+ * 从来不包含 watermark_enabled —— 于是开关永远显示为关，
+ * 保存也写不进真正的配置。这里直接对接专用的 /watermark/config。
+ */
+export const watermarkApi = {
+  get: () =>
+    request<{ success?: boolean; config: { enabled: boolean; text?: string; [k: string]: unknown } }>(
+      '/watermark/config'
+    ),
+  update: (patch: Record<string, unknown>) =>
+    request<{ success?: boolean; config: Record<string, unknown> }>('/watermark/config', {
+      method: 'POST',
+      body: JSON.stringify(patch),
+    }),
+};

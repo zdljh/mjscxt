@@ -1,0 +1,663 @@
+﻿<!DOCTYPE html>
+<html lang=zh-CN>
+<head>
+<meta charset=UTF-8>
+<meta name=viewport content=width=device-width, initial-scale=1.0>
+<title>漫剧生成系统 · AI 创作台</title>
+<link rel=icon href=data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236366f1'/%3E%3Cpath d='M11 8h11v16H11z' fill='%23fff' opacity='.92'/%3E%3Ccircle cx='16.5' cy='13' r='2.6' fill='%236366f1'/%3E%3Crect x='13' y='18' width='7' height='1.8' rx='.9' fill='%236366f1'/%3E%3C/svg%3E>
+<link href=https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css rel=stylesheet>
+<style>
+:root{--bg:#0a0e1a;--bg2:#111827;--card:#1a1f2e;--border:rgba(99,102,241,.2);--bh:rgba(99,102,241,.4);--t1:#f1f5f9;--t2:#94a3b8;--tm:#64748b;--ac:#6366f1;--acl:#818cf8;--ag:rgba(99,102,241,.3);--ok:#22c55e;--wn:#f59e0b;--er:#ef4444;--g1:linear-gradient(135deg,#6366f1,#8b5cf6,#a855f7);--g2:linear-gradient(135deg,#06b6d4,#3b82f6);--g3:linear-gradient(135deg,#10b981,#06b6d4)}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--t1);min-height:100vh;overflow-x:hidden}
+.bg-grid{position:fixed;inset:0;background-image:linear-gradient(rgba(99,102,241,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(99,102,241,.03) 1px,transparent 1px);background-size:50px 50px;pointer-events:none;z-index:0}
+.bg-glow{position:fixed;width:600px;height:600px;border-radius:50%;filter:blur(150px);opacity:.15;pointer-events:none;z-index:0}
+.bg-glow-1{top:-200px;left:-200px;background:#6366f1}
+.bg-glow-2{bottom:-200px;right:-200px;background:#06b6d4}
+.app{position:relative;z-index:1;display:flex;min-height:100vh}
+.side{width:260px;background:rgba(17,24,39,.85);backdrop-filter:blur(20px);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:20px 12px;position:fixed;top:0;left:0;bottom:0;z-index:100}
+.logo{display:flex;align-items:center;gap:10px;padding:0 8px 20px;border-bottom:1px solid var(--border);margin-bottom:20px}
+.logo-ic{width:38px;height:38px;background:var(--g1);border-radius:10px;display:grid;place-items:center;font-size:1.1rem;color:#fff;box-shadow:0 4px 20px var(--ag)}
+.logo-t{font-size:1rem;font-weight:700;background:var(--g1);-webkit-background-clip:text;background-clip:text;color:transparent}
+.logo-s{font-size:.65rem;color:var(--tm);letter-spacing:2px}
+.nav-sec{margin-bottom:20px}
+.nav-lbl{font-size:.6rem;color:var(--tm);text-transform:uppercase;letter-spacing:1.5px;padding:0 10px;margin-bottom:6px}
+.nav{display:flex;align-items:center;gap:10px;padding:10px;border-radius:8px;cursor:pointer;transition:.2s;color:var(--t2);font-size:.85rem;border:1px solid transparent}
+.nav:hover{background:rgba(99,102,241,.1);color:var(--t1)}
+.nav.on{background:rgba(99,102,241,.15);color:var(--acl);border-color:var(--bh)}
+.nav i{width:18px;text-align:center}
+.nav .bdg{margin-left:auto;font-size:.6rem;padding:2px 6px;border-radius:10px;background:rgba(34,197,94,.15);color:var(--ok)}
+.status-bar{margin-top:auto;padding:10px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.18);border-radius:8px;font-size:.78rem;color:var(--t2);display:flex;align-items:center;gap:8px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ok);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.main{flex:1;margin-left:260px;padding:20px 28px;display:flex;flex-direction:column;gap:20px}
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;background:rgba(26,31,46,.6);backdrop-filter:blur(10px);border:1px solid var(--border);border-radius:14px}
+.topbar h1{font-size:1.2rem;font-weight:700}
+.topbar .sub{font-size:.78rem;color:var(--tm);margin-top:2px}
+.top-actions{display:flex;gap:8px}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:8px 16px;border-radius:9px;font-size:.82rem;font-weight:600;border:none;cursor:pointer;transition:.2s}
+.btn:active{transform:scale(.98)}
+.btn-p{background:var(--g1);color:#fff;box-shadow:0 4px 15px var(--ag)}
+.btn-p:hover{box-shadow:0 6px 20px var(--ag)}
+.btn-s{background:rgba(99,102,241,.1);border:1px solid var(--border);color:var(--t1)}
+.btn-s:hover{background:rgba(99,102,241,.2);border-color:var(--bh)}
+.btn-ok{background:var(--g3);color:#fff}
+.btn-g{background:transparent;color:var(--t2)}
+.btn-g:hover{background:rgba(255,255,255,.05);color:var(--t1)}
+.btn-sm{padding:5px 10px;font-size:.76rem}
+.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+.step{position:relative;background:rgba(26,31,46,.6);border:1px solid var(--border);border-radius:14px;padding:22px 18px;cursor:pointer;transition:.3s}
+.step:hover{border-color:var(--bh);transform:translateY(-3px);box-shadow:0 8px 24px rgba(0,0,0,.3)}
+.step.on{border-color:var(--ac);background:rgba(99,102,241,.08)}
+.step.done{border-color:var(--ok)}
+.step-n{width:34px;height:34px;background:rgba(99,102,241,.2);border-radius:9px;display:grid;place-items:center;font-weight:700;font-size:.85rem;color:var(--acl);margin-bottom:14px}
+.step.on .step-n{background:var(--g1);color:#fff}
+.step.done .step-n{background:rgba(34,197,94,.2);color:var(--ok)}
+.step-t{font-size:.95rem;font-weight:700;margin-bottom:6px}
+.step-d{font-size:.76rem;color:var(--tm);line-height:1.5}
+.step-ic{position:absolute;top:18px;right:18px;font-size:1.4rem;color:rgba(99,102,241,.18)}
+.step.on .step-ic{color:var(--acl)}
+.card{background:rgba(26,31,46,.8);backdrop-filter:blur(10px);border:1px solid var(--border);border-radius:14px;overflow:hidden}
+.card-h{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border)}
+.card-t{font-size:.95rem;font-weight:700;display:flex;align-items:center;gap:9px}
+.card-t i{color:var(--acl)}
+.card-b{padding:18px}
+.pnl{display:none}.pnl.on{display:block;animation:fadeIn .3s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.upload{border:2px dashed var(--border);border-radius:14px;padding:44px 20px;text-align:center;cursor:pointer;transition:.3s;background:rgba(99,102,241,.02)}
+.upload:hover{border-color:var(--ac);background:rgba(99,102,241,.05)}
+.upload-ic{font-size:2.8rem;color:var(--acl);margin-bottom:14px}
+.upload-t{font-size:1.05rem;font-weight:600;margin-bottom:6px}
+.upload-h{font-size:.82rem;color:var(--tm)}
+.fg{margin-bottom:18px}
+.fl{display:block;font-size:.82rem;font-weight:600;color:var(--t2);margin-bottom:7px}
+.fc{width:100%;padding:10px 14px;background:rgba(0,0,0,.2);border:1px solid var(--border);border-radius:9px;color:var(--t1);font-size:.87rem;transition:.2s}
+.fc:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px var(--ag)}
+select.fc{appearance:none;background-image:url(data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2394a3b8' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10l-5 5z'/%3E%3C/svg%3E);background-repeat:no-repeat;background-position:right 12px center;padding-right:32px}
+.g2{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+.g3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+.preview{background:rgba(0,0,0,.2);border:1px solid var(--border);border-radius:10px;padding:14px;transition:.2s}
+.preview:hover{border-color:var(--bh)}
+.prev-img{width:100%;aspect-ratio:16/9;background:rgba(0,0,0,.3);border-radius:7px;margin-bottom:10px;display:grid;place-items:center;color:var(--tm);overflow:hidden}
+.prev-img img{width:100%;height:100%;object-fit:cover}
+.prev-t{font-size:.85rem;font-weight:600;margin-bottom:3px}
+.prev-m{font-size:.72rem;color:var(--tm)}
+.pbar{height:5px;background:rgba(99,102,241,.1);border-radius:3px;overflow:hidden;margin:10px 0}
+.pfill{height:100%;background:var(--g1);border-radius:3px;transition:width .5s}
+.tag{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;background:rgba(99,102,241,.1);border:1px solid var(--border);border-radius:16px;font-size:.72rem;color:var(--t2)}
+.tag.ok{background:rgba(34,197,94,.1);border-color:rgba(34,197,94,.2);color:var(--ok)}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+.stat{background:rgba(0,0,0,.2);border:1px solid var(--border);border-radius:10px;padding:18px;text-align:center}
+.stat-v{font-size:1.8rem;font-weight:800;background:var(--g1);-webkit-background-clip:text;background-clip:text;color:transparent}
+.stat-l{font-size:.78rem;color:var(--tm);margin-top:3px}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.7);backdrop-filter:blur(8px);z-index:1000;display:none;place-items:center}
+.modal.on{display:grid}
+.modal-box{width:min(90vw,800px);max-height:80vh;background:var(--card);border:1px solid var(--border);border-radius:18px;overflow:hidden;display:flex;flex-direction:column}
+.modal-h{display:flex;align-items:center;justify-content:space-between;padding:18px 22px;border-bottom:1px solid var(--border)}
+.modal-t{font-size:1.05rem;font-weight:700;display:flex;align-items:center;gap:8px}
+.modal-x{width:30px;height:30px;display:grid;place-items:center;background:rgba(255,255,255,.05);border:none;border-radius:7px;color:var(--t2);cursor:pointer;transition:.2s;font-size:.9rem}
+.modal-x:hover{background:rgba(255,255,255,.1);color:var(--t1)}
+.modal-b{flex:1;overflow-y:auto;padding:22px}
+.chat-box{display:flex;flex-direction:column;height:400px}
+.chat-msgs{flex:1;overflow-y:auto;padding:14px 0;display:flex;flex-direction:column;gap:10px}
+.chat-msg{max-width:80%;padding:10px 14px;border-radius:11px;font-size:.87rem;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+.chat-msg.user{align-self:flex-end;background:rgba(99,102,241,.2);border:1px solid rgba(99,102,241,.3)}
+.chat-msg.bot{align-self:flex-start;background:rgba(255,255,255,.05);border:1px solid var(--border)}
+.chat-in{display:flex;gap:10px;padding-top:14px;border-top:1px solid var(--border)}
+.chat-in textarea{flex:1;padding:10px 14px;background:rgba(0,0,0,.2);border:1px solid var(--border);border-radius:9px;color:var(--t1);font-size:.87rem;resize:none;min-height:42px}
+.chat-in textarea:focus{outline:none;border-color:var(--ac)}
+.toast-rack{position:fixed;top:20px;right:20px;z-index:2000;display:flex;flex-direction:column;gap:10px}
+.toast{padding:12px 18px;background:var(--card);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.3);display:flex;align-items:center;gap:10px;font-size:.83rem;animation:slideIn .3s ease}
+@keyframes slideIn{from{opacity:0;transform:translateX(80px)}to{opacity:1;transform:none}}
+.toast.ok{border-color:rgba(34,197,94,.5)}.toast.er{border-color:rgba(239,68,68,.5)}.toast.wn{border-color:rgba(245,158,11,.5)}
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(99,102,241,.3);border-radius:3px}
+@media(max-width:1100px){.steps,.g4{grid-template-columns:repeat(2,1fr)}.stats{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:768px){.side{display:none}.main{margin-left:0}.steps,.g2,.g3,.g4,.stats{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class=bg-grid></div>
+<div class=bg-glow bg-glow-1></div>
+<div class=bg-glow bg-glow-2></div>
+
+<div class=app>
+<aside class=side>
+  <div class=logo>
+    <div class=logo-ic><i class=bi bi-film></i></div>
+    <div><div class=logo-t>漫剧生成系统</div><div class=logo-s>AI COMIC STUDIO</div></div>
+  </div>
+  <div class=nav-sec>
+    <div class=nav-lbl>工作流</div>
+    <div class=nav on onclick=swView('ws')><i class=bi bi-grid-1x2></i><span>工作台</span></div>
+    <div class=nav onclick=swView('proj')><i class=bi bi-folder2></i><span>项目管理</span></div>
+    <div class=nav onclick=openChat()><i class=bi bi-chat-dots></i><span>AI 助手</span><span class=bdg>在线</span></div>
+  </div>
+  <div class=nav-sec>
+    <div class=nav-lbl>工具</div>
+    <div class=nav onclick=openSet()><i class=bi bi-gear></i><span>AI 设置</span></div>
+    <div class=nav onclick=openQc()><i class=bi bi-shield-check></i><span>质检配置</span></div>
+    <div class=nav onclick=openWm()><i class=bi bi-droplet></i><span>视频水印</span></div>
+  </div>
+  <div class=status-bar>
+    <span class=dot></span>
+    <span>系统运行中 · <span id=aiStat>检测中...</span></span>
+  </div>
+</aside>
+<main class=main>
+<div class=topbar>
+  <div><h1>创作工作台</h1><div class=sub>从想法到成片，一站式漫剧生成</div></div>
+  <div class=top-actions>
+    <button class=btn btn-s btn-sm onclick=location.reload()><i class=bi bi-arrow-clockwise></i> 刷新</button>
+    <button class=btn btn-p btn-sm onclick=openNewProj()><i class=bi bi-plus-lg></i> 新建项目</button>
+  </div>
+</div>
+
+<!-- Project Bar -->
+<div style=display:flex;align-items:center;gap:10px;padding:10px 14px;border:1px solid var(--border);border-radius:12px;background:rgba(99,102,241,.06)>
+  <span style=font-size:.82rem;color:var(--t2);white-space:nowrap><i class=bi bi-collection></i> 当前项目</span>
+  <select id=projSel class=fc style=flex:1;max-width:280px;padding:6px 10px onchange=onProjSel(this.value)></select>
+  <span id=projMeta style=font-size:.72rem;color:var(--tm)>加载中...</span>
+  <div style=margin-left:auto;display:flex;gap:5px;flex-wrap:wrap>
+    <button class=btn btn-p btn-sm onclick=openNewProj()><i class=bi bi-plus-lg></i> 建项目</button>
+    <button class=btn btn-g btn-sm onclick=openProjList()><i class=bi bi-list-ul></i> 列表</button>
+    <button class=btn btn-g btn-sm onclick=delProj()><i class=bi bi-trash3></i></button>
+    <button class=btn btn-g btn-sm onclick=refreshAssets()><i class=bi bi-arrow-clockwise></i></button>
+  </div>
+</div>
+
+<!-- Steps -->
+<div class=steps>
+  <div class=step on onclick=swStep(1)><div class=step-n>1</div><div class=step-t>内容输入</div><div class=step-d>上传小说或输入主题，AI 生成剧本</div><div class=step-ic><i class=bi bi-pencil-square></i></div></div>
+  <div class=step onclick=swStep(2)><div class=step-n>2</div><div class=step-t>视觉生成</div><div class=step-d>AI 生成角色、场景、分镜图片</div><div class=step-ic><i class=bi bi-image></i></div></div>
+  <div class=step onclick=swStep(3)><div class=step-n>3</div><div class=step-t>视频合成</div><div class=step-d>自动生成视频并合成完整短剧</div><div class=step-ic><i class=bi bi-camera-reels></i></div></div>
+  <div class=step onclick=swStep(4)><div class=step-n>4</div><div class=step-t>配音导出</div><div class=step-d>AI 配音、字幕，一键导出成品</div><div class=step-ic><i class=bi bi-mic></i></div></div>
+</div>
+
+<!-- ===== Panel 1: Content ===== -->
+<div class=pnl on id=pnl1>
+  <div class=card>
+    <div class=card-h><div class=card-t><i class=bi bi-cloud-arrow-up></i> 上传内容</div><div class=tag>txt / docx / pdf / epub / html</div></div>
+    <div class=card-b>
+      <div class=upload onclick=document.getElementById('fIn').click()>
+        <div class=upload-ic><i class=bi bi-cloud-arrow-up></i></div>
+        <div class=upload-t>点击或拖拽上传小说</div>
+        <div class=upload-h>支持批量上传，自动识别中文编码</div>
+        <input type=file id=fIn multiple style=display:none onchange=handleFiles(this.files)>
+      </div>
+      <div class=g2 style=margin-top:20px>
+        <div class=fg><label class=fl>或直接输入故事主题</label><input type=text class=fc id=themeIn placeholder=例如：修仙少年在破败道观唤醒万年剑魂></div>
+        <div class=fg><label class=fl>故事风格</label>
+          <select class=fc id=styleIn><option>古风仙侠</option><option>现代都市</option><option>科幻未来</option><option>悬疑推理</option><option>甜宠恋爱</option><option>3D动漫渲染</option></select>
+        </div>
+      </div>
+      <div class=g3>
+        <div class=fg><label class=fl>集数</label><input type=number class=fc id=epIn value=1 min=1 max=12></div>
+        <div class=fg><label class=fl>每集时长(秒)</label><input type=number class=fc id=durIn value=60 min=30 max=300></div>
+        <div class=fg><label class=fl>每集镜头数</label><input type=number class=fc id=shotIn value=12 min=4 max=40></div>
+      </div>
+      <div style=display:flex;gap:10px;margin-top:14px;flex-wrap:wrap>
+        <button class=btn btn-p onclick=genScript()><i class=bi bi-stars></i> AI 生成剧本</button>
+        <button class=btn btn-s onclick=openChat()><i class=bi bi-chat-dots></i> 与 AI 讨论</button>
+      </div>
+      <div id=scriptMeter class=pbar style=display:none><div class=pfill id=scriptPfill></div></div>
+      <div id=scriptHint style=font-size:.74rem;color:var(--tm);margin-top:4px></div>
+    </div>
+  </div>
+  <div class=card style=margin-top:16px>
+    <div class=card-h><div class=card-t><i class=bi bi-journal-text></i> 剧本预览</div><div class=tag id=scriptStat>等待生成</div></div>
+    <div class=card-b>
+      <div id=scriptPrev style=min-height:180px;max-height:380px;overflow-y:auto>
+        <div style=text-align:center;padding:40px;color:var(--tm)>
+          <i class=bi bi-journal-text style=font-size:1.8rem;display:block;margin-bottom:10px></i>剧本将在这里显示
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Panel 2: Visual ===== -->
+<div class=pnl id=pnl2>
+  <div class=stats>
+    <div class=stat><div class=stat-v id=cCnt>0</div><div class=stat-l>角色</div></div>
+    <div class=stat><div class=stat-v id=sCnt>0</div><div class=stat-l>场景</div></div>
+    <div class=stat><div class=stat-v id=iCnt>0</div><div class=stat-l>物品</div></div>
+    <div class=stat><div class=stat-v id=shCnt>0</div><div class=stat-l>分镜</div></div>
+  </div>
+  <div class=card style=margin-top:16px>
+    <div class=card-h><div class=card-t><i class=bi bi-people></i> 角色资产</div><button class=btn btn-p btn-sm onclick=genAssets('character')><i class=bi bi-magic></i> 生成角色</button></div>
+    <div class=card-b><div id=charPrev class=g4><div class=preview><div class=prev-img><i class=bi bi-person style=font-size:1.8rem></i></div><div class=prev-t>角色 1</div><div class=prev-m>待生成</div></div></div></div>
+  </div>
+  <div class=card style=margin-top:16px>
+    <div class=card-h><div class=card-t><i class=bi bi-images></i> 分镜图片</div><button class=btn btn-p btn-sm onclick=genStoryboard()><i class=bi bi-magic></i> 生成分镜</button></div>
+    <div class=card-b>
+      <div class=pbar><div class=pfill id=sbPfill style=width:0></div></div>
+      <div id=sbPrev class=g4><div class=preview><div class=prev-img><i class=bi bi-camera style=font-size:1.8rem></i></div><div class=prev-t>镜头 1</div><div class=prev-m>待生成</div></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Panel 3: Video ===== -->
+<div class=pnl id=pnl3>
+  <div class=card>
+    <div class=card-h>
+      <div class=card-t><i class=bi bi-camera-reels></i> 视频生成</div>
+      <div style=display:flex;gap:6px>
+        <select class=fc style=width:auto;min-width:180px;padding:6px 10px id=vidMode>
+          <option value=per_shot>逐镜头生成</option><option value=episode>整集生成</option><option value=keyframe>关键帧驱动</option>
+        </select>
+        <button class=btn btn-p btn-sm onclick=genVideos()><i class=bi bi-play-circle></i> 开始生成</button>
+      </div>
+    </div>
+    <div class=card-b>
+      <div class=pbar><div class=pfill id=vidPfill style=width:0></div></div>
+      <div id=vidPrev class=g3><div class=preview><div class=prev-img><i class=bi bi-play-circle style=font-size:1.8rem></i></div><div class=prev-t>片段 1</div><div class=prev-m>待生成</div></div></div>
+    </div>
+  </div>
+  <div class=card style=margin-top:16px>
+    <div class=card-h><div class=card-t><i class=bi bi-collection-play></i> 成片预览</div><button class=btn btn-ok btn-sm onclick=genFinal()><i class=bi bi-film></i> 合成成片</button></div>
+    <div class=card-b><div class=prev-img style=aspect-ratio:16/9><div style=text-align:center><i class=bi bi-film style=font-size:2.8rem;color:var(--acl)></i><div style=margin-top:10px;color:var(--tm)>完成视频生成后点击「合成成片」</div></div></div></div>
+  </div>
+</div>
+
+<!-- ===== Panel 4: Dub & Export ===== -->
+<div class=pnl id=pnl4>
+  <div class=card>
+    <div class=card-h><div class=card-t><i class=bi bi-mic></i> AI 配音</div><button class=btn btn-p btn-sm onclick=startDub()><i class=bi bi-magic></i> 开始配音</button></div>
+    <div class=card-b>
+      <div class=g2>
+        <div class=fg><label class=fl>配音风格</label><select class=fc><option>自然流畅</option><option>戏剧表演</option><option>纪录片旁白</option></select></div>
+        <div class=fg><label class=fl>输出格式</label><select class=fc><option value=wav>WAV（无损）</option><option value=mp3>MP3（压缩）</option></select></div>
+      </div>
+      <div class=pbar><div class=pfill id=dubPfill style=width:0></div></div>
+    </div>
+  </div>
+  <div class=card style=margin-top:16px>
+    <div class=card-h><div class=card-t><i class=bi bi-download></i> 导出成品</div></div>
+    <div class=card-b>
+      <div style=display:flex;gap:10px;flex-wrap:wrap>
+        <button class=btn btn-p onclick=exportVid()><i class=bi bi-film></i> 导出视频（MP4）</button>
+        <button class=btn btn-s onclick=exportProj()><i class=bi bi-archive></i> 导出项目包</button>
+        <button class=btn btn-s onclick=dlAssets()><i class=bi bi-images></i> 下载所有素材</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+</main>
+</div>
+
+<!-- Toast -->
+<div class=toast-rack id=toastRack></div>
+
+<!-- Chat Modal -->
+<div class=modal id=chatM>
+  <div class=modal-box>
+    <div class=modal-h><div class=modal-t><i class=bi bi-robot style=color:var(--acl)></i> AI 助手</div><button class=modal-x onclick=closeChat()><i class=bi bi-x-lg></i></button></div>
+    <div class=modal-b>
+      <div class=chat-box>
+        <div class=chat-msgs id=chatMsgs>
+          <div class=chat-msg bot>你好！我是 AI 创作助手。我可以帮你讨论创意、优化剧本、调整风格。请告诉我你需要什么帮助。</div>
+        </div>
+        <div class=chat-in>
+          <textarea id=chatIn rows=2 placeholder=输入消息... onkeydown=if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat()}></textarea>
+          <button class=btn btn-p onclick=sendChat()><i class=bi bi-send></i></button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Settings Modal -->
+<div class=modal id=setM>
+  <div class=modal-box style=max-width:700px>
+    <div class=modal-h><div class=modal-t><i class=bi bi-gear style=color:var(--acl)></i> AI 设置</div><button class=modal-x onclick=closeSet()><i class=bi bi-x-lg></i></button></div>
+    <div class=modal-b id=setBody>加载中...</div>
+  </div>
+</div>
+
+<!-- QC Modal -->
+<div class=modal id=qcM>
+  <div class=modal-box style=max-width:700px>
+    <div class=modal-h><div class=modal-t><i class=bi bi-shield-check style=color:var(--acl)></i> 质检配置</div><button class=modal-x onclick=closeQc()><i class=bi bi-x-lg></i></button></div>
+    <div class=modal-b id=qcBody>加载中...</div>
+  </div>
+</div>
+
+<!-- Project List Modal -->
+<div class=modal id=projM>
+  <div class=modal-box style=max-width:600px>
+    <div class=modal-h><div class=modal-t><i class=bi bi-folder2 style=color:var(--acl)></i> 项目列表</div><button class=modal-x onclick=closeProjM()><i class=bi bi-x-lg></i></button></div>
+    <div class=modal-b id=projBody>加载中...</div>
+  </div>
+</div>
+
+<!-- Watermark Modal -->
+<div class=modal id=wmM>
+  <div class=modal-box style=max-width:500px>
+    <div class=modal-h><div class=modal-t><i class=bi bi-droplet style=color:var(--acl)></i> 视频水印</div><button class=modal-x onclick=closeWm()><i class=bi bi-x-lg></i></button></div>
+    <div class=modal-b id=wmBody>加载中...</div>
+  </div>
+</div>
+
+<!-- Lightbox -->
+<div id=lb style=position:fixed;inset:0;z-index:2100;display:none;place-items:center;background:rgba(3,6,13,.9);padding:20px onclick=this.style.display='none'>
+  <img id=lbImg style=max-width:min(92vw,900px);max-height:84vh;border-radius:12px;border:1px solid var(--border)>
+</div>
+<script>
+/* ========== State ========== */
+let curStep=1,curProj=null,scriptData=null,chatHist=[];
+
+/* ========== Step Navigation ========== */
+function swStep(n){
+  curStep=n;
+  document.querySelectorAll('.step').forEach((s,i)=>{s.className='step'+(i+1===n?' on':'')+(i+1<n?' done':'')});
+  document.querySelectorAll('.pnl').forEach((p,i)=>{p.className='pnl'+(i+1===n?' on':'')});
+}
+
+/* ========== View Switch ========== */
+function swView(v){toastr('切换到: '+v,'ok')}
+
+/* ========== Toast ========== */
+function toastr(msg,type){
+  const t=document.createElement('div');
+  t.className='toast '+(type||'');
+  t.innerHTML='<i class=bi bi-'+(type==='er'?'x-circle':type==='wn'?'exclamation-triangle':'check-circle')+'></i> '+msg;
+  document.getElementById('toastRack').appendChild(t);
+  setTimeout(()=>t.remove(),4000);
+}
+
+/* ========== File Upload ========== */
+function handleFiles(files){
+  if(!files.length)return;
+  const fd=new FormData();
+  for(let f of files)fd.append('files',f);
+  const xhr=new XMLHttpRequest();
+  xhr.open('POST','/api/novels/upload');
+  xhr.onload=()=>{try{const r=JSON.parse(xhr.responseText);toastr(r.message||'上传成功','ok');loadNovels()}catch(e){toastr('上传失败','er')}};
+  xhr.onerror=()=>toastr('网络错误','er');
+  xhr.send(fd);
+}
+
+/* ========== Novels ========== */
+function loadNovels(){
+  fetch('/api/novels').then(r=>r.json()).then(d=>{
+    // Will populate novel list when backend ready
+  }).catch(()=>{});
+}
+
+/* ========== Projects ========== */
+function loadProjects(){
+  fetch('/api/projects').then(r=>r.json()).then(d=>{
+    const sel=document.getElementById('projSel');
+    sel.innerHTML='';
+    if(!d.projects||!d.projects.length){sel.innerHTML='<option>暂无项目，请先创建</option>';return}
+    d.projects.forEach(p=>{
+      const o=document.createElement('option');
+      o.value=p.name;o.textContent=p.name+(p.style?' ('+p.style+')':'');
+      if(curProj&&curProj.name===p.name)o.selected=true;
+      sel.appendChild(o);
+    });
+    if(!curProj&&d.projects.length){curProj=d.projects[0]}
+    updateProjMeta();
+  }).catch(()=>{});
+}
+function onProjSel(name){
+  fetch('/api/projects').then(r=>r.json()).then(d=>{
+    curProj=d.projects.find(p=>p.name===name)||null;
+    updateProjMeta();
+    loadScriptPreview();
+  }).catch(()=>{});
+}
+function updateProjMeta(){
+  const m=document.getElementById('projMeta');
+  if(!curProj){m.textContent='—';return}
+  m.textContent=(curProj.style||'')+' | '+(curProj.episodes||1)+'集';
+}
+function openNewProj(){toastr('请在输入框中输入主题后点击「AI 生成剧本」即可自动创建项目','wn')}
+function openProjList(){
+  const body=document.getElementById('projBody');
+  fetch('/api/projects').then(r=>r.json()).then(d=>{
+    if(!d.projects||!d.projects.length){body.innerHTML='<div style=text-align:center;color:var(--tm);padding:30px>暂无项目</div>';document.getElementById('projM').className='modal on';return}
+    let h='';
+    d.projects.forEach(p=>{
+      h+='<div style=display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;margin-bottom:8px;cursor:pointer onclick=onProjSel(\\''+p.name+'\\');closeProjM()>';
+      h+='<div style=flex:1><div style=font-weight:600;font-size:.9rem>'+p.name+'</div><div style=font-size:.72rem;color:var(--tm)>'+(p.style||'')+' · '+(p.episodes||1)+'集</div></div>';
+      h+='<button class=btn btn-g btn-sm onclick=event.stopPropagation();delProjByName(\\''+p.name+'\\')><i class=bi bi-trash3></i></button></div>';
+    });
+    body.innerHTML=h;
+    document.getElementById('projM').className='modal on';
+  }).catch(()=>{body.innerHTML='<div style=color:var(--er)>加载失败</div>';document.getElementById('projM').className='modal on'});
+}
+function closeProjM(){document.getElementById('projM').className='modal'}
+function delProj(){if(curProj&&confirm('确定删除项目 '+curProj.name+' ？'))delProjByName(curProj.name)}
+function delProjByName(name){
+  fetch('/api/projects/'+encodeURIComponent(name),{method:'DELETE'}).then(r=>r.json()).then(()=>{toastr('已删除','ok');curProj=null;loadProjects()}).catch(()=>toastr('删除失败','er'));
+}
+function refreshAssets(){loadProjects();toastr('已刷新','ok')}
+
+/* ========== Script ========== */
+function genScript(){
+  const theme=document.getElementById('themeIn').value.trim();
+  const style=document.getElementById('styleIn').value;
+  const eps=parseInt(document.getElementById('epIn').value)||1;
+  const dur=parseInt(document.getElementById('durIn').value)||60;
+  const shots=parseInt(document.getElementById('shotIn').value)||12;
+  if(!theme){toastr('请输入故事主题','wn');return}
+  document.getElementById('scriptMeter').style.display='block';
+  document.getElementById('scriptPfill').style.width='30%';
+  document.getElementById('scriptHint').textContent='正在生成剧本...';
+  document.getElementById('scriptStat').textContent='生成中';
+  document.getElementById('scriptStat').className='tag';
+  fetch('/api/script/generate',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({theme,style,episodes:eps,duration:shots*5,shots})
+  }).then(r=>r.json()).then(d=>{
+    document.getElementById('scriptPfill').style.width='100%';
+    if(d.ok){
+      scriptData=d.script;
+      renderScript(d.script);
+      document.getElementById('scriptStat').textContent='生成完成';
+      document.getElementById('scriptStat').className='tag ok';
+      document.getElementById('scriptHint').textContent='';
+      loadProjects();
+      toastr('剧本生成成功','ok');
+    }else{
+      document.getElementById('scriptStat').textContent='生成失败';
+      document.getElementById('scriptHint').textContent=d.error||'未知错误';
+      toastr('剧本生成失败: '+(d.error||''),'er');
+    }
+    setTimeout(()=>document.getElementById('scriptMeter').style.display='none',2000);
+  }).catch(e=>{
+    document.getElementById('scriptMeter').style.display='none';
+    document.getElementById('scriptStat').textContent='网络错误';
+    toastr('网络错误: '+e.message,'er');
+  });
+}
+function renderScript(s){
+  if(!s){return}
+  const el=document.getElementById('scriptPrev');
+  let h='<div style=font-size:1rem;font-weight:700;margin-bottom:12px;color:var(--acl)>'+(s.title||'未命名')+'</div>';
+  if(s.style)h+='<div style=margin-bottom:8px><span class=tag>'+s.style+'</span></div>';
+  if(s.characters&&s.characters.length){
+    h+='<div style=font-weight:700;font-size:.85rem;margin:14px 0 6px;color:var(--wn)><i class=bi bi-people></i> 角色</div>';
+    s.characters.forEach(c=>{
+      h+='<div style=padding:7px 10px;border-left:3px solid var(--acl);background:rgba(0,0,0,.15);border-radius:0 7px 7px 0;margin-bottom:5px;font-size:.82rem>';
+      h+='<b style=color:#fff>'+c.name+'</b> ';
+      if(c.personality)h+='<span style=color:var(--tm)>· '+c.personality+'</span>';
+      if(c.description)h+='<div style=color:var(--t2);margin-top:3px>'+c.description+'</div>';
+      h+='</div>';
+    });
+  }
+  if(s.items&&s.items.length){
+    h+='<div style=font-weight:700;font-size:.85rem;margin:14px 0 6px;color:var(--wn)><i class=bi bi-gem></i> 物品</div>';
+    s.items.forEach(i=>{h+='<div style=padding:5px 10px;font-size:.82rem;color:var(--t2)><b>'+i.name+'</b>: '+(i.description||'')+'</div>'});
+  }
+  if(s.scenes&&s.scenes.length){
+    h+='<div style=font-weight:700;font-size:.85rem;margin:14px 0 6px;color:var(--jade)><i class=bi bi-building></i> 场景</div>';
+    s.scenes.forEach(sc=>{h+='<div style=padding:5px 10px;font-size:.82rem;color:var(--t2)><b>'+sc.name+'</b> ('+(sc.location||'')+')</div>'});
+  }
+  if(s.shots&&s.shots.length){
+    h+='<div style=font-weight:700;font-size:.85rem;margin:14px 0 6px;color:var(--acl)><i class=bi bi-camera-reels></i> 镜头 ('+s.shots.length+')</div>';
+    s.shots.forEach(sh=>{
+      h+='<div style=padding:8px 10px;border-left:3px solid var(--ac);background:rgba(0,0,0,.15);border-radius:0 7px 7px 0;margin-bottom:6px;font-size:.8rem>';
+      h+='<span style=color:var(--acl);font-weight:700>#'+sh.shot_id+'</span> ';
+      h+='<span style=color:var(--t2)>'+sh.camera+' · '+sh.duration+'s</span>';
+      if(sh.visual_description)h+='<div style=color:var(--t2);margin-top:4px>'+sh.visual_description+'</div>';
+      h+='</div>';
+    });
+  }
+  el.innerHTML=h;
+}
+function loadScriptPreview(){
+  if(!curProj)return;
+  const p=curProj.name;
+  fetch('/api/projects/'+encodeURIComponent(p)+'/scripts').then(r=>r.json()).then(d=>{
+    if(d.script){scriptData=d.script;renderScript(d.script);document.getElementById('scriptStat').textContent='已加载'}
+  }).catch(()=>{});
+}
+
+/* ========== Assets ========== */
+function genAssets(type){toastr('生成 '+type+' 资产中...','');fetch('/api/assets/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project:curProj?curProj.name:'',type})}).then(r=>r.json()).then(d=>{toastr(d.ok?'资产生成完成':d.error,'er')} ).catch(e=>toastr('生成失败','er'))}
+function genStoryboard(){toastr('生成分镜中...','');fetch('/api/storyboards/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project:curProj?curProj.name:''})}).then(r=>r.json()).then(d=>{toastr(d.ok?'分镜生成完成':d.error,'er')}).catch(e=>toastr('生成失败','er'))}
+
+/* ========== Videos ========== */
+function genVideos(){toastr('生成视频中...','');fetch('/api/videos/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project:curProj?curProj.name:'',mode:document.getElementById('vidMode').value})}).then(r=>r.json()).then(d=>{toastr(d.ok?'视频生成完成':d.error,'er')}).catch(e=>toastr('生成失败','er'))}
+function genFinal(){toastr('合成中...','');fetch('/api/final/video',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project:curProj?curProj.name:''})}).then(r=>r.json()).then(d=>{toastr(d.ok?'合成完成':d.error,'er')}).catch(e=>toastr('合成失败','er'))}
+
+/* ========== Dubbing ========== */
+function startDub(){toastr('配音合成中...','');fetch('/api/generate/dub',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project:curProj?curProj.name:''})}).then(r=>r.json()).then(d=>{toastr(d.ok?'配音完成':d.error,'er')}).catch(e=>toastr('配音失败','er'))}
+
+/* ========== Export ========== */
+function exportVid(){if(curProj)window.open('/api/final/'+encodeURIComponent(curProj.name));else toastr('请先选择项目','wn')}
+function exportProj(){if(curProj)window.open('/api/export/download/'+encodeURIComponent(curProj.name));else toastr('请先选择项目','wn')}
+function dlAssets(){if(curProj)window.open('/api/assets/'+encodeURIComponent(curProj.name));else toastr('请先选择项目','wn')}
+
+/* ========== Chat ========== */
+function openChat(){document.getElementById('chatM').className='modal on'}
+function closeChat(){document.getElementById('chatM').className='modal'}
+function sendChat(){
+  const inp=document.getElementById('chatIn');
+  const msg=inp.value.trim();
+  if(!msg)return;
+  inp.value='';
+  appendMsg('user',msg);
+  chatHist.push({role:'user',content:msg});
+  fetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:chatHist,project:curProj?curProj.name:''})}).then(r=>r.json()).then(d=>{
+    const reply=d.reply||d.error||'无回复';
+    appendMsg('bot',reply);
+    chatHist.push({role:'assistant',content:reply});
+  }).catch(e=>{appendMsg('bot','网络错误: '+e.message)});
+}
+function appendMsg(role,text){
+  const box=document.getElementById('chatMsgs');
+  const div=document.createElement('div');
+  div.className='chat-msg '+role;
+  div.textContent=text;
+  box.appendChild(div);
+  box.scrollTop=box.scrollHeight;
+}
+
+/* ========== Settings ========== */
+function openSet(){
+  document.getElementById('setM').className='modal on';
+  const body=document.getElementById('setBody');
+  body.innerHTML='<div style=text-align:center;padding:20px;color:var(--tm)>加载中...</div>';
+  fetch('/api/llm/config').then(r=>r.json()).then(d=>{
+    let h='<div class=g2>';
+    const fields=[
+      {k:'base_url',l:'LLM API 地址',p:'OpenAI 兼容接口地址'},
+      {k:'api_key',l:'LLM API Key',t:'password',p:'留空则不修改'},
+      {k:'model',l:'LLM 模型',p:'如 gpt-4o, deepseek-chat'}
+    ];
+    fields.forEach(f=>{
+      h+='<div class=fg><label class=fl>'+f.l+'</label>';
+      h+='<input class=fc id=cfg_'+f.k+' type='+(f.t||'text')+' value='+(d[f.k]||'')+' placeholder='+(f.p||'')+'></div>';
+    });
+    h+='</div><button class=btn btn-p onclick=saveSet()><i class=bi bi-check-lg></i> 保存设置</button>';
+    body.innerHTML=h;
+  }).catch(()=>{body.innerHTML='<div style=color:var(--er)>加载失败</div>'});
+}
+function closeSet(){document.getElementById('setM').className='modal'}
+function saveSet(){
+  const keys=['base_url','api_key','model'];
+  const data={};
+  keys.forEach(k=>{const v=document.getElementById('cfg_'+k).value.trim();if(v)data[k]=v});
+  fetch('/api/llm/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(r=>r.json()).then(d=>{toastr(d.ok?'设置已保存':d.error,'ok');closeSet();checkAI()}).catch(()=>toastr('保存失败','er'));
+}
+
+/* ========== QC Config ========== */
+function openQc(){
+  document.getElementById('qcM').className='modal on';
+  const body=document.getElementById('qcBody');
+  fetch('/api/qc/config').then(r=>r.json()).then(d=>{
+    let h='';
+    h+='<div style=margin-bottom:14px><label style=display:flex;align-items:center;gap:8px;cursor:pointer;font-size:.9rem><input type=checkbox id=qcEn '+(d.enabled?'checked':'')+' onchange=toggleQC()> 启用 AI 质检</label></div>';
+    h+='<div class=g2>';
+    h+='<div class=fg><label class=fl>图片质检</label><label style=display:flex;align-items:center;gap:6px;cursor:pointer;font-size:.82rem><input type=checkbox id=qcImg '+(d.image_enabled?'checked':'')+' onchange=saveQC()> 启用</label></div>';
+    h+='<div class=fg><label class=fl>视频质检</label><label style=display:flex;align-items:center;gap:6px;cursor:pointer;font-size:.82rem><input type=checkbox id=qcVid '+(d.video_enabled?'checked':'')+' onchange=saveQC()> 启用</label></div>';
+    h+='<div class=fg><label class=fl>剧本质检</label><label style=display:flex;align-items:center;gap:6px;cursor:pointer;font-size:.82rem><input type=checkbox id=qcScr '+(d.script_enabled?'checked':'')+' onchange=saveQC()> 启用</label></div>';
+    h+='<div class=fg><label class=fl>及格分数</label><input class=fc id=qcScore type=number value='+(d.pass_score||70)+' min=0 max=100></div>';
+    h+='<div class=fg><label class=fl>最大重试</label><input class=fc id=qcRetry type=number value='+(d.max_retries||2)+' min=0 max=10></div>';
+    h+='</div><button class=btn btn-p style=margin-top:12px onclick=saveQC()><i class=bi bi-check-lg></i> 保存</button>';
+    body.innerHTML=h;
+  }).catch(()=>{body.innerHTML='<div style=color:var(--er)>加载失败</div>'});
+}
+function closeQc(){document.getElementById('qcM').className='modal'}
+function toggleQC(){saveQC()}
+function saveQC(){
+  const data={
+    enabled:document.getElementById('qcEn').checked,
+    image_enabled:document.getElementById('qcImg').checked,
+    video_enabled:document.getElementById('qcVid').checked,
+    script_enabled:document.getElementById('qcScr').checked,
+    pass_score:parseInt(document.getElementById('qcScore').value)||70,
+    max_retries:parseInt(document.getElementById('qcRetry').value)||2
+  };
+  fetch('/api/qc/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(r=>r.json()).then(d=>{toastr('质检配置已保存','ok')}).catch(()=>toastr('保存失败','er'));
+}
+
+/* ========== Watermark ========== */
+function openWm(){
+  document.getElementById('wmM').className='modal on';
+  const body=document.getElementById('wmBody');
+  body.innerHTML='<div style=text-align:center;padding:20px;color:var(--tm)>加载中...</div>';
+  fetch('/api/watermark/config').then(r=>r.json()).then(d=>{
+    let h='<div class=fg><label class=fl>水印文本</label><input class=fc id=wmText value='+(d.text||'')+' placeholder=例如: @我的频道></div>';
+    h+='<div class=fg><label class=fl>位置</label><select class=fc id=wmPos><option value=top_right '+(d.position==='top_right'?'selected':'')+'>右上</option><option value=top_left '+(d.position==='top_left'?'selected':'')+'>左上</option><option value=bottom_right '+(d.position==='bottom_right'?'selected':'')+'>右下</option><option value=bottom_left '+(d.position==='bottom_left'?'selected':'')+'>左下</option></select></div>';
+    h+='<button class=btn btn-p onclick=saveWm()><i class=bi bi-check-lg></i> 保存</button>';
+    body.innerHTML=h;
+  }).catch(()=>{body.innerHTML='<div style=color:var(--er)>加载失败</div>'});
+}
+function closeWm(){document.getElementById('wmM').className='modal'}
+function saveWm(){
+  fetch('/api/watermark/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:document.getElementById('wmText').value,position:document.getElementById('wmPos').value})}).then(r=>r.json()).then(d=>{toastr('水印设置已保存','ok');closeWm()}).catch(()=>toastr('保存失败','er'));
+}
+
+/* ========== AI Status ========== */
+function checkAI(){
+  fetch('/api/llm/config').then(r=>r.json()).then(d=>{
+    const el=document.getElementById('aiStat');
+    if(d.api_key){el.textContent='已配置';el.style.color='var(--ok)'}
+    else{el.textContent='未配置';el.style.color='var(--wn)'}
+  }).catch(()=>{document.getElementById('aiStat').textContent='检测失败'});
+}
+
+/* ========== Upload Drag ========== */
+document.addEventListener('DOMContentLoaded',()=>{
+  const zone=document.getElementById('upload');
+  if(zone){
+    zone.addEventListener('dragover',e=>{e.preventDefault();zone.style.borderColor='var(--ac)';zone.style.background='rgba(99,102,241,.08)'});
+    zone.addEventListener('dragleave',()=>{zone.style.borderColor='';zone.style.background=''});
+    zone.addEventListener('drop',e=>{e.preventDefault();zone.style.borderColor='';zone.style.background='';handleFiles(e.dataTransfer.files)});
+  }
+  loadProjects();
+  checkAI();
+  setInterval(checkAI,30000);
+});
+
+/* ========== Lightbox ========== */
+function showLb(src){document.getElementById('lbImg').src=src;document.getElementById('lb').style.display='grid'}
+</script>
+</body>
+</html>

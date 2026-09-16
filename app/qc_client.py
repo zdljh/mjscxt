@@ -134,6 +134,20 @@ DEFAULT_IMAGE_PROMPT = (
     '{"score": 0-100 的整数, "pass": true 或 false, "reason": "一句话结论", "issues": ["具体问题1", "具体问题2"]}'
 )
 
+DEFAULT_AUDIO_PROMPT = (
+    "你是漫剧配音质检员。下面两张图不是画面，而是同一段配音音频的**频谱图**与**波形图**：\n"
+    "  第 1 张：频谱图（横轴时间，纵轴频率，颜色亮度=能量强弱）\n"
+    "  第 2 张：波形图（横轴时间，纵轴振幅）\n"
+    "请据此判断这段配音是否达到可直接使用的标准：\n"
+    "1) 人声能量分布是否正常（人声主要能量集中在数百 Hz 至数千 Hz 的中频段）；\n"
+    "2) 波形是否存在长时间「平坦零线」（说明整段无声、漏配音或合成失败）；\n"
+    "3) 波形上下是否被削成平直横线（说明增益过大导致爆音失真）；\n"
+    "4) 是否存在异常高频噪声、周期性爆破或明显断续（说明音频损坏或拼接异常）。\n"
+    "配音文本参考：{line_text}\n"
+    "请只输出一个 JSON 对象，不要任何解释文字，格式：\n"
+    '{"score": 0-100 的整数, "pass": true 或 false, "reason": "一句话结论", "issues": ["具体问题1", "具体问题2"]}'
+)
+
 DEFAULT_VIDEO_PROMPT = (
     "你是漫剧视频质检员。下面按顺序给出同一镜头视频的若干抽帧图片（首帧/中间帧/尾帧）。\n"
     "请判断该视频片段是否达到可直接使用的标准：\n"
@@ -146,13 +160,54 @@ DEFAULT_VIDEO_PROMPT = (
     '{"score": 0-100 的整数, "pass": true 或 false, "reason": "一句话结论", "issues": ["具体问题1", "具体问题2"]}'
 )
 
+# ===================== 剧本质检提示词 =====================
+DEFAULT_SCRIPT_PROMPT = (
+    "你是漫剧剧本质检员。请检查这个JSON剧本是否达到可直接使用的标准：\n\n"
+    "【结构完整性】\n"
+    "1. 必须包含：title, characters, items, scenes, shots\n"
+    "2. 每个角色必须有：name, description, personality\n"
+    "3. 每个镜头必须有：shot_id, duration, camera, visual_description, characters_in_shot, items_in_shot\n\n"
+    "【逻辑一致性】\n"
+    "4. characters_in_shot中的角色必须在characters列表中定义\n"
+    "5. items_in_shot中的物品必须在items列表中定义\n"
+    "6. 镜头顺序应有清晰的叙事逻辑\n\n"
+    "【风格一致性】\n"
+    "7. 所有描述必须符合指定的创作风格（{style}）\n"
+    "8. 角色外观描述应与风格匹配\n\n"
+    "【提示词质量】\n"
+    "9. visual_description应足够详细（50字以上）\n"
+    "10. 应包含：人物动作、镜头运动、环境氛围\n\n"
+    "【可执行性评估】\n"
+    "11. 总时长应接近目标时长（{target_duration}秒）\n"
+    "12. 每个镜头时长应在3-10秒范围内\n\n"
+    "剧本数据：\n{script_data}\n\n"
+    "请只输出一个JSON对象，格式：\n"
+    '{\"score\": 0-100, \"pass\": true/false, \"reason\": \"一句话结论\", '
+    '\"issues\": [\"问题1\", \"问题2\"], \"suggestions\": [\"建议1\", \"建议2\"], '
+    '\"categories\": {\"structure\": 0-100, \"logic\": 0-100, \"style\": 0-100, '
+    '\"prompt_quality\": 0-100, \"feasibility\": 0-100}}'
+)
+
+# ===================== 音频客观判定阈值 =====================
+# 说明：音频无法像图片那样直接交给视觉模型「听」，因此采用两层判定：
+#   客观层（ffmpeg 指标，零模型依赖，始终执行）负责硬闸：无声 / 静音 / 削波 / 时长失控；
+#   AI 层（把频谱图与波形图渲染成图交给多模态模型）负责内容层面的判读。
+# 客观层阈值集中在这里，便于按不同音色与语速整体调档。
+AUDIO_SILENCE_THRESHOLD_DB = -35.0   # 静音判定门限（低于该电平视为静音）
+AUDIO_SILENCE_MIN_DURATION = 0.35    # 最短静音段（秒），避免把正常换气当静音
+AUDIO_NEAR_SILENT_MEAN_DB = -50.0    # 平均电平低于此值 → 视为近乎无声（硬闸）
+AUDIO_CLIP_MAX_DB = -0.1             # 峰值电平高于此值 → 削波失真风险（扣分）
+AUDIO_MIN_VALID_DURATION = 0.15      # 有效音频最短时长（秒），更短视为空文件/合成失败
+AUDIO_HARD_SILENT_RATIO = 0.15       # 有声占比低于此值 → 视为整段无声（硬闸）
+
 CONFIG_KEYS = (
-    "enabled", "image_enabled", "video_enabled",
+    "enabled", "image_enabled", "video_enabled", "audio_enabled", "script_enabled",
     "base_url", "api_key", "model",
     "endpoint_override",   # 被其它模块（如分镜链路）自动写入的接口，记录以便「恢复为 AI 设置」
-    "image_prompt", "video_prompt",
+    "image_prompt", "video_prompt", "audio_prompt", "script_prompt",
     "pass_score", "max_retries", "video_frame_count",
     "image_max_side", "timeout", "api_retries", "api_backoff", "updated_at",
+    "script_categories",  # 剧本质检各维度权重和合格线
 )
 
 
@@ -161,6 +216,8 @@ def _empty_config() -> dict:
         "enabled": False,            # 质检总开关
         "image_enabled": True,       # 图片质检开关
         "video_enabled": True,       # 视频质检开关
+        "audio_enabled": True,       # 音频质检开关（客观层零模型依赖；AI 层复用质检接口）
+        "script_enabled": True,      # 剧本质检开关
         # 质检必须使用自己独立配置的 base_url / api_key / model（不再复用文本分析 LLM 接口）
         "base_url": "",
         "api_key": "",
@@ -168,6 +225,12 @@ def _empty_config() -> dict:
         "endpoint_override": {"base_url": "", "api_key": "", "model": ""},
         "image_prompt": DEFAULT_IMAGE_PROMPT,
         "video_prompt": DEFAULT_VIDEO_PROMPT,
+        "audio_prompt": DEFAULT_AUDIO_PROMPT,
+        "script_prompt": DEFAULT_SCRIPT_PROMPT,
+        # 音频客观层阈值（可按音色/语速调档）
+        "audio_min_speech_ratio": 0.50,   # 有声占比下限（低于此值扣分）
+        "audio_min_mean_db": -45.0,       # 平均电平下限（低于此值扣分）
+        "audio_max_drift": 0.50,          # 与预期时长偏差上限（比例，超限扣分）
         "pass_score": 70,            # 合格线（0-100），score >= pass_score 且 pass != false 视为达标
         "max_retries": 2,            # 不达标最大重试次数
         "video_frame_count": 3,      # 视频抽帧数量（1-6）
@@ -175,6 +238,14 @@ def _empty_config() -> dict:
         "timeout": 180,              # 单次质检请求读超时（秒）
         "api_retries": API_RETRY_ATTEMPTS,   # 网络层额外重试次数（瞬时故障时退避重试，与 max_retries 重画无关）
         "api_backoff": API_RETRY_BACKOFF,    # 网络重试退避基数（秒），按 2 的幂增长、单次上限见 API_RETRY_MAX_SLEEP
+        # 剧本质检各维度权重和合格线
+        "script_categories": {
+            "structure": {"weight": 0.2, "pass_threshold": 80},
+            "logic": {"weight": 0.3, "pass_threshold": 70},
+            "style": {"weight": 0.2, "pass_threshold": 70},
+            "prompt_quality": {"weight": 0.15, "pass_threshold": 60},
+            "feasibility": {"weight": 0.15, "pass_threshold": 70}
+        },
         "updated_at": None,
     }
 
@@ -680,23 +751,124 @@ def test_vision(ep: dict, timeout: int = 60) -> dict:
             "retries_used": max(0, int(r.get("attempts", 1)) - 1)}
 
 
-def parse_verdict(content: str, pass_score: int) -> dict:
-    text = (content or "").strip()
-    if "```" in text:
-        m = re.search(r"```(?:json)?\s*(.+?)```", text, re.S)
-        if m:
-            text = m.group(1).strip()
-    obj = None
-    try:
-        obj = json.loads(text)
-    except Exception:  # noqa: BLE001
-        s, e = text.find("{"), text.rfind("}")
-        if s != -1 and e > s:
+def _repair_json_quotes(text: str) -> str:
+    """修复「字符串值内嵌未转义双引号」——多模态模型最常见的 JSON 破坏方式。
+
+    实测案例：模型在 reason 里用引号强调剧本原文，返回
+        "reason": "场景与镜头描述不符：灯笼仍亮着而非"同时熄灭"，与核心叙事冲突。"
+    JSON 规范里字符串内的双引号必须转义，这种输出 json.loads 必然失败。
+    而质检解析失败会走「阻断入库」分支，导致图片永远不落盘、流水线无限重跑 ——
+    所以这里必须把它修回来，而不是让模型的一次措辞不当毁掉整条生产链。
+
+    做法：逐字符扫描并跟踪「是否在字符串内」。只有在字符串内遇到双引号、
+    且其后第一个非空白字符**不是**合法结构字符（: , } ] 或结束）时，
+    才判定为内嵌引号并补上转义；其余情况按正常结束引号处理。
+    """
+    out: list = []
+    in_str = False
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if not in_str:
+            if ch == '"':
+                in_str = True
+            out.append(ch)
+            i += 1
+            continue
+        # —— 字符串内部 ——
+        if ch == "\\":
+            out.append(ch)
+            if i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+        if ch == '"':
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            nxt = text[j] if j < n else ""
+            if nxt in (":", ",", "}", "]", ""):
+                in_str = False           # 合法的字符串结束
+                out.append(ch)
+            else:
+                out.append('\\"')        # 内嵌引号 → 转义
+            i += 1
+            continue
+        # 字符串内裸换行/制表符同样非法，一并转义
+        if ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _loads_lenient(text: str):
+    """多级容错解析模型返回的 JSON（都失败时返回 None，由调用方决定如何处置）
+
+    顺序：原文 → 截取花括号区间 → 去尾逗号 → 修复内嵌未转义引号。
+    逐级收紧，能救回就救回，绝不因一次措辞不当就丢掉一份有效质检结论。
+    """
+    s, e = text.find("{"), text.rfind("}")
+    inner = text[s:e + 1] if (s != -1 and e > s) else ""
+    candidates = [text]
+    if inner:
+        candidates += [inner, re.sub(r",\s*([}\]])", r"\1", inner)]
+    for c in candidates:
+        for cand in (c, _repair_json_quotes(c)):
             try:
-                obj = json.loads(re.sub(r",\s*([}\]])", r"\1", text[s:e + 1]))
+                obj = json.loads(cand)
             except Exception:  # noqa: BLE001
-                obj = None
+                continue
+            if isinstance(obj, dict):
+                return obj
+    return None
+
+
+_FENCE_OPEN_RE = re.compile(r"^\s*```[a-zA-Z0-9_+\-]*[ \t]*\r?\n?")
+_FENCE_CLOSE_RE = re.compile(r"\r?\n?[ \t]*```\s*$")
+
+
+def _strip_code_fence(text: str) -> str:
+    """去掉 markdown 代码块围栏，露出里面的 JSON。
+
+    多模态模型经常把结论包成 ```json ... ```，而且**可能只有开头没有结尾**
+    （输出被 max_tokens 截断），此时旧的配对正则 ```` ```(?:json)?\\s*(.+?)``` ````
+    会整体失配，导致围栏原样进入解析、最终报「无法解析为 JSON」（缺陷 D7）。
+    这里做三级退化：配对围栏 → 只剥开头 → 只剥结尾。
+    """
+    if not text:
+        return text
+    raw = text.strip()
+    if "```" not in raw:
+        return raw
+
+    # 1) 标准配对围栏（允许围栏后有换行、允许 json 之外的语言标记）
+    m = re.search(r"```[a-zA-Z0-9_+\-]*[ \t]*\r?\n?(.*?)```", raw, re.S)
+    if m:
+        inner = m.group(1).strip()
+        if inner:
+            return inner
+
+    # 2) 只有开头围栏（结尾被截断）—— 先剥开头
+    stripped = _FENCE_OPEN_RE.sub("", raw)
+    # 3) 再尝试剥掉可能存在的结尾围栏
+    stripped = _FENCE_CLOSE_RE.sub("", stripped)
+    return stripped.strip()
+
+
+def parse_verdict(content: str, pass_score: int) -> dict:
+    text = _strip_code_fence(content or "")
+    obj = _loads_lenient(text)
     if not isinstance(obj, dict):
+        # 多级容错仍失败：把完整原文落到日志，便于定位畸形输出的具体形态
+        logger.warning("质检结论无法解析为 JSON（清洗后 %d 字符）：%s", len(text), text)
         raise RuntimeError(f"质检结论无法解析为 JSON：{text[:200]}")
     score = obj.get("score")
     try:
@@ -805,21 +977,24 @@ def parse_json_loose(content: str) -> dict:
     """宽松解析模型返回的 JSON（容忍 markdown 代码块 / 前后废话）。失败返回 {}"""
     if not content:
         return {}
-    text = content.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
+    text = _strip_code_fence(content)
     try:
-        return json.loads(text)
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
     except Exception:  # noqa: BLE001
         pass
     m = re.search(r"\{.*\}", text, re.S)
     if m:
         try:
-            return json.loads(m.group(0))
+            obj = json.loads(m.group(0))
+            if isinstance(obj, dict):
+                return obj
         except Exception:  # noqa: BLE001
             pass
-    return {}
+    # 最后再走一次多级容错（处理内嵌未转义引号等畸形输出）
+    obj = _loads_lenient(text)
+    return obj if isinstance(obj, dict) else {}
 
 
 # ===================== 图片质检 =====================
@@ -1166,3 +1341,421 @@ def read_history(qc_root: str, project: str, kind: str, shot_key) -> dict:
         except Exception as e:  # noqa: BLE001
             return {"error": str(e)}
     return {}
+
+
+# ===================== 剧本质检 =====================
+
+def _validate_script_structure(script: dict) -> list:
+    """验证剧本JSON结构完整性"""
+    issues = []
+    
+    # 检查顶层字段
+    required_top = ["title", "characters", "items", "scenes", "shots"]
+    for field in required_top:
+        if field not in script:
+            issues.append(f"缺少必要字段: {field}")
+    
+    # 检查角色结构
+    if "characters" in script:
+        for i, char in enumerate(script["characters"]):
+            if not isinstance(char, dict):
+                issues.append(f"角色 {i} 不是有效对象")
+                continue
+            for field in ["name", "description", "personality"]:
+                if field not in char:
+                    issues.append(f"角色 {char.get('name', f'[{i}]')} 缺少字段: {field}")
+    
+    # 检查物品结构
+    if "items" in script:
+        for i, item in enumerate(script["items"]):
+            if not isinstance(item, dict):
+                issues.append(f"物品 {i} 不是有效对象")
+                continue
+            for field in ["name", "category", "description"]:
+                if field not in item:
+                    issues.append(f"物品 {item.get('name', f'[{i}]')} 缺少字段: {field}")
+    
+    # 检查场景结构
+    if "scenes" in script:
+        for i, scene in enumerate(script["scenes"]):
+            if not isinstance(scene, dict):
+                issues.append(f"场景 {i} 不是有效对象")
+                continue
+            # 场景可能没有shot_id，但需要有基本描述
+            if "name" not in scene and "visual_description" not in scene:
+                issues.append(f"场景 {i} 缺少名称或描述")
+    
+    # 检查镜头结构
+    if "shots" in script:
+        for i, shot in enumerate(script["shots"]):
+            if not isinstance(shot, dict):
+                issues.append(f"镜头 {i} 不是有效对象")
+                continue
+            required_shot = ["shot_id", "duration", "camera", "visual_description"]
+            for field in required_shot:
+                if field not in shot:
+                    issues.append(f"镜头 {shot.get('shot_id', f'[{i}]')} 缺少字段: {field}")
+    
+    return issues
+
+
+def _validate_script_logic(script: dict) -> list:
+    """验证剧本逻辑一致性"""
+    issues = []
+    
+    # 提取定义的角色名和物品名
+    defined_chars = {c.get("name") for c in script.get("characters", []) if isinstance(c, dict)}
+    defined_items = {i.get("name") for i in script.get("items", []) if isinstance(i, dict)}
+    
+    # 检查镜头中的引用
+    for i, shot in enumerate(script.get("shots", [])):
+        if not isinstance(shot, dict):
+            continue
+        
+        shot_id = shot.get("shot_id", f"[{i}]")
+        
+        # 检查角色引用
+        for char in shot.get("characters_in_shot", []):
+            if char not in defined_chars:
+                issues.append(f"镜头 {shot_id} 引用了未定义的角色: {char}")
+        
+        # 检查物品引用
+        for item in shot.get("items_in_shot", []):
+            if item not in defined_items:
+                issues.append(f"镜头 {shot_id} 引用了未定义的物品: {item}")
+    
+    # 检查镜头顺序逻辑（简单检查shot_id是否连续）
+    shot_ids = [s.get("shot_id") for s in script.get("shots", []) if isinstance(s, dict)]
+    if shot_ids:
+        # 尝试将shot_id转换为数字并检查连续性
+        try:
+            numeric_ids = []
+            for sid in shot_ids:
+                if isinstance(sid, (int, float)):
+                    numeric_ids.append(int(sid))
+                elif isinstance(sid, str) and sid.isdigit():
+                    numeric_ids.append(int(sid))
+            
+            if numeric_ids:
+                sorted_ids = sorted(numeric_ids)
+                for i in range(1, len(sorted_ids)):
+                    if sorted_ids[i] - sorted_ids[i-1] > 1:
+                        issues.append(f"镜头ID不连续: {sorted_ids[i-1]} -> {sorted_ids[i]}")
+        except (ValueError, TypeError):
+            pass  # 非数字ID，跳过连续性检查
+    
+    return issues
+
+
+def _validate_script_style(script: dict, style: str) -> list:
+    """验证风格一致性"""
+    issues = []
+    
+    # 检查剧本是否有style字段
+    script_style = script.get("style", "")
+    if script_style and style and script_style.lower() not in style.lower():
+        issues.append(f"剧本风格 '{script_style}' 与指定风格 '{style}' 不一致")
+    
+    # 检查角色描述是否包含风格关键词
+    style_keywords = {
+        "国漫古风": ["古风", "仙侠", "道袍", "剑修", "修士"],
+        "现代都市": ["现代", "都市", "时尚", "潮流"],
+        "科幻未来": ["科幻", "未来", "机甲", "太空"],
+    }
+    
+    if style in style_keywords:
+        keywords = style_keywords[style]
+        char_descriptions = " ".join(
+            c.get("description", "") for c in script.get("characters", [])
+            if isinstance(c, dict)
+        )
+        # 这是警告，不是错误
+        # if not any(kw in char_descriptions for kw in keywords):
+        #     issues.append(f"角色描述中缺少风格关键词: {', '.join(keywords[:3])}")
+    
+    return issues
+
+
+def _validate_script_prompts(script: dict) -> list:
+    """验证提示词质量"""
+    issues = []
+    
+    # 检查镜头视觉描述质量
+    for i, shot in enumerate(script.get("shots", [])):
+        if not isinstance(shot, dict):
+            continue
+        
+        shot_id = shot.get("shot_id", f"[{i}]")
+        visual_desc = shot.get("visual_description", "")
+        
+        if not visual_desc:
+            issues.append(f"镜头 {shot_id} 缺少视觉描述")
+        elif len(visual_desc) < 30:
+            issues.append(f"镜头 {shot_id} 视觉描述过短（{len(visual_desc)}字），建议50字以上")
+    
+    # 检查角色外貌描述
+    for i, char in enumerate(script.get("characters", [])):
+        if not isinstance(char, dict):
+            continue
+        
+        char_name = char.get("name", f"[{i}]")
+        description = char.get("description", "")
+        
+        if not description:
+            issues.append(f"角色 {char_name} 缺少外貌描述")
+        elif len(description) < 20:
+            issues.append(f"角色 {char_name} 外貌描述过短（{len(description)}字）")
+    
+    return issues
+
+
+def _validate_script_feasibility(script: dict, target_duration: int = 60) -> list:
+    """验证可执行性"""
+    issues = []
+    
+    shots = script.get("shots", [])
+    if not shots:
+        issues.append("剧本没有镜头，无法执行")
+        return issues
+    
+    # 计算总时长
+    total_duration = 0
+    shot_durations = []
+    for i, shot in enumerate(shots):
+        if not isinstance(shot, dict):
+            continue
+        duration = shot.get("duration", 0)
+        if not isinstance(duration, (int, float)):
+            issues.append(f"镜头 {shot.get('shot_id', f'[{i}]')} 时长无效: {duration}")
+            continue
+        
+        shot_durations.append(duration)
+        total_duration += duration
+        
+        # 检查单个镜头时长
+        if duration < 1:
+            issues.append(f"镜头 {shot.get('shot_id', f'[{i}]')} 时长过短: {duration}秒")
+        elif duration > 15:
+            issues.append(f"镜头 {shot.get('shot_id', f'[{i}]')} 时长过长: {duration}秒")
+    
+    # 检查总时长偏差
+    if target_duration > 0 and shot_durations:
+        duration_diff = abs(total_duration - target_duration) / target_duration
+        if duration_diff > 0.3:  # 偏差超过30%
+            issues.append(f"总时长 {total_duration}秒 与目标 {target_duration}秒 偏差过大（{duration_diff*100:.0f}%）")
+    
+    # 检查镜头数量
+    if len(shots) < 3:
+        issues.append(f"镜头数量过少（{len(shots)}个），建议至少5个镜头")
+    elif len(shots) > 30:
+        issues.append(f"镜头数量过多（{len(shots)}个），建议控制在20个以内")
+    
+    return issues
+
+
+def check_script(script_path: str = None, script_data: dict = None,
+                 style: str = "国漫古风", target_duration: int = 60,
+                 cfg: dict = None, override: dict = None) -> dict:
+    """剧本质检：结构+逻辑+风格+提示词质量+可执行性
+    
+    参数:
+        script_path: 剧本文件路径（与script_data二选一）
+        script_data: 剧本数据字典
+        style: 指定创作风格
+        target_duration: 目标总时长（秒）
+        cfg: 质检配置
+        override: 临时覆盖配置
+    
+    返回:
+        dict: {
+            "ok": bool,           # 质检是否成功执行
+            "passed": bool,       # 是否通过质检
+            "score": int,         # 综合得分
+            "reason": str,        # 一句话结论
+            "issues": list,       # 问题列表
+            "suggestions": list,  # 改进建议
+            "categories": dict,   # 各维度得分
+            "skipped": bool,      # 是否跳过
+            "error": str,         # 错误信息
+        }
+    """
+    cfg = cfg or _empty_config()
+    
+    # 检查开关
+    if not cfg.get("enabled"):
+        return {"ok": False, "skipped": True, "reason": "质检总开关未开启"}
+    if not cfg.get("script_enabled"):
+        return {"ok": False, "skipped": True, "reason": "剧本质检开关未开启"}
+    
+    # 检查接口配置
+    ep = resolve_endpoint(cfg, override)
+    if not (ep["base_url"] and ep["api_key"] and ep["model"]):
+        return {"ok": False, "skipped": True, "reason": "质检接口未配置（base_url/api_key/model）"}
+    
+    # 加载剧本数据
+    if script_data is None:
+        if script_path and os.path.isfile(script_path):
+            try:
+                with open(script_path, "r", encoding="utf-8") as f:
+                    script_data = json.load(f)
+            except Exception as e:
+                return {"ok": False, "skipped": False, "error": f"剧本文件读取失败: {e}"}
+        else:
+            return {"ok": False, "skipped": False, "error": "未提供有效的剧本数据或文件"}
+    
+    # 执行客观验证（不依赖AI）
+    structure_issues = _validate_script_structure(script_data)
+    logic_issues = _validate_script_logic(script_data)
+    style_issues = _validate_script_style(script_data, style)
+    prompt_issues = _validate_script_prompts(script_data)
+    feasibility_issues = _validate_script_feasibility(script_data, target_duration)
+    
+    all_objective_issues = (
+        structure_issues + logic_issues + style_issues + 
+        prompt_issues + feasibility_issues
+    )
+    
+    # 计算客观验证得分（每个问题扣5分，最低0分）
+    objective_score = max(0, 100 - len(all_objective_issues) * 5)
+    
+    # 如果客观验证有严重问题（结构或逻辑错误），直接返回失败
+    critical_issues = structure_issues + logic_issues
+    if critical_issues:
+        return {
+            "ok": True,
+            "passed": False,
+            "score": min(objective_score, 50),
+            "reason": f"客观验证发现{len(critical_issues)}个关键问题",
+            "issues": all_objective_issues,
+            "suggestions": ["修复结构和逻辑问题后重试"],
+            "categories": {
+                "structure": max(0, 100 - len(structure_issues) * 10),
+                "logic": max(0, 100 - len(logic_issues) * 10),
+                "style": max(0, 100 - len(style_issues) * 5),
+                "prompt_quality": max(0, 100 - len(prompt_issues) * 5),
+                "feasibility": max(0, 100 - len(feasibility_issues) * 5)
+            },
+            "skipped": False,
+            "objective_only": True,
+        }
+    
+    # 调用AI进行深度质检
+    prompt_template = cfg.get("script_prompt") or DEFAULT_SCRIPT_PROMPT
+    script_json = json.dumps(script_data, ensure_ascii=False, indent=2)
+    
+    prompt = prompt_template.replace(
+        "{style}", style or "国漫古风"
+    ).replace(
+        "{target_duration}", str(target_duration)
+    ).replace(
+        "{script_data}", script_json[:8000]  # 限制长度，避免超出上下文
+    )
+    
+    # 调用多模态模型（虽然剧本质检不需要图像，但复用现有接口）
+    content = [{"type": "text", "text": prompt}]
+    payload = {
+        "model": ep["model"],
+        "messages": [
+            {"role": "system", "content": "你是严格、客观的漫剧剧本质检员，只输出JSON。"},
+            {"role": "user", "content": content},
+        ],
+        "temperature": 0,
+        "max_tokens": 1200,
+        "stream": False,
+    }
+    
+    t0 = time.time()
+    try:
+        resp = _post_chat(ep, payload, cfg.get("timeout", 180),
+                          retries=cfg.get("api_retries", API_RETRY_ATTEMPTS),
+                          backoff=cfg.get("api_backoff", API_RETRY_BACKOFF))
+    except Exception as e:
+        # AI调用失败，回退到客观验证结果
+        logger.warning(f"剧本质检AI调用失败，使用客观验证结果：{e}")
+        return {
+            "ok": True,
+            "passed": objective_score >= cfg.get("pass_score", 70),
+            "score": objective_score,
+            "reason": f"AI质检调用失败，基于客观验证（{len(all_objective_issues)}个问题）",
+            "issues": all_objective_issues,
+            "suggestions": [],
+            "categories": {
+                "structure": max(0, 100 - len(structure_issues) * 10),
+                "logic": max(0, 100 - len(logic_issues) * 10),
+                "style": max(0, 100 - len(style_issues) * 5),
+                "prompt_quality": max(0, 100 - len(prompt_issues) * 5),
+                "feasibility": max(0, 100 - len(feasibility_issues) * 5)
+            },
+            "skipped": False,
+            "ai_failed": True,
+            "ai_error": str(e),
+        }
+    
+    # 解析AI返回结果
+    verdict = parse_verdict(resp["content"], cfg.get("pass_score", 70))
+    
+    # 合并客观验证和AI质检结果
+    ai_issues = verdict.get("issues", [])
+    ai_suggestions = verdict.get("suggestions", [])
+    all_issues = all_objective_issues + ai_issues
+    
+    # 合并各维度得分
+    categories = verdict.get("categories", {})
+    objective_categories = {
+        "structure": max(0, 100 - len(structure_issues) * 10),
+        "logic": max(0, 100 - len(logic_issues) * 10),
+        "style": max(0, 100 - len(style_issues) * 5),
+        "prompt_quality": max(0, 100 - len(prompt_issues) * 5),
+        "feasibility": max(0, 100 - len(feasibility_issues) * 5)
+    }
+    
+    # 取客观验证和AI质检的较低分
+    for cat in ["structure", "logic", "style", "prompt_quality", "feasibility"]:
+        obj_score = objective_categories.get(cat, 100)
+        ai_score = categories.get(cat, 100)
+        categories[cat] = min(obj_score, ai_score)
+    
+    # 计算加权综合分
+    script_cats = cfg.get("script_categories", {})
+    weighted_score = 0
+    total_weight = 0
+    for cat, score in categories.items():
+        cat_config = script_cats.get(cat, {"weight": 0.2})
+        weight = cat_config.get("weight", 0.2)
+        weighted_score += score * weight
+        total_weight += weight
+    
+    if total_weight > 0:
+        final_score = int(weighted_score / total_weight)
+    else:
+        final_score = verdict.get("score", objective_score)
+    
+    # 合并关键缺陷
+    critical_hits = find_critical_issues(all_issues)
+    
+    return {
+        "ok": True,
+        "passed": verdict.get("passed", False) and not critical_hits and final_score >= cfg.get("pass_score", 70),
+        "score": final_score,
+        "reason": verdict.get("reason", ""),
+        "issues": all_issues[:20],  # 限制数量
+        "suggestions": ai_suggestions[:10],
+        "categories": categories,
+        "critical_issues": critical_hits,
+        "skipped": False,
+        "latency_ms": resp.get("latency_ms"),
+        "api_total_ms": int((time.time() - t0) * 1000),
+        "objective_issues": {
+            "structure": structure_issues,
+            "logic": logic_issues,
+            "style": style_issues,
+            "prompt_quality": prompt_issues,
+            "feasibility": feasibility_issues
+        }
+    }
+
+
+def script_qc_ready(cfg: dict, override: dict = None) -> bool:
+    """检查剧本质检是否就绪"""
+    return bool(cfg.get("enabled") and cfg.get("script_enabled")
+                and qc_endpoint_ready(cfg, override))

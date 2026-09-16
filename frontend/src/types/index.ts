@@ -1,0 +1,462 @@
+// ============================================
+// API 类型定义（匹配后端实际返回结构）
+// ============================================
+
+// --- Projects ---
+export interface ProjectConfig {
+  duration_per_shot: number;
+  episode_duration_sec: number;
+  episodes: number;
+  fps: number;
+  qc_enabled: boolean;
+  resolution: string;
+  shots_per_episode: number;
+  style: string;
+  target_shots: number;
+  voice_map: Record<string, string>;
+}
+
+export interface Project {
+  config: ProjectConfig;
+  created_at: string;
+  dir_key: string;
+  episode_count: number;
+  episode_duration_sec: number;
+  from_migration?: boolean;
+  id: string;
+  name: string;
+  note?: string;
+  novel_id: string;
+  status?: 'running' | 'paused' | 'done' | 'failed';
+}
+
+export interface ProjectsResponse {
+  success: boolean;
+  total: number;
+  index_path: string;
+  projects: Project[];
+}
+
+// --- Novels ---
+export interface Novel {
+  bound: boolean;
+  chapter_count: number;
+  char_count: number;
+  encoding: string;
+  encoding_note?: string;
+  ext: string;
+  format: string;
+  line_count: number;
+  name: string;
+  novel_id: string;
+  project_id: string;
+}
+
+export interface NovelsResponse {
+  success: boolean;
+  count: number;
+  all_count: number;
+  project_id: string | null;
+  novels: Novel[];
+  supported_exts: string[];
+  total_chars: number;
+}
+
+// --- Tasks ---
+export interface Task {
+  id: string;
+  kind: 'keyframe' | 'storyboard' | 'video' | 'voice' | 'assemble' | 'qc';
+  label: string;
+  project: string;
+  status: 'pending' | 'running' | 'done' | 'failed';
+  progress: number;
+  created_at: string;
+  started_at: string;
+  finished_at: string;
+  error: string;
+  result_path: string;
+  payload: Record<string, unknown>;
+}
+
+export interface TasksResponse {
+  success: boolean;
+  count: number;
+  items: Task[];
+  queue: Task[];
+}
+
+// --- Characters ---
+/**
+ * 与后端 app/character_manager.py 落盘的结构（characters.json → characters.<id>）对齐：
+ *   { id, name, role, description, outfit, status, views, references, created_at, updated_at }
+ *
+ * ⚠️ 后端**没有 images 字段** —— 图片分别存在 views（五视图）与 references（参考图）里。
+ * 这里曾把 images 声明成必填的 string[]，调用方照着类型写 `char.images.length`，
+ * 运行时读到 undefined → TypeError → 整页白屏（测试报告 #1）。
+ * 教训：类型必须跟后端真实结构一致，可为空的一律标可选，前端渲染再做兜底。
+ */
+export interface Character {
+  id: string;
+  name: string;
+  /** 后端不做枚举约束（AI 可能产出其它值），别用字面量联合把类型写死 */
+  role: string;
+  description?: string;
+  outfit?: string;
+  status?: string;
+  /** 五视图：front / three_quarter / side / back / expressions，未生成为 null */
+  views?: Record<string, string | null>;
+  /** 参考图路径列表（后端实际字段） */
+  references?: string[];
+  /** @deprecated 后端无此字段，仅为兼容历史前端数据保留；新代码请用 references / views */
+  images?: string[];
+  /** 仅请求参数使用：POST /api/characters 必带，缺了后端返回 400 */
+  project?: string;
+  project_id?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+// --- Relations ---
+export interface Relation {
+  id: string;
+  project_id: string;
+  char_a: string;
+  char_b: string;
+  type: string;
+  strength: number;
+}
+
+// --- Memory ---
+/** 后端 ai_memory 实际写入的类型集合（见 app/ai_memory.py 的 mem_type 说明） */
+export type MemoryType = 'lesson' | 'success' | 'insight' | 'pattern' | 'failure' | 'test';
+
+export interface Memory {
+  /** 后端主键字段名是 mem_id / mem_type。
+   *  此前的类型定义写成了 id / type，页面据此取值恒为 undefined，
+   *  于是列表渲染出字面量 `memory.type.undefined`、React key 也为空。 */
+  mem_id: string;
+  mem_type: MemoryType;
+  content: string;
+  tags: string[];
+  created_at: string;
+  confidence?: number;
+  source?: string;
+  usage_count?: number;
+  last_used?: string | null;
+  context?: Record<string, unknown>;
+  /** 兼容旧字段名（部分接口可能回传） */
+  id?: string;
+  type?: MemoryType;
+}
+
+export interface MemoryStats {
+  total: number;
+  lessons: number;
+  successes: number;
+  insights: number;
+}
+
+// --- Settings ---
+export interface AppSettings {
+  llm_provider: string;
+  llm_api_key: string;
+  comfyui_url: string;
+  tts_provider: string;
+  tts_api_key: string;
+  watermark_enabled: boolean;
+  watermark_text: string;
+}
+
+// --- i18n ---
+export interface I18nData {
+  success: boolean;
+  lang: string;
+  available: string[];
+  messages: Record<string, any>;
+}
+
+// --- Analytics ---
+export interface AnalyticsData {
+  total_projects: number;
+  total_tasks: number;
+  total_cost: number;
+  tasks_by_kind: Record<string, number>;
+  projects_by_status: Record<string, number>;
+}
+
+// --- Keyframes ---
+export interface KeyframePlan {
+  shot_id: string;
+  seq: number;
+  has_start: boolean;
+  has_end: boolean;
+  need_gen: boolean;
+  url?: string;
+  status?: string;
+}
+
+export interface KeyframePlanResponse {
+  success: boolean;
+  project: string;
+  shot_count: number;
+  keyframes_dir: string;
+  start_frames_ready: number;
+  end_frames_ready: number;
+  to_generate: number;
+  plan: KeyframePlan[];
+}
+
+// --- Storyboard ---
+export interface StoryboardShot {
+  shot_id: string;
+  seq: number;
+  camera: string;
+  duration: string;
+  location: string;
+  emotion: string;
+  description: string;
+  dialogue_text: string;
+  storyboard?: {
+    exists: boolean;
+    url: string;
+    qc?: Record<string, unknown>;
+    success?: boolean;
+    blocked?: boolean;
+  };
+  video?: {
+    exists: boolean;
+    url: string;
+  };
+  keyframe?: {
+    start: boolean;
+    end_exists: boolean;
+    end_url: string;
+  };
+  consistency?: Record<string, unknown>;
+  coverage?: Record<string, unknown>;
+}
+
+export interface StoryboardCanvasResponse {
+  success: boolean;
+  project: string;
+  episode_no?: number;
+  episode_title?: string;
+  title?: string;
+  summary: {
+    shot_count: number;
+    storyboard_ready: number;
+    video_ready: number;
+    keyframe_end_ready: number;
+    qc_blocked: number;
+  };
+  cards: StoryboardShot[];
+  shot_order: string[];
+}
+
+// --- TTS ---
+export interface TTSEnv {
+  available: boolean;
+  reasons?: string[];
+  voices?: string[];
+  comfyui_online?: boolean;
+  qwen_tts_available?: boolean;
+  dub_dir?: string;
+}
+
+export interface TTSPlanLine {
+  shot_id: string;
+  seq: number;
+  text: string;
+  character: string;
+  voice: string;
+  duration?: number;
+  url?: string;
+  exists?: boolean;
+  out_path?: string;
+}
+
+export interface TTSPlanResponse {
+  success: boolean;
+  script_path: string;
+  script_source: string;
+  episode: number;
+  line_count: number;
+  characters: Array<{ name: string; voice: string; line_count: number }>;
+  lines: TTSPlanLine[];
+  voice_map: Record<string, unknown>;
+  out_dir: string;
+}
+
+export interface TTSTask {
+  task_id: string;
+  status: 'running' | 'completed' | 'failed';
+  progress: number;
+  phase: string;
+  message: string;
+  project_name: string;
+  total: number;
+  current: number;
+  plan?: TTSPlanResponse;
+  results?: Array<{ ok: boolean; path?: string; error?: string }>;
+}
+
+// --- Mix ---
+export interface MixEnv {
+  available: boolean;
+  reasons?: string[];
+}
+
+export interface MixPlanResponse {
+  success: boolean;
+  video_count: number;
+  audio_count: number;
+  to_generate: number;
+  lines: Array<{ video: string; audio: string; output: string }>;
+  out_dir: string;
+}
+
+export interface MixTask {
+  task_id: string;
+  status: 'running' | 'completed' | 'failed';
+  progress: number;
+  phase: string;
+  message: string;
+  project_name: string;
+  total: number;
+  current: number;
+}
+
+// --- QC ---
+export interface QCConfig {
+  enabled: boolean;
+  max_retries: number;
+  threshold: number;
+  endpoint?: string;
+}
+
+export interface QCHistoryItem {
+  shot_id: string;
+  seq: number;
+  score: number;
+  verdict: 'pass' | 'fail' | 'retry';
+  timestamp: string;
+  error?: string;
+}
+
+export interface QCResponse {
+  success: boolean;
+  config: QCConfig;
+  history: QCHistoryItem[];
+  stats?: {
+    total: number;
+    passed: number;
+    failed: number;
+    retry_count: number;
+  };
+}
+
+// --- Episodes ---
+export interface Episode {
+  episode_no: number;
+  title?: string;
+  status: 'pending' | 'producing' | 'done' | 'failed';
+  shot_count: number;
+  completed_shots: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface EpisodeListResponse {
+  success: boolean;
+  novel_id: string;
+  episodes: Episode[];
+  total: number;
+}
+
+// --- Autopilot ---
+export interface AutopilotStatus {
+  running: boolean;
+  paused: boolean;
+  current_project?: string;
+  current_episode?: number;
+  totals: {
+    episodes_done: number;
+    episodes_failed: number;
+    retries: number;
+  };
+}
+
+export interface AutopilotProgress {
+  project: string;
+  total_episodes: number;
+  done: number;
+  failed: number;
+  current_episode?: number;
+  exceptions?: Array<{ episode: number; error: string }>;
+}
+
+// --- Providers ---
+export interface Provider {
+  id: string;
+  name: string;
+  model: string;
+  base_url: string;
+  is_default: boolean;
+}
+
+export interface ProvidersResponse {
+  success: boolean;
+  providers: Provider[];
+}
+
+// --- AI Config (Unified: text / qc / chat) ---
+export interface AIConfigModule {
+  base_url: string;
+  api_key: string;    // masked on read
+  model: string;
+  updated_at: string | null;
+  has_api_key?: boolean;  // whether a real key is stored
+  key?: string;       // module key
+  label?: string;
+  desc?: string;
+  need_vision?: boolean;
+  placeholder_model?: string;
+  used_by?: string[];
+}
+
+export interface AIConfigResponse {
+  success: boolean;
+  // 后端把三个模块放在 config.modules 下（不是平铺），模块内 api_key 一律脱敏为 api_key_masked
+  config: {
+    modules: Record<string, AIConfigModule>;
+    module_order?: string[];
+    modules_meta?: Record<string, {
+      label: string;
+      desc: string;
+      need_vision: boolean;
+      placeholder_model: string;
+      used_by: string[];
+    }>;
+    config_path?: string;
+    legacy_path?: string;
+    updated_at?: string;
+    migrated_from?: string;
+    /** ComfyUI 地址的实际来源（环境变量），因此只能只读展示 */
+    comfyui?: {
+      url: string;
+      source: string;
+      editable: boolean;
+    };
+  };
+}
+
+export interface AITestResult {
+  success: boolean;
+  module: string;
+  probe: string;
+  model?: string;
+  base_url?: string;
+  response_time_ms?: number;
+  error?: string;
+  guide?: string;
+}

@@ -103,3 +103,16 @@ test_wf_clean.json
 场景生成_clean.json
 models_avail.json
 qc_config.backup_*.json
+
+# ===================== 依赖与备份快照（体积大，不入库） =====================
+# ⚠️ frontend/node_modules 有约 4000 个文件，务必不要 add
+node_modules/
+frontend/src_backup/
+
+# ===================== Agent 工作区（项目记忆/状态，非源码） =====================
+.workbuddy/
+
+# ===================== Windows 保留名残留 =====================
+# Git Bash 里 `> nul` 会真的建出一个名为 nul 的文件，而非丢弃输出
+nul
+
