@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '@/context/AppContext';
-import { projectsApi, keyframesApi, storyboardApi, ttsApi, mixApi, qcApi, exportApi, autopilotApi, upscaleApi, chatApi, agentApi } from '@/api/client';
+import { projectsApi, keyframesApi, storyboardApi, ttsApi, mixApi, qcApi, exportApi, autopilotApi, upscaleApi, chatApi, agentApi, episodesApi } from '@/api/client';
 import { Button, Loading, EmptyState } from '@/components/ui';
 import { GridPage } from '@/pages/GridPage';
 import { RelationGraphTab } from '@/components/RelationGraphTab';
@@ -11,7 +11,7 @@ import type { Project, Deliverable, UpscaleEnv, UpscaleSource, UpscaleTask, Upsc
 
 // ========== Workbench Tab Types ==========
 // 注意：'chat' 已移除 —— AI 总控改成了右侧常驻面板，不再是标签页（见 ChatPanel）
-type WorkbenchTab = 'overview' | 'keyframes' | 'ninegrid' | 'storyboard' | 'tts' | 'mix' | 'qc' | 'export' | 'deliver' | 'upscale' | 'relation' | 'audio' | 'output' | 'script';
+type WorkbenchTab = 'overview' | 'keyframes' | 'ninegrid' | 'storyboard' | 'qc' | 'upscale' | 'relation' | 'audio' | 'output';
 
 interface AssetItem {
   name: string;
@@ -73,13 +73,7 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
     { id: 'keyframes', icon: '🖼️', label: t('wb.keyframes') },
     { id: 'ninegrid', icon: '🎯', label: t('wb.ninegrid') },
     { id: 'storyboard', icon: '🎬', label: t('wb.storyboard') },
-    { id: 'tts', icon: '🎙️', label: t('wb.tts') },
-    { id: 'mix', icon: '🔊', label: t('wb.mix') },
     { id: 'qc', icon: '✅', label: t('wb.qc') },
-    { id: 'export', icon: '💾', label: t('wb.export') },
-    // 成品验收：后端 /api/autopilot/deliverables 的成片清单 + 验收/打回，
-    // 此前只有已删除的全局 DeliverPage（且它 fetch 了数据却从不渲染）
-    { id: 'deliver', icon: '📦', label: t('wb.deliver') },
     // 超分：后端 upscale_client 与其 8 个端点早已可用，但前端此前零引用 ——
     // 与已删除的孤儿页面同属「建好没入口」的能力，这里补上手工入口。
     { id: 'upscale', icon: '🔍', label: t('wb.upscale') },
@@ -89,8 +83,6 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
     { id: 'audio', icon: '🎵', label: t('wb.audio') },
     // 输出与验收：合并导出 + 成品验收
     { id: 'output', icon: '📤', label: t('wb.output') },
-    // 剧本概览：显示剧集进度和状态
-    { id: 'script', icon: '📝', label: t('wb.script') },
     // AI总控 不再是标签页 —— 已改为右侧常驻面板（默认展开，见下方 ChatPanel）
   ];
 
@@ -166,7 +158,6 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
             projectKey={projectKey}
             novelId={project.novel_id}
             onRefreshAssets={reloadAssets}
-            
           />
         )}
         {activeTab === 'keyframes' && (
@@ -177,9 +168,6 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
         )}
         {activeTab === 'storyboard' && (
           <StoryboardTab projectKey={projectKey} />
-        )}
-        {activeTab === 'script' && (
-          <ScriptOverviewTab projectKey={projectKey} novelId={project?.novel_id} />
         )}
         {activeTab === 'audio' && (
           <AudioTab projectKey={projectKey} />
@@ -257,6 +245,56 @@ function OverviewTab({
 }) {
   const [preview, setPreview] = useState<{ item: AssetItem; type: 'character' | 'item' | 'scene' } | null>(null);
 
+  // 剧本相关状态
+  const [episodes, setEpisodes] = useState<any[]>([]);
+  const [totalEpisodes, setTotalEpisodes] = useState(0);
+  const [scriptLoading, setScriptLoading] = useState(true);
+  const [scriptError, setScriptError] = useState('');
+  const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null);
+  const [episodeDetail, setEpisodeDetail] = useState<any>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState('');
+
+  // 加载剧集列表
+  useEffect(() => {
+    if (!novelId) return;
+    setScriptLoading(true);
+    episodesApi.list(novelId)
+      .then(data => {
+        setEpisodes(data.episodes || []);
+        setTotalEpisodes(data.total || 0);
+      })
+      .catch(err => {
+        setScriptError(err instanceof Error ? err.message : '加载失败');
+      })
+      .finally(() => {
+        setScriptLoading(false);
+      });
+  }, [novelId]);
+
+  // 加载单集详情
+  const loadEpisodeDetail = async (episodeNo: number) => {
+    if (!novelId) return;
+    setDetailLoading(true);
+    setDetailError('');
+    try {
+      const detail = await episodesApi.get(novelId, episodeNo);
+      setEpisodeDetail(detail);
+      setSelectedEpisode(episodeNo);
+    } catch (err) {
+      setDetailError(err instanceof Error ? err.message : '加载详情失败');
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  // 返回列表
+  const goBack = () => {
+    setSelectedEpisode(null);
+    setEpisodeDetail(null);
+    setDetailError('');
+  };
+
   const groups: { key: 'characters' | 'items' | 'scenes'; label: string; icon: string; type: 'character' | 'item' | 'scene' }[] = [
     { key: 'characters', label: '角色', icon: '👤', type: 'character' },
     { key: 'items', label: '物品', icon: '📦', type: 'item' },
@@ -265,7 +303,125 @@ function OverviewTab({
 
   const total = groups.reduce((n, g) => n + (assets?.gallery?.[g.key]?.length || 0), 0);
 
-  if (total === 0) {
+  // 显示单集详情
+  if (selectedEpisode !== null && episodeDetail && !detailError) {
+    return (
+      <div className="space-y-4">
+        <button
+          onClick={goBack}
+          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+          </svg>
+          返回列表
+        </button>
+
+        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+          <div className="flex items-start justify-between">
+            <div>
+              <h3 className="text-xl font-bold text-gray-900 dark:text-white">
+                第 {episodeDetail.episode_no} 集
+                {episodeDetail.title && <span className="ml-2 text-lg font-normal text-gray-500">{episodeDetail.title}</span>}
+              </h3>
+              {episodeDetail.chapter_title && (
+                <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">章节：{episodeDetail.chapter_title}</p>
+              )}
+            </div>
+            <span className={`px-3 py-1 rounded-full text-xs font-medium ${
+              episodeDetail.status === 'done' ? 'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400' :
+              episodeDetail.status === 'producing' ? 'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-400' :
+              episodeDetail.status === 'failed' ? 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400' :
+              'bg-gray-100 text-gray-700 dark:bg-gray-500/20 dark:text-gray-400'
+            }`}>
+              {episodeDetail.status === 'done' ? '✓ 完成' :
+               episodeDetail.status === 'producing' ? '▶ 生产中' :
+               episodeDetail.status === 'failed' ? '✗ 失败' :
+               '○ 待生产'}
+            </span>
+          </div>
+
+          <div className="mt-4 flex items-center gap-4 text-sm text-gray-500 dark:text-gray-400">
+            <span>镜头进度：{episodeDetail.completed_shots} / {episodeDetail.shot_count}</span>
+            {episodeDetail.created_at && (
+              <span>创建时间：{episodeDetail.created_at.split('T')[0]}</span>
+            )}
+          </div>
+
+          {episodeDetail.shot_count > 0 && (
+            <div className="mt-3 w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+              <div
+                className={`h-2 rounded-full transition-all ${
+                  episodeDetail.status === 'done' ? 'bg-green-500' :
+                  episodeDetail.status === 'failed' ? 'bg-red-500' :
+                  'bg-blue-500'
+                }`}
+                style={{ width: `${(episodeDetail.completed_shots / episodeDetail.shot_count) * 100}%` }}
+              ></div>
+            </div>
+          )}
+        </div>
+
+        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+          <h4 className="font-semibold text-gray-900 dark:text-white mb-4">剧本内容</h4>
+
+          {episodeDetail.script_content ? (
+            <pre className="whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-300 font-mono bg-gray-50 dark:bg-gray-900 p-4 rounded-lg">
+              {episodeDetail.script_content}
+            </pre>
+          ) : episodeDetail.shots && episodeDetail.shots.length > 0 ? (
+            <div className="space-y-4">
+              {episodeDetail.shots.map((shot: any, idx: number) => (
+                <div key={idx} className="border-l-4 border-indigo-500 pl-4 py-2">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="px-2 py-0.5 bg-indigo-100 dark:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 text-xs font-medium rounded">
+                      镜头 {shot.shot_no}
+                    </span>
+                    {shot.camera_angle && (
+                      <span className="text-xs text-gray-500 dark:text-gray-400">
+                        {shot.camera_angle}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-sm text-gray-700 dark:text-gray-300">{shot.description}</p>
+                  {shot.visual_prompt && (
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      视觉描述：{shot.visual_prompt}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-gray-500 dark:text-gray-400 text-sm">暂无剧本内容</p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (detailError) {
+    return (
+      <div className="space-y-4">
+        <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
+          {detailError}
+        </div>
+        <button onClick={goBack} className="text-sm text-indigo-600 dark:text-indigo-400 hover:underline">
+          返回列表
+        </button>
+      </div>
+    );
+  }
+
+  if (detailLoading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="text-gray-500">加载中...</div>
+      </div>
+    );
+  }
+
+  if (total === 0 && episodes.length === 0) {
     return (
       <div className="py-12 space-y-6">
         <div className="text-center text-gray-500 dark:text-gray-400">
@@ -288,29 +444,172 @@ function OverviewTab({
 
   return (
     <div className="space-y-8">
-      {groups.map((g) => {
-        const list = assets?.gallery?.[g.key] || [];
-        if (list.length === 0) return null;
-        return (
-          <div key={g.key}>
-            <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-400 mb-3">
-              {g.icon} {g.label} · {list.length}
-            </h3>
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-              {list.map((item, idx) => (
-                <AssetCard
-                  key={`${g.key}-${idx}`}
-                  item={item}
-                  type={g.type}
-                  onClick={() => setPreview({ item, type: g.type })}
-                />
-              ))}
-            </div>
-          </div>
-        );
-      })}
+      {/* 资产展示 */}
+      {total > 0 && (
+        <>
+          {groups.map((g) => {
+            const list = assets?.gallery?.[g.key] || [];
+            if (list.length === 0) return null;
+            return (
+              <div key={g.key}>
+                <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-400 mb-3">
+                  {g.icon} {g.label} · {list.length}
+                </h3>
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+                  {list.map((item, idx) => (
+                    <AssetCard
+                      key={`${g.key}-${idx}`}
+                      item={item}
+                      type={g.type}
+                      onClick={() => setPreview({ item, type: g.type })}
+                    />
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+          <AssetPreviewModal preview={preview} onClose={() => setPreview(null)} />
+        </>
+      )}
 
-      <AssetPreviewModal preview={preview} onClose={() => setPreview(null)} />
+      {/* 剧本概览 */}
+      <div className="border-t border-gray-200 dark:border-gray-700 pt-8">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
+          📝 剧本概览
+        </h3>
+
+        {scriptLoading ? (
+          <div className="flex items-center justify-center h-32">
+            <div className="text-gray-500">加载中...</div>
+          </div>
+        ) : scriptError ? (
+          <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400">
+            {scriptError}
+          </div>
+        ) : episodes.length === 0 ? (
+          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-8 text-center text-gray-500 dark:text-gray-400">
+            暂无剧集数据，请先启动自动生产
+          </div>
+        ) : (
+          <>
+            {/* 统计卡片 */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+              <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+                <div className="text-2xl font-bold text-gray-900 dark:text-white">{totalEpisodes}</div>
+                <div className="text-sm text-gray-500 dark:text-gray-400">总集数</div>
+              </div>
+              {(() => {
+                const stats = episodes.reduce((acc: any, ep: any) => {
+                  acc[ep.status] = (acc[ep.status] || 0) + 1;
+                  return acc;
+                }, {} as Record<string, number>);
+                return [
+                  { label: '已完成', count: stats['done'] || 0, color: 'text-green-500' },
+                  { label: '生产中', count: stats['producing'] || 0, color: 'text-blue-500' },
+                  { label: '失败', count: stats['failed'] || 0, color: 'text-red-500' },
+                  { label: '待生产', count: stats['pending'] || 0, color: 'text-gray-500' },
+                ].map(s => (
+                  <div key={s.label} className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+                    <div className={`text-2xl font-bold ${s.color}`}>{s.count}</div>
+                    <div className="text-sm text-gray-500 dark:text-gray-400">{s.label}</div>
+                  </div>
+                ));
+              })()}
+            </div>
+
+            {/* 进度条 */}
+            {totalEpisodes > 0 && (
+              <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 mb-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-medium text-gray-700 dark:text-gray-300">整体进度</span>
+                  <span className="text-sm text-gray-500">{Math.round(((episodes.filter((e: any) => e.status === 'done').length) / totalEpisodes) * 100)}%</span>
+                </div>
+                <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                  <div
+                    className="bg-green-500 h-2 rounded-full transition-all"
+                    style={{ width: `${((episodes.filter((e: any) => e.status === 'done').length) / totalEpisodes) * 100}%` }}
+                  ></div>
+                </div>
+              </div>
+            )}
+
+            {/* 剧集列表 */}
+            <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
+              <div className="p-4 border-b border-gray-200 dark:border-gray-700">
+                <h4 className="font-semibold text-gray-900 dark:text-white">剧集列表</h4>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">点击集数查看剧本详情</p>
+              </div>
+
+              <div className="divide-y divide-gray-200 dark:divide-gray-700">
+                {episodes.map((ep: any) => (
+                  <button
+                    key={ep.episode_no}
+                    onClick={() => loadEpisodeDetail(ep.episode_no)}
+                    className="w-full p-4 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors text-left"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <span className="flex items-center justify-center w-8 h-8 rounded-full bg-indigo-100 dark:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 text-sm font-semibold">
+                          {ep.episode_no}
+                        </span>
+                        <div>
+                          <p className="font-medium text-gray-900 dark:text-white">
+                            第 {ep.episode_no} 集
+                            {ep.chapter_title && <span className="ml-2 text-sm text-indigo-600 dark:text-indigo-400">《{ep.chapter_title}》</span>}
+                          </p>
+                          <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                            章节 {ep.chapter_index ?? ep.episode_no}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-4">
+                        <div className="text-right">
+                          <div className="text-sm text-gray-600 dark:text-gray-400">
+                            {ep.completed_shots} / {ep.shot_count} 镜头
+                          </div>
+                          {ep.created_at && (
+                            <div className="text-xs text-gray-400">{ep.created_at.split('T')[0]}</div>
+                          )}
+                        </div>
+
+                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                          ep.status === 'done' ? 'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400' :
+                          ep.status === 'producing' ? 'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-400' :
+                          ep.status === 'failed' ? 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400' :
+                          'bg-gray-100 text-gray-700 dark:bg-gray-500/20 dark:text-gray-400'
+                        }`}>
+                          {ep.status === 'done' ? '✓ 完成' :
+                           ep.status === 'producing' ? '▶ 生产中' :
+                           ep.status === 'failed' ? '✗ 失败' :
+                           '○ 待生产'}
+                        </span>
+
+                        <svg className="w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                        </svg>
+                      </div>
+                    </div>
+
+                    {ep.shot_count > 0 && (
+                      <div className="mt-3 w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5">
+                        <div
+                          className={`h-1.5 rounded-full transition-all ${
+                            ep.status === 'done' ? 'bg-green-500' :
+                            ep.status === 'failed' ? 'bg-red-500' :
+                            'bg-blue-500'
+                          }`}
+                          style={{ width: `${(ep.completed_shots / ep.shot_count) * 100}%` }}
+                        ></div>
+                      </div>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
