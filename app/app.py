@@ -2013,6 +2013,15 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
 
         for i, asset in enumerate(assets):
             name = asset.get('name', f'{asset_type}_{i+1}')
+            
+            # 物品过滤：只生成重要道具的参考图
+            if asset_type == 'item':
+                importance = asset.get('importance', '')
+                if importance and importance != '重要':
+                    logger.info(f"跳过临时道具 '{name}'（importance={importance}），不生成参考图")
+                    results.append({"name": name, "status": "skipped", "reason": f"临时道具，importance={importance}"})
+                    continue
+            
             prompt_zh = asset.get('reference_prompt_zh', asset.get('prompt_zh', asset.get('appearance', '')))
 
             with lock:

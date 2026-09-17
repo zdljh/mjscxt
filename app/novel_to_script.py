@@ -397,7 +397,7 @@ def build_bible(client, outlines: list, novel_title: str, style: str, episodes: 
   "theme": "一句话主题/卖点（30 字以内）",
   "style": "{style}",
   "characters": [{{"name": "姓名", "age": "年龄", "identity": "身份/阵营（15 字以内）", "appearance": "外貌（含发色/瞳色/标志特征，60 字以内；若上方设定库已锁定则该字段必须与锁定值逐字一致）", "outfit": "本集服装状态（20 字以内，与上集结尾一致；若本集确有换装必须体现原因）", "personality": "性格（30 字以内）", "voice_style": "配音风格（15 字以内）", "reference_prompt_zh": "中文参考图提示词：角色三视图设定图描述，60 字以内", "reference_prompt_en": "English prompt for character reference sheet, under 40 words"}}],
-  "items": [{{"name": "物品名", "category": "武器/法宝/道具/服饰", "appearance": "外观（50 字以内）", "owner": "持有人", "reference_prompt_zh": "中文参考图提示词，50 字以内", "reference_prompt_en": "English prompt, under 35 words"}}],
+  "items": [{{"name": "物品名", "category": "武器/法宝/道具/服饰", "appearance": "外观（50 字以内）", "owner": "持有人", "importance": "重要/临时（重要=后续章节会重复出现或推动剧情，临时=仅本集使用），只输出重要道具", "reference_prompt_zh": "中文参考图提示词，50 字以内", "reference_prompt_en": "English prompt, under 35 words"}}],
   "scenes": [{{"name": "场景名", "location": "地点类型", "appearance": "环境与氛围（60 字以内）", "reference_prompt_zh": "中文参考图提示词，50 字以内", "reference_prompt_en": "English prompt, under 35 words"}}],
   "production_notes": {{"style_guide": "画面与叙事风格说明（60 字以内）"}}
 }}
@@ -863,7 +863,7 @@ def convert_novel_to_script(client, novel_meta: dict, novel_text: str, style: st
                             ["name", "age", "appearance", "personality", "voice_style",
                              "reference_prompt_zh", "reference_prompt_en"])
     items = _norm_list(bible.get("items"), 6,
-                       ["name", "category", "appearance", "owner",
+                       ["name", "category", "appearance", "owner", "importance",
                         "reference_prompt_zh", "reference_prompt_en"])
     scenes = _norm_list(bible.get("scenes"), 8,
                         ["name", "location", "appearance", "reference_prompt_zh", "reference_prompt_en"])
@@ -1160,7 +1160,7 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
                             ["name", "age", "identity", "appearance", "outfit", "personality",
                              "voice_style", "reference_prompt_zh", "reference_prompt_en"])
     items = _norm_list(bible.get("items"), 6,
-                       ["name", "category", "appearance", "owner",
+                       ["name", "category", "appearance", "owner", "importance",
                         "reference_prompt_zh", "reference_prompt_en"])
     scenes = _norm_list(bible.get("scenes"), 8,
                         ["name", "location", "appearance", "reference_prompt_zh", "reference_prompt_en"])

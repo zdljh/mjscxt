@@ -15,10 +15,9 @@ interface AssetItem {
 interface OutputReviewTabProps {
   projectKey: string;
   assets: { final?: AssetItem[]; counts?: Record<string, number> } | null;
-  onGoAutopilot: () => void;
 }
 
-export function OutputReviewTab({ projectKey, assets, onGoAutopilot }: OutputReviewTabProps) {
+export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
   const { t } = useApp();
   const [exportFiles, setExportFiles] = useState<any[]>([]);
   const [deliverables, setDeliverables] = useState<Deliverable[]>([]);
@@ -237,9 +236,9 @@ export function OutputReviewTab({ projectKey, assets, onGoAutopilot }: OutputRev
           <div className="text-center py-8">
             <div className="text-4xl mb-3">📦</div>
             <p className="text-sm text-gray-500 dark:text-gray-400">暂无成片，请先运行自动生产</p>
-            <Button size="sm" variant="secondary" onClick={onGoAutopilot} className="mt-3">
-              去自动生产
-            </Button>
+            <p className="text-xs text-indigo-500 dark:text-indigo-400 mt-2">
+              请通过右侧「AI总控」下达生产指令，AI会先与您沟通生产风格
+            </p>
           </div>
         ) : (
           <div className="space-y-3">

@@ -10,6 +10,9 @@ interface ScriptOverviewTabProps {
 interface EpisodeInfo {
   episode_no: number;
   title?: string;
+  episode_title?: string;
+  chapter_index?: number;
+  chapter_title?: string;
   status: 'pending' | 'producing' | 'done' | 'failed';
   shot_count: number;
   completed_shots: number;
@@ -312,11 +315,11 @@ export function ScriptOverviewTab({ projectKey, novelId }: ScriptOverviewTabProp
                     <div>
                       <p className="font-medium text-gray-900 dark:text-white">
                         第 {ep.episode_no} 集
-                        {ep.title && <span className="ml-2 text-sm text-gray-500">{ep.title}</span>}
+                        {ep.chapter_title && <span className="ml-2 text-sm text-indigo-600 dark:text-indigo-400">《{ep.chapter_title}》</span>}
                       </p>
-                      {ep.description && (
-                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{ep.description}</p>
-                      )}
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                        章节 {ep.chapter_index ?? ep.episode_no}
+                      </p>
                     </div>
                   </div>
                   

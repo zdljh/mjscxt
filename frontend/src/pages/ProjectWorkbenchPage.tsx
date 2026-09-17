@@ -11,7 +11,7 @@ import type { Project, Deliverable, UpscaleEnv, UpscaleSource, UpscaleTask, Upsc
 
 // ========== Workbench Tab Types ==========
 // 注意：'chat' 已移除 —— AI 总控改成了右侧常驻面板，不再是标签页（见 ChatPanel）
-type WorkbenchTab = 'overview' | 'autopilot' | 'keyframes' | 'ninegrid' | 'storyboard' | 'tts' | 'mix' | 'qc' | 'export' | 'deliver' | 'upscale' | 'relation' | 'audio' | 'output' | 'script';
+type WorkbenchTab = 'overview' | 'keyframes' | 'ninegrid' | 'storyboard' | 'tts' | 'mix' | 'qc' | 'export' | 'deliver' | 'upscale' | 'relation' | 'audio' | 'output' | 'script';
 
 interface AssetItem {
   name: string;
@@ -69,7 +69,7 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
 
   const tabs: { id: WorkbenchTab; icon: string; label: string }[] = [
     { id: 'overview', icon: '📊', label: t('wb.overview') },
-    { id: 'autopilot', icon: '🤖', label: t('wb.autopilot') },
+    // 自动生产已移除独立标签页 —— 改为 AI总控 内的子功能，启动前AI会先与用户沟通风格
     { id: 'keyframes', icon: '🖼️', label: t('wb.keyframes') },
     { id: 'ninegrid', icon: '🎯', label: t('wb.ninegrid') },
     { id: 'storyboard', icon: '🎬', label: t('wb.storyboard') },
@@ -166,11 +166,8 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
             projectKey={projectKey}
             novelId={project.novel_id}
             onRefreshAssets={reloadAssets}
-            onGoAutopilot={() => setActiveTab('autopilot')}
+            
           />
-        )}
-        {activeTab === 'autopilot' && (
-          <AutopilotTab projectKey={projectKey} novelId={project.novel_id} />
         )}
         {activeTab === 'keyframes' && (
           <KeyframesTab projectKey={projectKey} />
@@ -188,7 +185,7 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
           <AudioTab projectKey={projectKey} />
         )}
         {activeTab === 'output' && (
-          <OutputReviewTab projectKey={projectKey} assets={assets} onGoAutopilot={() => setActiveTab('autopilot')} />
+          <OutputReviewTab projectKey={projectKey} assets={assets} />
         )}
         {activeTab === 'upscale' && (
           <UpscaleTab projectKey={projectKey} />
@@ -246,62 +243,19 @@ function sanitizeError(err: unknown, fallback = '操作失败，请稍后重试'
   return text.length > 160 ? `${text.slice(0, 160)}…` : text;
 }
 
-// ========== 启动全自动生产（自动生产标签 / 空项目入口共用） ==========
-interface StartResult {
-  message?: string;
-  pending_episodes?: number;
-  done_episodes?: number;
-  already_done?: boolean;
-}
-
-async function startProduction(projectKey: string, novelId?: string): Promise<StartResult> {
-  const resp = await fetch('/api/autonomous/start', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ project_name: projectKey, novel_id: novelId || '' }),
-  });
-  const data: any = await resp.json().catch(() => ({}));
-  if (!resp.ok || data?.success === false) {
-    throw new Error(data?.error || data?.message || '启动失败');
-  }
-  return data as StartResult;
-}
-
 // ========== Overview Tab ==========
 function OverviewTab({
   assets,
   projectKey,
   novelId,
   onRefreshAssets,
-  onGoAutopilot,
 }: {
   assets: ProjectAssets | null;
   projectKey: string;
   novelId?: string;
   onRefreshAssets: () => Promise<void> | void;
-  onGoAutopilot: () => void;
 }) {
   const [preview, setPreview] = useState<{ item: AssetItem; type: 'character' | 'item' | 'scene' } | null>(null);
-  const [starting, setStarting] = useState(false);
-  const [msg, setMsg] = useState('');
-  const [err, setErr] = useState('');
-
-  // 缺陷 D3：空项目此前只有一句「会自动生成」提示，却没有可点的入口
-  const handleGenerateAssets = async () => {
-    setStarting(true);
-    setMsg('');
-    setErr('');
-    try {
-      const res = await startProduction(projectKey, novelId);
-      setMsg(res.message || '生产已启动，资产将随流水线陆续生成');
-      // 生产是异步的，稍后自动回拉一次资产
-      setTimeout(() => { onRefreshAssets(); }, 5000);
-    } catch (e) {
-      setErr(sanitizeError(e, '启动生产失败'));
-    } finally {
-      setStarting(false);
-    }
-  };
 
   const groups: { key: 'characters' | 'items' | 'scenes'; label: string; icon: string; type: 'character' | 'item' | 'scene' }[] = [
     { key: 'characters', label: '角色', icon: '👤', type: 'character' },
@@ -320,18 +274,13 @@ function OverviewTab({
           <p className="text-sm mt-1">角色 / 物品 / 场景 会在生产流程中自动生成</p>
         </div>
 
-        <div className="flex flex-col items-center gap-2">
-          <Button onClick={handleGenerateAssets} disabled={starting}>
-            {starting ? '启动中…' : '开始生产（自动生成角色 / 物品 / 场景）'}
-          </Button>
-          <button
-            onClick={onGoAutopilot}
-            className="text-xs text-indigo-500 hover:underline"
-          >
-            前往「自动生产」查看进度
-          </button>
-          {msg && <p className="text-sm text-green-600 dark:text-green-400">{msg}</p>}
-          {err && <p className="text-sm text-red-500">{err}</p>}
+        <div className="text-center text-gray-500 dark:text-gray-400 py-8">
+          <div className="text-4xl mb-3">📁</div>
+          <p className="font-medium">暂无资产</p>
+          <p className="text-sm mt-2">角色 / 物品 / 场景 会在生产流程中自动生成</p>
+          <p className="text-sm mt-3 text-indigo-500 dark:text-indigo-400">
+            请通过右侧「AI总控」下达生产指令，AI会先与您沟通生产风格再启动
+          </p>
         </div>
       </div>
     );
@@ -402,7 +351,7 @@ function AssetCard({
       <div className="p-3">
         <h4 className="font-medium text-gray-900 dark:text-white text-sm truncate">{item.name}</h4>
         <p className="text-xs text-gray-500 mt-1">
-          {item.view_count ? `${item.view_count} 个视角` : fallbackIcon === '👤' ? '角色' : fallbackIcon === '📦' ? '物品' : '场景'}
+          {item.category || (item.view_count ? `${item.view_count} 个视角` : fallbackIcon === '👤' ? '角色' : fallbackIcon === '📦' ? '物品' : '场景')}
         </p>
       </div>
     </button>
@@ -488,161 +437,6 @@ function AssetPreviewModal({
           </div>
         </div>
       </div>
-    </div>
-  );
-}
-
-// ========== Autopilot Tab ==========
-function AutopilotTab({ projectKey, novelId }: { projectKey: string; novelId?: string }) {
-  const { t } = useApp();
-  const [status, setStatus] = useState<any>(null);
-  const [progress, setProgress] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [starting, setStarting] = useState(false);
-  const [notice, setNotice] = useState('');
-
-  const fetchStatus = async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const [s, p] = await Promise.all([
-        autopilotApi.status(),
-        autopilotApi.progressByProject(projectKey).catch(() => null),
-      ]);
-      setStatus(s);
-      setProgress(p);
-    } catch (err) {
-      setError(sanitizeError(err, '获取状态失败'));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const act = async (fn: () => Promise<any>) => {
-    setError('');
-    setNotice('');
-    try {
-      await fn();
-      setNotice('操作已生效');
-      await fetchStatus();
-    } catch (err) {
-      setError(sanitizeError(err, '操作失败'));
-    }
-  };
-
-  // 缺陷 D2 / D5：启动生产，并把后端返回的 message 如实展示（不再默默无反馈）
-  const handleStart = async () => {
-    setStarting(true);
-    setError('');
-    setNotice('');
-    try {
-      const res = await startProduction(projectKey, novelId);
-      setNotice(res.message || '已启动全自动生产');
-      await fetchStatus();
-    } catch (e) {
-      setError(sanitizeError(e, '启动生产失败'));
-    } finally {
-      setStarting(false);
-    }
-  };
-
-  useEffect(() => { fetchStatus(); }, [projectKey]);
-
-  return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h3 className="text-lg font-semibold">自动生产</h3>
-        <div className="flex gap-2">
-          <Button
-            size="sm"
-            onClick={handleStart}
-            disabled={starting}
-            style={{ background: 'linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)' }}
-          >
-            {starting ? '启动中…' : '启动 / 继续生产'}
-          </Button>
-          <Button size="sm" variant="secondary" onClick={fetchStatus} disabled={loading}>刷新</Button>
-        </div>
-      </div>
-
-      {notice && (
-        <div className="p-4 bg-green-500/10 border border-green-500/30 rounded-lg text-green-600 dark:text-green-400">
-          {notice}
-        </div>
-      )}
-
-      {error && <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400">{error}</div>}
-
-      {status && (
-        <div className="grid grid-cols-3 gap-4">
-          <div className={`p-4 rounded-lg text-center ${
-            status.running ? 'bg-green-500/10 border border-green-500/30' :
-            status.paused ? 'bg-yellow-500/10 border border-yellow-500/30' :
-            'bg-gray-500/10 border border-gray-500/30'
-          }`}>
-            <div className="text-3xl mb-2">{status.running ? '🚀' : status.paused ? '⏸️' : '⏹️'}</div>
-            <div className="font-bold">
-              {status.running ? '运行中' : status.paused ? '已暂停' : '已停止'}
-            </div>
-          </div>
-          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 text-center">
-            <div className="text-3xl font-bold text-green-400">{status.totals?.episodes_done || 0}</div>
-            <div className="text-sm text-gray-500 dark:text-gray-400">已完成剧集</div>
-          </div>
-          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 text-center">
-            <div className="text-3xl font-bold text-red-400">{status.totals?.episodes_failed || 0}</div>
-            <div className="text-sm text-gray-500 dark:text-gray-400">失败剧集</div>
-          </div>
-        </div>
-      )}
-
-      {progress && (
-        <div className="mb-6">
-          <div className="flex justify-between text-sm text-gray-500 dark:text-gray-400 mb-2">
-            <span>进度</span>
-            <span>{progress.done}/{progress.total_episodes}</span>
-          </div>
-          <div className="h-4 bg-gray-700 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 transition-all"
-              style={{ width: `${progress.total_episodes > 0 ? (progress.done / progress.total_episodes * 100) : 0}%` }}
-            />
-          </div>
-        </div>
-      )}
-
-      {status && (
-        <div className="flex gap-4">
-          {!status?.running && !status?.paused && (
-            <Button
-              onClick={() => act(() => autopilotApi.enable())}
-              style={{ background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)' }}
-            >启用</Button>
-          )}
-          {status?.running && (
-            <Button
-              variant="secondary"
-              onClick={() => act(() => autopilotApi.pause())}
-              style={{ background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)' }}
-            >暂停</Button>
-          )}
-          {status?.paused && (
-            <Button
-              variant="secondary"
-              onClick={() => act(() => autopilotApi.resume())}
-              style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}
-            >恢复</Button>
-          )}
-          {(status?.running || status?.paused) && (
-            <Button
-              variant="danger"
-              onClick={() => act(() => autopilotApi.disable())}
-              style={{ background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)' }}
-            >停止</Button>
-          )}
-        </div>
-      )}
     </div>
   );
 }
