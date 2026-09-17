@@ -50,7 +50,7 @@ function AppContent() {
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, []);
 
-  const PageComponent = SECTIONS[activeSection] || OverviewPage;
+  const PageComponent = useMemo(() => SECTIONS[activeSection] || OverviewPage, [activeSection]);
 
   return (
     <div className="flex h-screen bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-white">

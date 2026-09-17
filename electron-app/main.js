@@ -1,5 +1,15 @@
 // Electron 主进程 - 漫剧工坊桌面应用
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+// 兼容处理：Electron 运行时有内置 electron 模块，但 npm 包会覆盖它
+const _electronModule = require('electron');
+let electron;
+if (typeof _electronModule === 'string') {
+  // 拿到的是路径字符串，说明 npm 包干扰了，尝试从 Electron 进程获取
+  // Electron 会将内置模块暴露给子进程，通过 process 对象
+  electron = process.electronBinding ? require('electron') : _electronModule;
+} else {
+  electron = _electronModule;
+}
+const { app, BrowserWindow, ipcMain, dialog } = electron;
 const path = require('path');
 const { spawn } = require('child_process');
 

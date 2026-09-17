@@ -330,7 +330,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
                       x={(source.x + target.x) / 2}
                       y={(source.y + target.y) / 2}
                       textAnchor="middle"
-                      middle="central"
+                      dominantBaseline="middle"
                       fill="white"
                       fontSize="10"
                     >
@@ -376,7 +376,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
                 {/* 角色首字母 */}
                 <text
                   textAnchor="middle"
-                  middle="central"
+                  dominantBaseline="middle"
                   fill={isSelected ? 'white' : '#374151'}
                   fontSize="14"
                   fontWeight="bold"

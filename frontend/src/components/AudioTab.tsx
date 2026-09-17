@@ -30,8 +30,8 @@ export function AudioTab({ projectKey }: AudioTabProps) {
   const loadEnv = async () => {
     try {
       const [ttsRes, mixRes] = await Promise.all([
-        ttsApi.env(projectKey),
-        mixApi.env(projectKey),
+        ttsApi.env(),
+        mixApi.env(),
       ]);
       setTtsEnv(ttsRes);
       if (mixRes?.available) {
