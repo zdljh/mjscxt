@@ -39,6 +39,18 @@ export function ProjectsPage() {
   const [formError, setFormError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // --- 编辑项目弹窗 ---
+  const [editingProject, setEditingProject] = useState<Project | null>(null);
+  const [editName, setEditName] = useState('');
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editError, setEditError] = useState('');
+
+  // --- 删除项目弹窗 ---
+  const [deletingProject, setDeletingProject] = useState<Project | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+
   const reload = async () => {
     const [p, n] = await Promise.all([
       projectsApi.list().then(d => d.projects || []).catch(() => [] as Project[]),
@@ -145,6 +157,68 @@ export function ProjectsPage() {
     return source === 'upload' ? t('project.uploadingCreating') : t('project.creating');
   }, [submitting, source, t]);
 
+  // --- 编辑项目 ---
+  const openEditModal = (proj: Project) => {
+    setEditingProject(proj);
+    setEditName(proj.name);
+    setEditError('');
+  };
+
+  const closeEditModal = () => {
+    setEditingProject(null);
+    setEditName('');
+    setEditError('');
+    setSavingEdit(false);
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editingProject) return;
+    const newName = editName.trim();
+    if (!newName) {
+      setEditError(t('project.nameRequired'));
+      return;
+    }
+    setSavingEdit(true);
+    setEditError('');
+    try {
+      await projectsApi.rename(editingProject.dir_key || editingProject.id, newName);
+      await reload();
+      closeEditModal();
+    } catch (e) {
+      setEditError(e instanceof Error ? e.message : '保存失败');
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  // --- 删除项目 ---
+  const openDeleteModal = (proj: Project) => {
+    setDeletingProject(proj);
+    setConfirmDelete(false);
+    setDeleteError('');
+  };
+
+  const closeDeleteModal = () => {
+    setDeletingProject(null);
+    setConfirmDelete(false);
+    setDeleteError('');
+  };
+
+  const handleDelete = async () => {
+    if (!deletingProject || !confirmDelete) return;
+    setDeleting(true);
+    setDeleteError('');
+    try {
+      await projectsApi.deleteV2(deletingProject.dir_key || deletingProject.id, true);
+      await reload();
+      closeDeleteModal();
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : '删除失败');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   if (loading) return <Loading />;
 
   return (
@@ -180,19 +254,49 @@ export function ProjectsPage() {
           {projects.map((proj) => (
             <div
               key={proj.id}
-              onClick={() => { window.location.hash = `/?p=${encodeURIComponent(proj.dir_key || proj.id)}`; }}
-              className="hover:shadow-lg transition-shadow cursor-pointer group bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4"
+              className="group bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 hover:shadow-lg transition-shadow"
             >
-              <div className="aspect-video bg-gradient-to-br from-blue-100 to-purple-100 dark:from-blue-900/20 dark:to-purple-900/20 rounded-lg mb-4 flex items-center justify-center group-hover:scale-105 transition-transform">
-                <span className="text-4xl">🎬</span>
+              <div
+                className="cursor-pointer"
+                onClick={() => { window.location.hash = `/?p=${encodeURIComponent(proj.dir_key || proj.id)}`; }}
+              >
+                <div className="aspect-video bg-gradient-to-br from-blue-100 to-purple-100 dark:from-blue-900/20 dark:to-purple-900/20 rounded-lg mb-4 flex items-center justify-center group-hover:scale-105 transition-transform">
+                  <span className="text-4xl">🎬</span>
+                </div>
+                <h3 className="font-semibold text-gray-900 dark:text-white mb-1">{proj.name}</h3>
+                <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">
+                  风格: {proj.config?.style || '—'}
+                </p>
+                <div className="flex items-center justify-between text-sm">
+                  <Badge variant="info">{proj.episode_count} {t('ep.suffix')}</Badge>
+                  <span className="text-gray-400">{new Date(proj.created_at).toLocaleDateString()}</span>
+                </div>
               </div>
-              <h3 className="font-semibold text-gray-900 dark:text-white mb-1">{proj.name}</h3>
-              <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">
-                {t('project.style')}: {proj.config?.style || '—'}
-              </p>
-              <div className="flex items-center justify-between text-sm">
-                <Badge variant="info">{proj.episode_count} {t('ep.suffix')}</Badge>
-                <span className="text-gray-400">{new Date(proj.created_at).toLocaleDateString()}</span>
+
+              {/* 操作按钮 */}
+              <div className="flex gap-2 mt-3 pt-3 border-t border-gray-100 dark:border-gray-700">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setEditingProject(proj);
+                    setEditName(proj.name);
+                    setEditError('');
+                  }}
+                  className="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                >
+                  ✏️ 编辑
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setDeletingProject(proj);
+                    setConfirmDelete(false);
+                    setDeleteError('');
+                  }}
+                  className="px-3 py-1.5 text-xs font-medium rounded-lg border border-red-300 dark:border-red-700 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                >
+                  🗑️ 删除
+                </button>
               </div>
             </div>
           ))}
@@ -316,6 +420,84 @@ export function ProjectsPage() {
           </div>
         </div>
       </Modal>
+
+      {/* 编辑项目弹窗 */}
+      {editingProject && (
+        <Modal isOpen={!!editingProject} onClose={closeEditModal} title="编辑项目">
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                项目名称
+              </label>
+              <input
+                type="text"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-800 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+            {editError && (
+              <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-500 text-sm">
+                {editError}
+              </div>
+            )}
+            <div className="flex gap-3 pt-2">
+              <Button variant="secondary" onClick={closeEditModal} disabled={savingEdit}>
+                取消
+              </Button>
+              <Button onClick={handleSaveEdit} disabled={savingEdit}>
+                {savingEdit ? '保存中...' : '保存'}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* 删除项目弹窗 */}
+      {deletingProject && (
+        <Modal isOpen={!!deletingProject} onClose={closeDeleteModal} title="删除项目">
+          <div className="space-y-4">
+            <p className="text-gray-700 dark:text-gray-300">
+              确定要删除项目《<span className="font-semibold">{deletingProject.name}</span>》吗？
+            </p>
+            {!confirmDelete ? (
+              <p className="text-sm text-red-500">
+                ⚠️ 此操作会将项目及其所有产物移入回收站，可从磁盘还原。
+              </p>
+            ) : (
+              <p className="text-sm text-red-600 font-medium">
+                已确认：输入「{deletingProject.name}」以确认删除
+              </p>
+            )}
+            {deleteError && (
+              <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-500 text-sm">
+                {deleteError}
+              </div>
+            )}
+            <div className="flex gap-3 pt-2">
+              <Button variant="secondary" onClick={closeDeleteModal} disabled={deleting}>
+                取消
+              </Button>
+              {!confirmDelete ? (
+                <Button 
+                  onClick={() => setConfirmDelete(true)}
+                  className="bg-red-600 hover:bg-red-700"
+                >
+                  确认删除
+                </Button>
+              ) : (
+                <Button 
+                  onClick={handleDelete} 
+                  disabled={deleting}
+                  className="bg-red-600 hover:bg-red-700"
+                >
+                  {deleting ? '删除中...' : '确认删除'}
+                </Button>
+              )}
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

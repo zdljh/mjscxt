@@ -71,6 +71,16 @@ export const projectsApi = {
     body: JSON.stringify(data),
   }),
   delete: (id: string) => request<void>(`/projects/${id}`, { method: 'DELETE' }),
+  deleteV2: (id: string, confirm?: boolean) =>
+    request<{ success: boolean }>(`/projects/${id}/delete`, {
+      method: 'POST',
+      body: JSON.stringify({ confirm: confirm ?? true }),
+    }),
+  rename: (id: string, name: string) =>
+    request<{ success: boolean; project: Project; note?: string }>(`/projects/${id}/rename`, {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
 };
 
 // --- Novels ---

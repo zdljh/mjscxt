@@ -315,7 +315,11 @@
     "needNovelFile": "请选择要上传的小说文件",
     "creating": "创建中…",
     "uploadingCreating": "上传并创建中…",
-    "noNovelsYet": "小说库还是空的，请切到「上传新文件」导入一部"
+    "noNovelsYet": "小说库还是空的，请切到「上传新文件」导入一部",
+    "edit": "编辑",
+    "delete": "删除",
+    "confirmDelete": "确认删除",
+    "deleteWarning": "此操作会将项目及其所有产物移入回收站，可从磁盘还原"
   },
   "upload": {
     "title": "上传小说",
