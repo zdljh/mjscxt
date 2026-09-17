@@ -5,6 +5,9 @@ echo   漫剧生成系统 - Web 应用启动器
 echo ========================================
 echo.
 
+REM 设置 Python 路径（统一到 Python 3.14）
+set PYTHON=C:\Users\liujianghua\.workbuddy\binaries\python\envs\mjscxt\Scripts\python.exe
+
 REM 设置环境变量
 set COMFYUI_URL=http://127.0.0.1:8188
 set LLM_PROVIDER=anthropic
@@ -23,22 +26,22 @@ echo [OK] ComfyUI 已连接
 
 echo.
 echo [2/3] 检查依赖...
-python -c "import flask, requests, docx, pypdf, ebooklib, charset_normalizer" 2>nul
+%PYTHON% -c "import flask, requests, docx, pypdf, ebooklib, charset_normalizer" 2>nul
 if errorlevel 1 (
     echo 正在安装依赖...
     cd "%~dp0app"
-    pip install -r requirements.txt
+    %PYTHON% -m pip install -r requirements.txt
 )
 echo [OK] 依赖已就绪
 
 echo.
 echo [3/3] 启动应用（生产级 WSGI 服务器）...
-echo.
+echo Python: %PYTHON%
 echo 访问地址: http://localhost:5000
 echo 按 Ctrl+C 停止服务
 echo.
 REM 必须用 serve.py 而不是 app.py：Flask 自带开发服务器无法可靠处理小说上传
 cd "%~dp0app"
-python serve.py
+%PYTHON% serve.py
 
 pause
