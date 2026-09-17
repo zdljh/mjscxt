@@ -19,13 +19,35 @@ interface EpisodeInfo {
   expensive?: boolean;
 }
 
+interface ShotInfo {
+  shot_no: number;
+  description: string;
+  visual_prompt?: string;
+  camera_angle?: string;
+  duration?: number;
+  [key: string]: any;
+}
+
+interface EpisodeDetail extends EpisodeInfo {
+  shots?: ShotInfo[];
+  script_content?: string;
+  chapter_title?: string;
+}
+
 export function ScriptOverviewTab({ projectKey, novelId }: ScriptOverviewTabProps) {
   const { t } = useApp();
   const [episodes, setEpisodes] = useState<EpisodeInfo[]>([]);
   const [totalEpisodes, setTotalEpisodes] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  
+  // 选中的集数（查看详情）
+  const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null);
+  const [episodeDetail, setEpisodeDetail] = useState<EpisodeDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState('');
 
+  // 加载剧集列表
   useEffect(() => {
     if (!projectKey || !novelId) return;
     
@@ -43,6 +65,29 @@ export function ScriptOverviewTab({ projectKey, novelId }: ScriptOverviewTabProp
       });
   }, [projectKey, novelId]);
 
+  // 加载单集详情
+  const loadEpisodeDetail = async (episodeNo: number) => {
+    if (!novelId) return;
+    
+    setDetailLoading(true);
+    setDetailError('');
+    try {
+      const detail = await episodesApi.get(novelId, episodeNo);
+      setEpisodeDetail(detail);
+      setSelectedEpisode(episodeNo);
+    } catch (err) {
+      setDetailError(err instanceof Error ? err.message : '加载详情失败');
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  // 返回列表
+  const goBack = () => {
+    setSelectedEpisode(null);
+    setEpisodeDetail(null);
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -55,6 +100,138 @@ export function ScriptOverviewTab({ projectKey, novelId }: ScriptOverviewTabProp
     return (
       <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400">
         {error}
+      </div>
+    );
+  }
+
+  // 显示单集详情
+  if (selectedEpisode !== null && episodeDetail) {
+    return (
+      <div className="space-y-4">
+        {/* 返回按钮 */}
+        <button
+          onClick={goBack}
+          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+          </svg>
+          返回列表
+        </button>
+
+        {/* 剧集标题 */}
+        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+          <div className="flex items-start justify-between">
+            <div>
+              <h3 className="text-xl font-bold text-gray-900 dark:text-white">
+                第 {episodeDetail.episode_no} 集
+                {episodeDetail.title && <span className="ml-2 text-lg font-normal text-gray-500">{episodeDetail.title}</span>}
+              </h3>
+              {episodeDetail.chapter_title && (
+                <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">章节：{episodeDetail.chapter_title}</p>
+              )}
+            </div>
+            <span className={`px-3 py-1 rounded-full text-xs font-medium ${
+              episodeDetail.status === 'done' ? 'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400' :
+              episodeDetail.status === 'producing' ? 'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-400' :
+              episodeDetail.status === 'failed' ? 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400' :
+              'bg-gray-100 text-gray-700 dark:bg-gray-500/20 dark:text-gray-400'
+            }`}>
+              {episodeDetail.status === 'done' ? '✓ 完成' :
+               episodeDetail.status === 'producing' ? '▶ 生产中' :
+               episodeDetail.status === 'failed' ? '✗ 失败' :
+               '○ 待生产'}
+            </span>
+          </div>
+
+          {/* 进度信息 */}
+          <div className="mt-4 flex items-center gap-4 text-sm text-gray-500 dark:text-gray-400">
+            <span>镜头进度：{episodeDetail.completed_shots} / {episodeDetail.shot_count}</span>
+            {episodeDetail.created_at && (
+              <span>创建时间：{episodeDetail.created_at.split('T')[0]}</span>
+            )}
+          </div>
+
+          {/* 进度条 */}
+          {episodeDetail.shot_count > 0 && (
+            <div className="mt-3 w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+              <div
+                className={`h-2 rounded-full transition-all ${
+                  episodeDetail.status === 'done' ? 'bg-green-500' :
+                  episodeDetail.status === 'failed' ? 'bg-red-500' :
+                  'bg-blue-500'
+                }`}
+                style={{ width: `${(episodeDetail.completed_shots / episodeDetail.shot_count) * 100}%` }}
+              ></div>
+            </div>
+          )}
+        </div>
+
+        {/* 剧本内容 */}
+        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+          <h4 className="font-semibold text-gray-900 dark:text-white mb-4">剧本内容</h4>
+          
+          {episodeDetail.script_content ? (
+            <pre className="whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-300 font-mono bg-gray-50 dark:bg-gray-900 p-4 rounded-lg">
+              {episodeDetail.script_content}
+            </pre>
+          ) : episodeDetail.shots && episodeDetail.shots.length > 0 ? (
+            <div className="space-y-4">
+              {episodeDetail.shots.map((shot, idx) => (
+                <div key={idx} className="border-l-4 border-indigo-500 pl-4 py-2">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="px-2 py-0.5 bg-indigo-100 dark:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 text-xs font-medium rounded">
+                      镜头 {shot.shot_no}
+                    </span>
+                    {shot.camera_angle && (
+                      <span className="text-xs text-gray-500 dark:text-gray-400">
+                        {shot.camera_angle}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-sm text-gray-700 dark:text-gray-300">{shot.description}</p>
+                  {shot.visual_prompt && (
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      视觉描述：{shot.visual_prompt}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-gray-500 dark:text-gray-400 text-sm">暂无剧本内容</p>
+          )}
+        </div>
+
+        {/* 备注 */}
+        <div className="text-xs text-gray-500 dark:text-gray-400 text-center">
+          数据来源：continuity.py 连续剧情管理模块
+        </div>
+      </div>
+    );
+  }
+
+  // 显示剧集列表（如果详情加载失败，降级显示列表）
+  if (detailError) {
+    return (
+      <div className="space-y-4">
+        <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
+          {detailError}
+        </div>
+        <button
+          onClick={goBack}
+          className="text-sm text-indigo-600 dark:text-indigo-400 hover:underline"
+        >
+          返回列表
+        </button>
+      </div>
+    );
+  }
+
+  if (detailLoading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="text-gray-500">加载中...</div>
       </div>
     );
   }
@@ -112,6 +289,7 @@ export function ScriptOverviewTab({ projectKey, novelId }: ScriptOverviewTabProp
       <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
         <div className="p-4 border-b border-gray-200 dark:border-gray-700">
           <h4 className="font-semibold text-gray-900 dark:text-white">剧集列表</h4>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">点击集数查看剧本详情</p>
         </div>
         
         {episodes.length === 0 ? (
@@ -121,7 +299,11 @@ export function ScriptOverviewTab({ projectKey, novelId }: ScriptOverviewTabProp
         ) : (
           <div className="divide-y divide-gray-200 dark:divide-gray-700">
             {episodes.map((ep) => (
-              <div key={ep.episode_no} className="p-4 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
+              <button
+                key={ep.episode_no}
+                onClick={() => loadEpisodeDetail(ep.episode_no)}
+                className="w-full p-4 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors text-left"
+              >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <span className="flex items-center justify-center w-8 h-8 rounded-full bg-indigo-100 dark:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 text-sm font-semibold">
@@ -159,6 +341,11 @@ export function ScriptOverviewTab({ projectKey, novelId }: ScriptOverviewTabProp
                        ep.status === 'failed' ? '✗ 失败' :
                        '○ 待生产'}
                     </span>
+                    
+                    {/* 查看按钮 */}
+                    <svg className="w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
                   </div>
                 </div>
                 
@@ -175,7 +362,7 @@ export function ScriptOverviewTab({ projectKey, novelId }: ScriptOverviewTabProp
                     ></div>
                   </div>
                 )}
-              </div>
+              </button>
             ))}
           </div>
         )}

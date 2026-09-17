@@ -10,14 +10,15 @@
     <style>
       * { box-sizing: border-box; }
       body { margin: 0; font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; }
-      #root { height: 100vh; }
+      #root { height: 100vh; opacity: 0; transition: opacity 0.3s ease; }
+      #root.ready { opacity: 1; }
       /* ⚠️ 与 src/index.css 的 .fade-in 必须保持一致。
          结束帧不能残留 transform，否则会让本元素成为 position:fixed 后代
          的包含块，Modal / Toast 会被定位到屏幕之外。
          fill-mode 用 backwards（不可用 both/forwards）。 */
-      .fade-in { animation: fadeIn 0.4s cubic-bezier(0.4, 0, 0.2, 1) backwards; }
+      .fade-in { animation: fadeIn 0.3s cubic-bezier(0.4, 0, 0.2, 1) backwards; }
       @keyframes fadeIn {
-        from { opacity: 0; transform: translateY(12px); }
+        from { opacity: 0; transform: translateY(8px); }
         to { opacity: 1; }
       }
       ::-webkit-scrollbar { width: 6px; height: 6px; }

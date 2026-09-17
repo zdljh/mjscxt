@@ -93,10 +93,10 @@ TOOLS = [
     # ---------- 只读探针 ----------
     {
         "name": "get_status",
-        "description": "查询托管总览：自动生产开关、当前在做的事、待验收数、异常数。",
-        "parameters": _schema({}),
+        "description": "查询项目托管状态：自动生产开关、当前在做的事、待验收数、异常数。参数可选，不传则用当前项目上下文。",
+        "parameters": _schema({"project": _proj_prop()}),
         "risk": "safe", "expensive": False,
-        "call": lambda a, c: ("GET", "/api/autopilot/status", {}),
+        "call": lambda a, c: ("GET", f"/api/autopilot/status{_qp(a.get('project') or c.get('project'))}", {}),
     },
     {
         "name": "get_progress",

@@ -3959,7 +3959,8 @@ def api_llm_test():
 
 def _chat_project(data: dict = None, history: dict = None) -> str:
     data = data or {}
-    name = (data.get("project_name") or "").strip()
+    # ⚠️ Ưu tiên request field (project_name hoặc project), sau đó mới fallback history
+    name = (data.get("project_name") or data.get("project") or "").strip()
     if not name and isinstance(history, dict):
         name = (history.get("active_project") or "").strip()
     return ai_chat.project_key(name or "default")
@@ -6292,7 +6293,8 @@ def _handle_bad_request(e):
 @_autopilot_guard
 def api_autopilot_status():
     """托管总览：开关状态、当前在做什么、待验收数、异常数、24h 生产曲线"""
-    return jsonify({"success": True, **autopilot.status()})
+    project = request.args.get("project", "").strip()
+    return jsonify({"success": True, **autopilot.status(project)})
 
 
 @app.route('/api/autopilot/ready', methods=['GET'])

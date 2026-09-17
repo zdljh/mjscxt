@@ -850,8 +850,10 @@ def _produce(project: str, plan: dict, pick: dict) -> None:
 # ===================== 对外状态 =====================
 
 
-def status() -> dict:
-    """托管总览（前端主视图据此渲染）"""
+def status(project: str = "") -> dict:
+    """托管总览（前端主视图据此渲染）
+    若传入 project，则只返回该项目状态；否则聚合所有项目。
+    """
     _restore_once()
     with _LOCK:
         st = json.loads(json.dumps(_STATE, ensure_ascii=False, default=str))
@@ -859,7 +861,10 @@ def status() -> dict:
     enabled = [p for p in plans if p.get("enabled")]
     deliveries = []
     exceptions = []
+    target_projects = [project] if project else [p["project"] for p in plans]
     for p in plans:
+        if project and p["project"] != project:
+            continue
         try:
             deliveries.extend(pipeline_list_deliverables(p["project"]))
             exceptions.extend(pipeline_list_dead(p["project"]))
