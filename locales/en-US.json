@@ -445,7 +445,11 @@
     "qc": "QC",
     "export": "Export",
     "deliver": "Final Cut Review",
-    "upscale": "Upscale"
+    "upscale": "Upscale",
+    "relation": "Relations",
+    "audio": "Audio",
+    "output": "Output & Review",
+    "script": "Script Overview"
   },
   "settings": {
     "title": "Settings",

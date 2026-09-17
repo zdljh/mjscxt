@@ -67,25 +67,26 @@ function startFlask() {
   }, 2000);
 }
 
-// IPC handlers
-ipcMain.handle('get-app-info', () => {
-  return {
-    version: app.getVersion(),
-    platform: process.platform,
-    pythonPath: process.env.PYTHON_PATH || 'python'
-  };
-});
-
-ipcMain.handle('open-dialog', async (event, options) => {
-  const result = await dialog.showOpenDialog(mainWindow, options);
-  return result;
-});
-
-ipcMain.handle('show-message-box', async (event, options) => {
-  return dialog.showMessageBox(mainWindow, options);
-});
-
+// 必须在 app.whenReady() 回调内使用 ipcMain
 app.whenReady().then(() => {
+  // IPC handlers
+  ipcMain.handle('get-app-info', () => {
+    return {
+      version: app.getVersion(),
+      platform: process.platform,
+      pythonPath: process.env.PYTHON_PATH || 'python'
+    };
+  });
+
+  ipcMain.handle('open-dialog', async (event, options) => {
+    const result = await dialog.showOpenDialog(mainWindow, options);
+    return result;
+  });
+
+  ipcMain.handle('show-message-box', async (event, options) => {
+    return dialog.showMessageBox(mainWindow, options);
+  });
+
   startFlask();
   createWindow();
 

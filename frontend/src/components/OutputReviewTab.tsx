@@ -1,0 +1,361 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import { useApp } from '@/context/AppContext';
+import { exportApi, autopilotApi } from '@/api/client';
+import { Button, Loading } from '@/components/ui';
+import type { Deliverable } from '@/types';
+
+interface AssetItem {
+  name: string;
+  url?: string;
+  file?: string;
+  size?: number;
+  [key: string]: any;
+}
+
+interface OutputReviewTabProps {
+  projectKey: string;
+  assets: { final?: AssetItem[]; counts?: Record<string, number> } | null;
+  onGoAutopilot: () => void;
+}
+
+export function OutputReviewTab({ projectKey, assets, onGoAutopilot }: OutputReviewTabProps) {
+  const { t } = useApp();
+  const [exportFiles, setExportFiles] = useState<any[]>([]);
+  const [deliverables, setDeliverables] = useState<Deliverable[]>([]);
+  const [pending, setPending] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [busy, setBusy] = useState<number | null>(null);
+  const [rejecting, setRejecting] = useState<number | null>(null);
+  const [reason, setReason] = useState('');
+  const [playing, setPlaying] = useState<string | null>(null);
+  const [toast, setToast] = useState('');
+
+  const loadAll = useCallback(async () => {
+    if (!projectKey) return;
+    setLoading(true);
+    try {
+      const [exportRes, deliverRes] = await Promise.all([
+        exportApi.listFiles(projectKey),
+        autopilotApi.deliverables(projectKey),
+      ]);
+      setExportFiles(exportRes?.files || []);
+      setDeliverables(deliverRes?.items || []);
+      setPending(deliverRes?.pending || 0);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '加载失败');
+    } finally {
+      setLoading(false);
+    }
+  }, [projectKey]);
+
+  useEffect(() => { void loadAll(); }, [loadAll]);
+
+  const handleGenerate = async () => {
+    setGenerating(true);
+    setError('');
+    setNotice('');
+    try {
+      const data = await exportApi.generate(projectKey, ['fcpml', 'edl', 'json']);
+      setExportFiles(data.files || []);
+      if (typeof data.shot_count === 'number' && data.shot_count === 0) {
+        setNotice('导出文件已生成，但本项目还没有分镜／视频，导出内容为空');
+      } else if (typeof data.shot_count === 'number') {
+        setNotice(`导出文件已生成，共 ${data.shot_count} 个镜头（约 ${data.total_sec ?? 0} 秒）`);
+      } else {
+        setNotice('导出文件已生成');
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '生成失败');
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const review = async (episodeNo: number, verdict: 'accepted' | 'rejected', note = '') => {
+    setBusy(episodeNo);
+    setError('');
+    try {
+      await autopilotApi.reviewDeliverable({
+        project: projectKey,
+        episode_no: episodeNo,
+        review: verdict,
+        note,
+      });
+      setToast(verdict === 'accepted' ? t('deliver.acceptedOk') : t('deliver.rejectedOk'));
+      setRejecting(null);
+      setReason('');
+      await loadAll();
+      window.setTimeout(() => setToast(''), 3200);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t('deliver.actionFailed'));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const sizeText = (n?: number) => (n ? `${(n / 1048576).toFixed(1)} MB` : '—');
+
+  const statusBadge = (d: Deliverable) => {
+    if (d.review === 'accepted') {
+      return { text: t('deliver.accepted'), cls: 'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-300' };
+    }
+    if (d.review === 'rejected') {
+      return { text: t('deliver.rejected'), cls: 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-300' };
+    }
+    return { text: t('deliver.pending'), cls: 'bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300' };
+  };
+
+  const triggerDownload = (url: string, filename?: string) => {
+    const a = document.createElement('a');
+    a.href = url;
+    if (filename) a.download = filename;
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const finals = assets?.final || [];
+
+  if (loading) return <Loading />;
+
+  return (
+    <div className="space-y-6">
+      {/* 页面标题 */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">输出与验收</h3>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
+            导出工程文件 & 验收成片
+          </p>
+        </div>
+        <Button size="sm" variant="secondary" onClick={loadAll} disabled={loading || busy !== null}>
+          {t('common.refresh')}
+        </Button>
+      </div>
+
+      {error && (
+        <div className="p-3 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-lg text-sm text-red-700 dark:text-red-300">
+          {error}
+        </div>
+      )}
+      {toast && (
+        <div className="p-3 bg-green-50 dark:bg-green-500/10 border border-green-200 dark:border-green-500/30 rounded-lg text-sm text-green-700 dark:text-green-300">
+          {toast}
+        </div>
+      )}
+
+      {/* 区域 1: 导出配置 */}
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+        <h4 className="font-semibold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
+          <span>🎬</span> 导出配置
+        </h4>
+        
+        <div className="flex gap-2 mb-4">
+          <Button onClick={handleGenerate} disabled={generating}>
+            {generating ? '生成中...' : '生成导出文件'}
+          </Button>
+        </div>
+
+        {notice && (
+          <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-green-600 dark:text-green-400 text-sm mb-4">
+            {notice}
+          </div>
+        )}
+
+        {/* 成片下载 */}
+        <div className="mb-4">
+          <h5 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+            📁 成片清单 · {finals.length}
+          </h5>
+          {finals.length > 0 ? (
+            <div className="space-y-2">
+              {finals.map((item, idx) => (
+                <div key={idx} className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-700/50 rounded">
+                  <div className="min-w-0">
+                    <p className="font-medium text-gray-900 dark:text-white truncate text-sm">{item.name}</p>
+                    {item.size && <p className="text-xs text-gray-500">{sizeText(item.size)}</p>}
+                  </div>
+                  <div className="flex gap-2 shrink-0">
+                    <Button size="sm" variant="secondary" onClick={() => window.open(item.url, '_blank')}>
+                      预览
+                    </Button>
+                    <Button size="sm" onClick={() => triggerDownload(`${item.url}?download=1`, item.name)}>
+                      下载
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500 dark:text-gray-400 py-2">暂无成片，请先完成视频生成</p>
+          )}
+        </div>
+
+        {/* 剪辑工程文件 */}
+        <div>
+          <h5 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+            🎞️ 工程文件 · {exportFiles.filter(f => f.exists).length}
+          </h5>
+          {exportFiles.filter(f => f.exists).length > 0 ? (
+            <div className="space-y-2">
+              {exportFiles.filter(f => f.exists).map((file: any, idx: number) => (
+                <div key={idx} className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-700/50 rounded">
+                  <div className="min-w-0">
+                    <p className="font-medium text-gray-900 dark:text-white truncate text-sm">{file.filename}</p>
+                    <p className="text-xs text-gray-500">{String(file.format || '').toUpperCase()}</p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => triggerDownload(`/api/export/${encodeURIComponent(projectKey)}/${file.format}`, file.filename)}
+                  >
+                    下载
+                  </Button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500 dark:text-gray-400 py-2">暂无导出文件</p>
+          )}
+        </div>
+      </div>
+
+      {/* 区域 2: 成片验收 */}
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+        <h4 className="font-semibold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
+          <span>📦</span> 成片验收
+          <span className="ml-auto text-xs font-normal text-gray-500">
+            待验收: {pending} / 共 {deliverables.length} 集
+          </span>
+        </h4>
+
+        {deliverables.length === 0 ? (
+          <div className="text-center py-8">
+            <div className="text-4xl mb-3">📦</div>
+            <p className="text-sm text-gray-500 dark:text-gray-400">暂无成片，请先运行自动生产</p>
+            <Button size="sm" variant="secondary" onClick={onGoAutopilot} className="mt-3">
+              去自动生产
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {deliverables.map((d) => {
+              const b = statusBadge(d);
+              const canReview = busy === null;
+              const playable = !!d.url && d.exists !== false;
+              return (
+                <div
+                  key={`${d.project}-${d.episode_no}`}
+                  className="border border-gray-200 dark:border-gray-700 rounded-lg p-3"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-semibold text-gray-900 dark:text-white">
+                          第 {d.episode_no} 集
+                        </span>
+                        {d.meta?.title && (
+                          <span className="text-sm text-gray-500 dark:text-gray-400">{d.meta.title}</span>
+                        )}
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${b.cls}`}>{b.text}</span>
+                        {d.exists === false && (
+                          <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-300">
+                            文件缺失
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        {d.filename} · {sizeText(d.size)}
+                      </p>
+                      {d.review === 'rejected' && d.review_note && (
+                        <p className="text-xs text-gray-600 dark:text-gray-300 mt-1">
+                          打回原因: {d.review_note}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="flex gap-2 shrink-0">
+                      {playable && (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => setPlaying(playing === d.filename ? null : d.filename)}
+                          >
+                            {playing === d.filename ? '关闭' : '播放'}
+                          </Button>
+                          <a
+                            href={`${d.url}?download=1`}
+                            className="inline-flex items-center px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                          >
+                            下载
+                          </a>
+                        </>
+                      )}
+                      <Button
+                        size="sm"
+                        onClick={() => review(d.episode_no, 'accepted')}
+                        disabled={!canReview || d.review === 'accepted'}
+                      >
+                        通过
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => {
+                          setRejecting(rejecting === d.episode_no ? null : d.episode_no);
+                          setReason('');
+                        }}
+                        disabled={!canReview || d.review === 'rejected'}
+                      >
+                        打回
+                      </Button>
+                    </div>
+                  </div>
+
+                  {playing === d.filename && d.url && (
+                    <video src={d.url} controls className="w-full mt-3 rounded-lg bg-black" />
+                  )}
+
+                  {rejecting === d.episode_no && (
+                    <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700 space-y-2">
+                      <label className="block text-xs text-gray-600 dark:text-gray-300">
+                        打回原因
+                      </label>
+                      <textarea
+                        value={reason}
+                        onChange={(e) => setReason(e.target.value)}
+                        rows={2}
+                        placeholder="请输入打回原因..."
+                        className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-900 text-gray-900 dark:text-white"
+                      />
+                      <div className="flex gap-2">
+                        <Button size="sm" onClick={() => review(d.episode_no, 'rejected', reason)} disabled={!canReview}>
+                          确认打回
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => {
+                            setRejecting(null);
+                            setReason('');
+                          }}
+                        >
+                          取消
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

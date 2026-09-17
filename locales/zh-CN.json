@@ -445,7 +445,11 @@
     "qc": "质检",
     "export": "导出",
     "deliver": "成品验收",
-    "upscale": "超分"
+    "upscale": "超分",
+    "relation": "角色关系",
+    "audio": "声音处理",
+    "output": "输出与验收",
+    "script": "剧本概览"
   },
   "settings": {
     "title": "设置",

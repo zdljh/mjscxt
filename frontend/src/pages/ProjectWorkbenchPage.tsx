@@ -3,11 +3,15 @@ import { useApp } from '@/context/AppContext';
 import { projectsApi, keyframesApi, storyboardApi, ttsApi, mixApi, qcApi, exportApi, autopilotApi, upscaleApi, chatApi, agentApi } from '@/api/client';
 import { Button, Loading, EmptyState } from '@/components/ui';
 import { GridPage } from '@/pages/GridPage';
+import { RelationGraphTab } from '@/components/RelationGraphTab';
+import { OutputReviewTab } from '@/components/OutputReviewTab';
+import { ScriptOverviewTab } from '@/components/ScriptOverviewTab';
+import { AudioTab } from '@/components/AudioTab';
 import type { Project, Deliverable, UpscaleEnv, UpscaleSource, UpscaleTask, UpscaleArtifact, AgentStep } from '@/types';
 
 // ========== Workbench Tab Types ==========
 // 注意：'chat' 已移除 —— AI 总控改成了右侧常驻面板，不再是标签页（见 ChatPanel）
-type WorkbenchTab = 'overview' | 'autopilot' | 'keyframes' | 'ninegrid' | 'storyboard' | 'tts' | 'mix' | 'qc' | 'export' | 'deliver' | 'upscale';
+type WorkbenchTab = 'overview' | 'autopilot' | 'keyframes' | 'ninegrid' | 'storyboard' | 'tts' | 'mix' | 'qc' | 'export' | 'deliver' | 'upscale' | 'relation' | 'audio' | 'output' | 'script';
 
 interface AssetItem {
   name: string;
@@ -79,6 +83,14 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
     // 超分：后端 upscale_client 与其 8 个端点早已可用，但前端此前零引用 ——
     // 与已删除的孤儿页面同属「建好没入口」的能力，这里补上手工入口。
     { id: 'upscale', icon: '🔍', label: t('wb.upscale') },
+    // 角色关系图：后端 API 早已完整实现，前端此前缺失可视化组件
+    { id: 'relation', icon: '🔗', label: t('wb.relation') },
+    // 声音处理：合并 TTS 配音 + 音画混音 + 音频质检
+    { id: 'audio', icon: '🎵', label: t('wb.audio') },
+    // 输出与验收：合并导出 + 成品验收
+    { id: 'output', icon: '📤', label: t('wb.output') },
+    // 剧本概览：显示剧集进度和状态
+    { id: 'script', icon: '📝', label: t('wb.script') },
     // AI总控 不再是标签页 —— 已改为右侧常驻面板（默认展开，见下方 ChatPanel）
   ];
 
@@ -186,6 +198,18 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
         )}
         {activeTab === 'upscale' && (
           <UpscaleTab projectKey={projectKey} />
+        )}
+        {activeTab === 'relation' && (
+          <RelationGraphTab projectKey={projectKey} />
+        )}
+        {activeTab === 'audio' && (
+          <AudioTab projectKey={projectKey} />
+        )}
+        {activeTab === 'output' && (
+          <OutputReviewTab projectKey={projectKey} assets={assets} onGoAutopilot={() => setActiveTab('autopilot')} />
+        )}
+        {activeTab === 'script' && (
+          <ScriptOverviewTab projectKey={projectKey} novelId={project?.novel_id} />
         )}
           </div>
         </div>
