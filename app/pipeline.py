@@ -92,7 +92,7 @@ DEFAULT_CONFIG = {
     # 绝不把已经跑通的成片拖成失败。
     "enable_upscale": True,
     "upscale_scale": 2,            # 超分倍率，FlashVSR 支持 2 / 3 / 4
-    "video_mode": "per_shot",      # per_shot（带质检门禁）/ episode / keyframe
+    "video_mode": "episode",       # episode（整集一次生成，连续无缝）/ per_shot（逐镜独立）/ keyframe
     # 关键帧「跨镜链式」：auto=同场景才串 / always=无条件串 / off=关闭。
     # 上一镜尾帧作为下一镜首帧参考，镜与镜首尾相接，避免每镜各画各的。
     "keyframe_chain_mode": "auto",

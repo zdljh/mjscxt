@@ -87,7 +87,7 @@ PLAN_DEFAULTS = {
     # ---- 传给 pipeline 的生产配置 ----
     "style": "",
     "target_shots": 12,
-    "video_mode": "per_shot",
+    "video_mode": "episode",
     "enable_assets": True,
     "enable_keyframe": False,
     "enable_video": True,
