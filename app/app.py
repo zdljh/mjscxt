@@ -27,7 +27,8 @@ from config import (
     TE_UPSCALE_DEFAULT_PARAMS, TE_UPSCALE_LOWVRAM_PARAMS, UPSCALE_ENGINE,
     DUB_DIR, TTS_DEFAULT_PARAMS, H3_STRIP_AUDIO,
     DUB_MIX_DIR, MIX_DEFAULT_PARAMS, CONTINUITY_DIR,
-    TASKS_DB_PATH, TASK_QUEUE_CONCURRENCY, TASK_UNIT_MIN_BYTES
+    TASKS_DB_PATH, TASK_QUEUE_CONCURRENCY, TASK_UNIT_MIN_BYTES,
+    KEYFRAME_CHAIN_MODE,
 )
 from script_generator import ScriptGenerator
 from comfyui_client import ComfyUIClient
@@ -43,6 +44,7 @@ from llm_client import (
 )
 import ai_config
 import ai_chat
+import agent_core
 import novel_to_script
 import analytics
 import autopilot
@@ -89,6 +91,8 @@ from relation_manager import RelationManager, RelationConflictDetector
 from nine_grid_storyboard import NineGridStoryboard
 
 app = Flask(__name__)
+# 总控 AI 自主执行内核：注入 Flask 实例，工具调用走进程内直连（不走网络/不绑端口）
+agent_core.bind_app(app)
 CORS(app)
 
 # 服务配置（可通过环境变量覆盖：APP_HOST / APP_PORT / APP_DEBUG）
@@ -1171,13 +1175,18 @@ def api_keyframes_plan():
                         "project": project}), 404
     kf_dir = _keyframes_dir(project, episode_no)
     sb_map = _keyframe_sb_map(project, script, episode_no=episode_no)
+    chain_mode = keyframe.norm_chain_mode(
+        request.args.get('chain_mode') or config.KEYFRAME_CHAIN_MODE)
     plan = keyframe.plan_keyframes(shots, sb_map, kf_dir,
-                                  only_missing=(request.args.get('only_missing', '1') != '0'))
+                                   only_missing=(request.args.get('only_missing', '1') != '0'),
+                                   chain_mode=chain_mode)
     return jsonify({"success": True, "project": project,
                     "shot_count": len(shots),
                     "keyframes_dir": kf_dir,
+                    "chain_mode": chain_mode,
                     "start_frames_ready": sum(1 for p in plan if p["has_start"]),
                     "end_frames_ready": sum(1 for p in plan if p["has_end"]),
+                    "chained_count": sum(1 for p in plan if p.get("chained")),
                     "to_generate": sum(1 for p in plan if p["need_gen"]),
                     "plan": plan})
 
@@ -1200,9 +1209,14 @@ def api_keyframes_generate():
     only_missing = bool(data.get('only_missing', True))
     seed = data.get('seed')
     timeout = int(data.get('timeout') or 900)
+    chain_mode = keyframe.norm_chain_mode(
+        data.get('chain_mode') or config.KEYFRAME_CHAIN_MODE)
 
     task_id = f"keyframe_{project}_{int(time.time())}"
-    plan = keyframe.plan_keyframes(shots, sb_map, kf_dir, only_missing=only_missing)
+    plan = keyframe.plan_keyframes(shots, sb_map, kf_dir, only_missing=only_missing,
+                                   chain_mode=chain_mode)
+    # 尾帧质检（可选）：默认跟随图片质检开关，不达标换 seed 重画，仍不通过则本镜判失败
+    _kf_verify, _kf_vretries = _keyframe_qc_verifier(project)
     with lock:
         generation_state[task_id] = {
             "status": "running", "progress": 0, "phase": "关键帧尾帧生成",
@@ -1248,7 +1262,9 @@ def api_keyframes_generate():
         try:
             report = keyframe.generate_keyframes(
                 shots, sb_map, kf_dir, seed=seed, timeout=timeout,
-                only_missing=only_missing, progress_cb=_progress)
+                only_missing=only_missing, progress_cb=_progress,
+                chain_mode=chain_mode, verify_cb=_kf_verify,
+                max_verify_retries=_kf_vretries)
             ok = int(report.get("succeeded") or 0)
             with lock:
                 generation_state[task_id].update({
@@ -1272,7 +1288,8 @@ def api_keyframes_generate():
     th.start()
     return jsonify({"success": True, "task_id": task_id, "status": "started",
                     "total": len([p for p in plan if p["need_gen"]]),
-                    "keyframes_dir": kf_dir})
+                    "keyframes_dir": kf_dir, "chain_mode": chain_mode,
+                    "qc_enabled": bool(_kf_verify)})
 
 
 @app.route('/api/keyframes/file/<path:filename>')
@@ -2756,6 +2773,9 @@ def api_generate_videos():
                                  f"（仅支持 per_shot / episode / keyframe）"}), 400
     timeout_per_segment = int(data.get('timeout_per_segment') or 900)
     episode_tag = str(data.get('episode_tag') or '').strip()
+    # 跨镜链式：上一镜尾帧 = 下一镜首帧（auto / always / off，默认取 config.KEYFRAME_CHAIN_MODE）
+    chain_mode = keyframe.norm_chain_mode(
+        data.get('chain_mode') or config.KEYFRAME_CHAIN_MODE)
 
     if not shots:
         return jsonify({"error": "没有镜头数据"}), 400
@@ -2780,6 +2800,7 @@ def api_generate_videos():
         args=(task_id, project_name, shots, character_refs, scene_refs,
               storyboards, use_storyboard, mode, timeout_per_segment, episode_tag,
               data.get('episode_no')),
+        kwargs={"chain_mode": chain_mode},
     )
     thread.daemon = True
     thread.start()
@@ -2790,7 +2811,8 @@ def api_generate_videos():
 
 def _video_generate_worker(task_id, project_name, shots, character_refs,
                           scene_refs, storyboards, use_storyboard, mode,
-                          timeout_per_segment, episode_tag, episode_no=None):
+                          timeout_per_segment, episode_tag, episode_no=None,
+                          chain_mode="auto"):
     """逐镜/整集/关键帧三种模式的视频生成（后台任务体，可被路由与流水线复用）
 
     从 /api/videos/generate 抽出的模块级实现：原闭包变量（项目名、镜头、参考图、
@@ -2823,7 +2845,9 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
         app.logger.info(f"分镜图参考映射: {sorted(sb_map.keys())}")
 
         # 关键帧驱动模式：取该项目尾帧目录，并按镜登记 [首帧, 尾帧]
+        # 首帧支持跨镜链式（上一镜尾帧 = 下一镜首帧），见 keyframe.plan_keyframes
         kf_end_map = {}
+        kf_start_map = {}
         if mode == 'keyframe':
             kf_dir = _ep_dir(os.path.join(KEYFRAMES_DIR, project_name), episode_no)
             for i, _s in enumerate(shots):
@@ -2833,7 +2857,12 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                 if os.path.isfile(_end):
                     kf_end_map[str(_sid)] = _end
                     kf_end_map[f"shot_{_seq:02d}"] = _end
-            app.logger.info(f"[keyframe] 尾帧就绪 {len(set(kf_end_map.values()))}/{len(shots)} 镜")
+            _cm = keyframe.norm_chain_mode(chain_mode if chain_mode is not None
+                                           else config.KEYFRAME_CHAIN_MODE)
+            kf_start_map = keyframe.resolve_start_map(
+                shots, sb_map, kf_dir, chain_mode=_cm)
+            app.logger.info(f"[keyframe] 尾帧就绪 {len(set(kf_end_map.values()))}/{len(shots)} 镜"
+                            f"；链式模式 {_cm}，串帧 {sum(1 for v in kf_start_map.values() if v) // 2} 镜")
 
         def _shot_segment(shot, seq):
             """把一个分镜转成 H3 工作流的一个「段」（提示词 + 时长 + 参考图）
@@ -2846,8 +2875,11 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
             if mode == 'keyframe' and sb_local:
                 sb_local = sb_map.get(_norm_shot_key(seq)) or sb_map.get(
                     f"shot_{seq:02d}") or sb_local
+                # 链式首帧优先：上一镜尾帧（resolve_start_map 已按同场景判定回退）
+                start_p = (kf_start_map.get(str(sid))
+                           or kf_start_map.get(f"shot_{seq:02d}") or sb_local)
                 end_p = kf_end_map.get(str(sid)) or kf_end_map.get(f"shot_{seq:02d}")
-                refs = [sb_local] + ([end_p] if end_p else [])
+                refs = [start_p] + ([end_p] if end_p else [])
                 prompt = comfyui_client._build_h3_prompt(
                     shot, character_refs, scene_refs,
                     storyboard_ref={"name": f"shot_{sid}"})
@@ -4256,6 +4288,37 @@ def _qc_shot_desc(shot: dict) -> str:
     if shot.get("dialogue"):
         parts.append(f"台词：{str(shot['dialogue']).strip()[:80]}")
     return "；".join(parts)[:600] or "（无镜头描述）"
+
+
+def _keyframe_qc_verifier(project_name: str):
+    """尾帧质检回调（供 keyframe.generate_keyframes 的 verify_cb 注入）
+
+    返回 (verify_cb, max_retries)；质检未开启或不可用时返回 (None, 0)，
+    此时尾帧链路与旧行为完全一致（不做任何质检）。
+
+    背景：尾帧此前**完全不经过质检**（只有分镜图走），而链式模式下尾帧会直接
+    成为下一镜的首帧，一张坏图会顺着链污染后面所有镜——必须拦在源头。
+    """
+    try:
+        cfg = _qc_load_cfg()
+    except Exception:  # noqa: BLE001
+        return None, 0
+    if not (cfg.get("enabled") and cfg.get("image_enabled")
+            and cfg.get("keyframe_qc_enabled", True)):
+        return None, 0
+    if not qc_client.image_qc_ready(cfg):
+        return None, 0
+
+    def _verify(path: str, shot: dict, item: dict):
+        desc = (_qc_shot_desc(shot)
+                + f"；本图是该镜的「尾帧」（动作结束瞬间），"
+                  f"须与首帧保持同一人物、同一服装、同一场景与同一画风"
+                + ("，且须承接上一镜尾帧的画面" if item.get("chained") else ""))
+        verdict = qc_client.check_image(path, desc, cfg)
+        gate = _qc_gate(verdict)
+        return bool(gate.get("accept")), gate.get("reason") or ""
+
+    return _verify, min(2, int(cfg.get("max_retries") or 0))
 
 
 def _qc_record(project_name: str, kind: str, shot_id, payload: dict) -> str:
@@ -7274,6 +7337,135 @@ def api_memory_trends():
 if __name__ == '__main__':
     app.logger.info(f"漫剧生成系统启动: http://{APP_HOST}:{APP_PORT} (debug={APP_DEBUG})")
     app.run(host=APP_HOST, port=APP_PORT, debug=APP_DEBUG, threaded=True)
+
+
+# ===================== 总控 AI 自主执行（function-calling agent） =====================
+#
+# 与 /api/ai/chat 的区别：
+#   /api/ai/chat      —— 只聊天 + 抽取创作设定，不执行任何生产动作
+#   /api/agent/chat   —— 由模型自己决定调用哪些工具，直接把活干完（无人确认）
+#
+# 安全不靠弹窗，靠 agent_core 里的自动护栏：工具白名单 / 昂贵动作配额 /
+# 步数上限 / 同参数冷却 / 全局急停 / 单项目互斥 / 审计日志。
+
+@app.route('/api/agent/tools', methods=['GET'])
+def api_agent_tools():
+    """列出总控 AI 可调用的工具与当前护栏状态（供前端展示能力边界）"""
+    return jsonify({
+        "success": True,
+        "count": len(agent_core.TOOLS),
+        "tools": agent_core.tool_index(),
+        "guards": {
+            "max_steps": agent_core.MAX_STEPS,
+            "max_expensive": agent_core.MAX_EXPENSIVE,
+            "max_turn_sec": agent_core.MAX_TURN_SEC,
+            "cooldown_sec": agent_core.COOLDOWN_SEC,
+        },
+        "kill": agent_core.kill_state(),
+    })
+
+
+@app.route('/api/agent/kill', methods=['GET', 'POST'])
+def api_agent_kill():
+    """急停开关：一键中止所有正在跑的总控动作（无人值守时的刹车）"""
+    if request.method == 'GET':
+        return jsonify({"success": True, "kill": agent_core.kill_state()})
+    data = request.json or {}
+    on = bool(data.get("on", True))
+    reason = str(data.get("reason") or "").strip() or ("手动急停" if on else "")
+    return jsonify({"success": True, "kill": agent_core.set_kill(on, reason)})
+
+
+@app.route('/api/agent/chat', methods=['POST'])
+def api_agent_chat():
+    """下发一条自然语言指令，总控 AI 自主决策并执行（异步任务，返回 job_id 供轮询）"""
+    data = request.json or {}
+    message = str(data.get("message") or "").strip()
+    if not message:
+        return jsonify({"success": False, "error": "message 不能为空"}), 400
+    if len(message) > ai_chat.MAX_CHARS_PER_MESSAGE:
+        message = message[:ai_chat.MAX_CHARS_PER_MESSAGE]
+
+    history = ai_chat.load_history(AI_CHAT_HISTORY_PATH)
+    # ⚠️ _chat_project 只认 project_name，而本接口/前端传的是 project。
+    # 不转换的话总控会静默落到「上一个活跃项目」上，把 A 项目的指令干到 B 项目头上。
+    _explicit = (data.get("project_name") or data.get("project") or "").strip()
+    project = _chat_project({"project_name": _explicit} if _explicit else (data or {}), history)
+
+    cfg = ai_config.load_config(AI_CONFIG_PATH, LLM_CONFIG_PATH)
+    ep = ai_config.get_module(cfg, "chat")
+    if not (ep.get("base_url") and ep.get("api_key") and ep.get("model")):
+        return jsonify({
+            "success": False,
+            "error": "「对话总控模型」尚未配置（base_url / api_key / model），总控无法自主执行",
+            "guide": LLM_NOT_CONFIGURED_GUIDE_MAP["chat"],
+            "need_config": True,
+            "state": _chat_state(project),
+        }), 400
+
+    history["active_project"] = project
+    ai_chat.append_message(history, "user", message, project)
+    ai_chat.save_history(AI_CHAT_HISTORY_PATH, history)
+
+    started = agent_core.start_job(
+        message=message,
+        project=project,
+        ep=ep,
+        history=ai_chat.project_messages(history, project)[:-1],
+        timeout=LLM_REQUEST_TIMEOUT,
+    )
+    if not started.get("ok"):
+        ai_chat.drop_last_message(history, project)
+        ai_chat.save_history(AI_CHAT_HISTORY_PATH, history)
+        return jsonify({"success": False, "error": started.get("error"),
+                        "state": _chat_state(project)}), 409
+    return jsonify({"success": True, "job_id": started["job_id"], "project": project,
+                    "state": _chat_state(project)})
+
+
+@app.route('/api/agent/job/<job_id>', methods=['GET'])
+def api_agent_job(job_id):
+    """轮询总控任务进度（steps 逐条追加，status: running/done/failed/killed/timeout）"""
+    job = agent_core.get_job(job_id)
+    if not job:
+        return jsonify({"success": False, "error": f"未找到任务 {job_id}"}), 404
+    # 任务收尾时把最终回复补进聊天历史，保证刷新页面后上下文还在
+    if job.get("status") in ("done", "failed", "killed", "timeout") and job.get("reply"):
+        if not job.get("_persisted"):
+            try:
+                history = ai_chat.load_history(AI_CHAT_HISTORY_PATH)
+                ai_chat.append_message(history, "assistant", job["reply"], job.get("project") or "")
+                ai_chat.save_history(AI_CHAT_HISTORY_PATH, history)
+                with agent_core._LOCK:
+                    if job_id in agent_core._JOBS:
+                        agent_core._JOBS[job_id]["_persisted"] = True
+            except Exception as e:  # noqa: BLE001
+                app.logger.warning(f"总控回复落历史失败：{e}")
+    return jsonify({"success": True, **{k: v for k, v in job.items() if not k.startswith("_")}})
+
+
+@app.route('/api/agent/log', methods=['GET'])
+def api_agent_log():
+    """查看总控 AI 的审计日志（干了什么、成功没有、花了多久）"""
+    try:
+        limit = max(1, min(int(request.args.get("limit") or 100), 1000))
+    except (TypeError, ValueError):
+        limit = 100
+    path = os.path.join(agent_core.AUDIT_DIR,
+                        f"audit-{datetime.now().strftime('%Y%m%d')}.jsonl")
+    items = []
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()[-limit:]
+            for ln in lines:
+                try:
+                    items.append(json.loads(ln))
+                except json.JSONDecodeError:
+                    continue
+        except Exception as e:  # noqa: BLE001
+            return jsonify({"success": False, "error": f"读取审计日志失败：{e}"}), 500
+    return jsonify({"success": True, "count": len(items), "items": items})
 
 
 # ===== SPA 路由（必须在所有 API 路由之后，Flask 默认静态路由之前）=====

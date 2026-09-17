@@ -33,15 +33,28 @@ TRUNCATION_RETRY_HINT = (
 # 截断时的 max_tokens 提升阶梯（按顺序尝试，取第一个大于当前值的档位）
 DEFAULT_TOKEN_LADDER = (2048, 4096, 8192, 16384, 24576)
 
-# 是否默认关闭「思考模式」：Nemotron / Qwen3 等混合推理模型经 NVIDIA NIM 等 OpenAI 兼容网关
-# 调用时，思考内容会写进 content（而非 reasoning_content），导致 JSON 解析失败与 finish_reason=length
-# 截断。这里默认注入 chat_template_kwargs.enable_thinking=false；可用配置项 disable_thinking 覆盖。
-DISABLE_THINKING_DEFAULT = True
+# 是否默认关闭「思考模式」。
+# ⚠️ 2026-09-17 起改为 **False（默认允许思考）**：用户明确要求「所有配置的模型都允许思考」。
+# 关思考虽然能规避「思考吃掉 token → 正文为空」，但会让质检/剧本单位模型退化成不走推理的
+# 直觉判断，漏掉明显问题（用户反馈「图片有明显不合理的地方却通过了」）。
+# 现在的策略是：**允许思考，但用「token 下限 + 截断重试」来兜底**，而不是阉割模型。
+# 仍可用配置项 disable_thinking 对单个模块关掉。
+DISABLE_THINKING_DEFAULT = False
+# 允许思考时的最小 max_tokens：思考本身就要吃掉几百 token，额度太小必然空正文
+MIN_TOKENS_WHEN_THINKING = 1024
 MAX_TOKENS_CEILING = 32768
 
 
 class LLMError(Exception):
     """LLM 调用失败（面向用户的友好错误）"""
+
+
+class LLMReasoningOnlyError(LLMError):
+    """模型只吐了思考内容（reasoning_content），正文为空。
+
+    允许思考后这是可恢复的：思考吃光了 max_tokens，加额度重来即可，
+    不该当成致命错误直接失败。
+    """
 
 
 class LLMTruncatedError(LLMError):
@@ -311,8 +324,9 @@ class LLMClient:
         if not content:
             reasoning = str(msg.get("reasoning_content") or "")
             if reasoning:
-                raise LLMError(
-                    "模型未返回正文（content 为空），仅返回了思考内容（reasoning_content）。"
+                raise LLMReasoningOnlyError(
+                    "模型只返回了思考内容（reasoning_content），正文为空 —— "
+                    "思考过程把 max_tokens 用光了，加大额度重试即可。"
                     f"思考片段：{reasoning[:200]}"
                 )
             raise LLMError("接口返回内容为空")
@@ -333,6 +347,15 @@ class LLMClient:
         disable_thinking 为真时注入 chat_template_kwargs.enable_thinking=false，
         避免混合推理模型把思考过程写进 content（会撑爆 max_tokens 并导致 JSON 解析失败）。
         """
+        # 允许思考时抬高一档额度下限：思考要吃 token，给太少必然只剩 reasoning_content
+        if not getattr(self, "disable_thinking", DISABLE_THINKING_DEFAULT):
+            try:
+                mt = int(max_tokens or 0)
+            except (TypeError, ValueError):
+                mt = 0
+            if 0 < mt < MIN_TOKENS_WHEN_THINKING:
+                logger.info(f"允许思考模式下 max_tokens 由 {mt} 抬到 {MIN_TOKENS_WHEN_THINKING}")
+                max_tokens = MIN_TOKENS_WHEN_THINKING
         payload = {
             "model": self.model,
             "messages": messages,
@@ -367,6 +390,40 @@ class LLMClient:
             "truncated": self.is_truncated(finish_reason),
             "max_tokens": max_tokens,
             "latency_ms": data.get("_latency_ms"),
+            "usage": data.get("usage") or {},
+        }
+
+    def chat_tools(self, messages: list, tools: list, temperature: float = 0.3,
+                   max_tokens: int = 4096, timeout: int = None) -> dict:
+        """Function-calling 调用（OpenAI 兼容 tools 协议）
+
+        返回：{content, tool_calls:[{id, name, arguments}], finish_reason, usage}
+        其中 arguments 是**未解析的 JSON 字符串**，由调用方自行 json.loads，
+        这样模型吐出非法参数时调用方能拿到原文去做诊断与降级。
+
+        若服务端不支持 tools（多数国产兼容层会返回 400 或直接忽略），
+        调用方应捕获 LLMError 后走「纯文本 + JSON 动作块」降级链路。
+        """
+        self.require_configured()
+        payload = self._build_payload(messages, temperature, max_tokens)
+        payload["tools"] = tools
+        data = self._post(payload, timeout=timeout)
+        choices = data.get("choices") or []
+        if not choices:
+            raise LLMError(f"接口返回缺少 choices 字段：{json.dumps(data, ensure_ascii=False)[:300]}")
+        msg = choices[0].get("message") or {}
+        calls = []
+        for i, tc in enumerate(msg.get("tool_calls") or []):
+            fn = tc.get("function") or {}
+            calls.append({
+                "id": tc.get("id") or f"call_{i}",
+                "name": str(fn.get("name") or "").strip(),
+                "arguments": fn.get("arguments") or "{}",
+            })
+        return {
+            "content": msg.get("content") or "",
+            "tool_calls": calls,
+            "finish_reason": choices[0].get("finish_reason"),
             "usage": data.get("usage") or {},
         }
 
@@ -498,7 +555,21 @@ class LLMClient:
         repaired_fallback = None
         for _ in range(max(1, int(max_attempts))):
             attempts += 1
-            r = self.chat_ex(messages, temperature=temperature, max_tokens=cur)
+            try:
+                r = self.chat_ex(messages, temperature=temperature, max_tokens=cur)
+            except LLMReasoningOnlyError as e:
+                # 思考吃光额度：加码再来一次，别让「允许思考」变成「调用失败」
+                last_err = e
+                nxt = _next_tokens(max(cur, MIN_TOKENS_WHEN_THINKING))
+                logger.warning(f"模型只吐思考内容（第 {attempts} 次，max_tokens={cur}），"
+                               f"提高到 {nxt} 重试")
+                history.append({"attempt": attempts, "max_tokens": cur,
+                                "finish_reason": "reasoning_only", "truncated": True,
+                                "content_len": 0, "latency_ms": None})
+                if nxt <= cur:
+                    break
+                cur = nxt
+                continue
             truncated = r["truncated"]
             history.append({"attempt": attempts, "max_tokens": cur,
                             "finish_reason": r["finish_reason"], "truncated": truncated,

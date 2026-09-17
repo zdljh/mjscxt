@@ -208,6 +208,13 @@ CONFIG_KEYS = (
     "pass_score", "max_retries", "video_frame_count",
     "image_max_side", "timeout", "api_retries", "api_backoff", "updated_at",
     "script_categories",  # 剧本质检各维度权重和合格线
+    # 推理模型控制（2026-09-17 新增，确保配置能正确落盘）
+    "disable_thinking",
+    "min_tokens_when_thinking",
+    # 音频阈值（此前未在白名单，导致配置丢失）
+    "audio_min_speech_ratio", "audio_min_mean_db", "audio_max_drift",
+    # 尾帧质检开关
+    "keyframe_qc_enabled",
 )
 
 
@@ -238,6 +245,13 @@ def _empty_config() -> dict:
         "timeout": 180,              # 单次质检请求读超时（秒）
         "api_retries": API_RETRY_ATTEMPTS,   # 网络层额外重试次数（瞬时故障时退避重试，与 max_retries 重画无关）
         "api_backoff": API_RETRY_BACKOFF,    # 网络重试退避基数（秒），按 2 的幂增长、单次上限见 API_RETRY_MAX_SLEEP
+        # ⚠️ 推理型模型（如 agnes-2.5-flash、R1 系）会把 token 花在 reasoning_content 上，
+        # 额度给小时正文 content 直接为 ""，质检就永远「返回内容为空」。
+        # 2026-09-17 起**默认允许思考**（关思考会让质检退化成直觉判断、漏掉明显问题），
+        # 改用「token 下限 + 空正文自动加码重试」兜底。确需关掉的模块把这里设为 true。
+        "disable_thinking": False,
+        # 允许思考时质检请求的最小 max_tokens（思考本身就要吃几百 token）
+        "min_tokens_when_thinking": 1024,
         # 剧本质检各维度权重和合格线
         "script_categories": {
             "structure": {"weight": 0.2, "pass_threshold": 80},
@@ -450,7 +464,10 @@ def resolve_endpoint(cfg: dict, override: dict = None) -> dict:
                 "auto_synced": bool(saved["base_url"]) and saved["base_url"] == ov["base_url"]}
     ep = {"base_url": (cfg.get("base_url") or "").strip(),
           "api_key": (cfg.get("api_key") or "").strip(),
-          "model": (cfg.get("model") or "").strip()}
+          "model": (cfg.get("model") or "").strip(),
+          "disable_thinking": bool(cfg.get("disable_thinking", DISABLE_THINKING_DEFAULT)),
+          "min_tokens_when_thinking": int(cfg.get("min_tokens_when_thinking")
+                                          or MIN_TOKENS_WHEN_THINKING)}
     auto = bool(saved["base_url"] and saved["base_url"] == ep["base_url"]
                 and saved["api_key"] and saved["api_key"] == ep["api_key"]
                 and saved["model"] and saved["model"] == ep["model"])
@@ -576,11 +593,15 @@ class QcApiError(RuntimeError):
     """
 
     def __init__(self, message: str, *, retryable: bool = False, status: int = None,
-                 retry_after: float = None):
+                 retry_after: float = None, kind: str = ""):
         super().__init__(message)
         self.retryable = bool(retryable)
         self.status = status
         self.retry_after = retry_after
+        # kind 供 _post_chat 决定「下一轮怎么改请求重试」：
+        #   reasoning_only    = 模型只吐了思考内容、正文为空
+        #   think_opt_rejected= 服务端不接受 chat_template_kwargs 字段
+        self.kind = kind or ""
         self.attempts = 1
         self.retry_errors: list = []
 
@@ -611,6 +632,35 @@ def _chat_url(base_url: str) -> str:
 def _is_local(url: str) -> bool:
     host = (urlparse(url).hostname or "").lower()
     return host in ("127.0.0.1", "localhost", "0.0.0.0", "::1") or host.endswith(".local")
+
+
+DISABLE_THINKING_DEFAULT = False
+MIN_TOKENS_WHEN_THINKING = 1024
+
+
+def _with_thinking_off(payload: dict) -> dict:
+    """注入「关闭思考」参数（OpenAI 兼容层事实标准：chat_template_kwargs）"""
+    p = dict(payload or {})
+    ctk = p.get("chat_template_kwargs")
+    ctk = dict(ctk) if isinstance(ctk, dict) else {}
+    ctk["enable_thinking"] = False
+    p["chat_template_kwargs"] = ctk
+    return p
+
+
+def _without_thinking_opt(payload: dict) -> dict:
+    return {k: v for k, v in (payload or {}).items() if k != "chat_template_kwargs"}
+
+
+def _bump_tokens(payload: dict, factor: int = 4) -> dict:
+    """放大 max_tokens：思考型模型把额度吃光时的兜底"""
+    p = dict(payload or {})
+    try:
+        cur = int(p.get("max_tokens") or 0)
+    except (TypeError, ValueError):
+        cur = 0
+    p["max_tokens"] = max(512, cur * factor)
+    return p
 
 
 def encode_image_data_url(path: str, max_side: int = 1024) -> str:
@@ -657,6 +707,13 @@ def _post_chat_once(ep: dict, payload: dict, timeout: int) -> dict:
     latency = int((time.time() - t0) * 1000)
     if resp.status_code >= 400:
         body = (resp.text or "")[:300]
+        # 少数服务端不认 chat_template_kwargs，直接 400。这里识别出来，
+        # 让 _post_chat 去掉该字段再试一次，而不是把「模型没配好」甩给用户。
+        if resp.status_code == 400 and any(
+                k in (body or "").lower()
+                for k in ("chat_template_kwargs", "enable_thinking", "unknown", "unsupported")):
+            raise QcApiError(f"质检接口不接受 chat_template_kwargs 字段：{body}",
+                             retryable=True, status=400, kind="think_opt_rejected")
         if resp.status_code in RETRYABLE_HTTP_STATUS:
             retry_after = None
             try:
@@ -686,6 +743,14 @@ def _post_chat_once(ep: dict, payload: dict, timeout: int) -> dict:
     if not content:
         content = choices[0].get("text") or ""
     if not content:
+        reasoning = str(msg.get("reasoning_content") or "")
+        if reasoning:
+            # 推理型模型的典型症状：token 全被思考吃掉，正文为 ""。
+            # 不能拿思考内容当结论（它不是 JSON 判定），只能换打法重试。
+            raise QcApiError(
+                "质检模型只返回了思考内容（reasoning_content）而没有正文，"
+                "通常是推理型模型把 max_tokens 全花在思考上。系统会自动关闭思考模式重试",
+                retryable=True, kind="reasoning_only")
         raise QcApiError("质检接口返回内容为空", retryable=True)
     return {"content": str(content), "latency_ms": latency, "url": url}
 
@@ -699,9 +764,21 @@ def _post_chat(ep: dict, payload: dict, timeout: int, retries: int = None,
     total = 1 + max(0, int(API_RETRY_ATTEMPTS if retries is None else retries))
     base = API_RETRY_BACKOFF if backoff is None else max(0.0, float(backoff))
     errors: list = []
+    cur = dict(payload)
+    if ep.get("disable_thinking", DISABLE_THINKING_DEFAULT):
+        cur = _with_thinking_off(cur)          # 显式关思考（默认不关）
+    else:
+        # 允许思考 → 保证额度下限，否则思考吃光 token 只剩空正文
+        try:
+            mt = int(cur.get("max_tokens") or 0)
+        except (TypeError, ValueError):
+            mt = 0
+        floor = int(ep.get("min_tokens_when_thinking") or MIN_TOKENS_WHEN_THINKING)
+        if mt < floor:
+            cur["max_tokens"] = floor
     for i in range(total):
         try:
-            r = _post_chat_once(ep, payload, timeout)
+            r = _post_chat_once(ep, cur, timeout)
             r["attempts"] = i + 1
             r["retry_errors"] = errors
             if errors:
@@ -709,6 +786,16 @@ def _post_chat(ep: dict, payload: dict, timeout: int, retries: int = None,
             return r
         except QcApiError as e:
             last = (i >= total - 1)
+            kind = getattr(e, "kind", "") or ""
+            # 关思考也不管用（服务端不认该字段 / 已关仍空）→ 换打法再试，而不是干等
+            if not last and kind in ("reasoning_only", "think_opt_rejected"):
+                if kind == "think_opt_rejected" or "chat_template_kwargs" in cur:
+                    cur = _without_thinking_opt(cur)
+                cur = _bump_tokens(cur)
+                errors.append(str(e)[:200])
+                logger.warning(f"质检接口 {kind}（第 {i + 1}/{total} 次）："
+                               f"去掉思考抑制参数并放大 max_tokens={cur.get('max_tokens')} 后重试")
+                continue
             if not e.retryable or last:
                 raise e.with_attempts(i + 1, errors)
             wait = e.retry_after if (e.retry_after and e.retry_after > 0) else base * (2 ** i)

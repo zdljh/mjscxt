@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '@/context/AppContext';
-import { projectsApi, keyframesApi, storyboardApi, ttsApi, mixApi, qcApi, exportApi, autopilotApi, upscaleApi, chatApi } from '@/api/client';
+import { projectsApi, keyframesApi, storyboardApi, ttsApi, mixApi, qcApi, exportApi, autopilotApi, upscaleApi, chatApi, agentApi } from '@/api/client';
 import { Button, Loading, EmptyState } from '@/components/ui';
 import { GridPage } from '@/pages/GridPage';
-import type { Project, Deliverable, UpscaleEnv, UpscaleSource, UpscaleTask, UpscaleArtifact } from '@/types';
+import type { Project, Deliverable, UpscaleEnv, UpscaleSource, UpscaleTask, UpscaleArtifact, AgentStep } from '@/types';
 
 // ========== Workbench Tab Types ==========
 // 注意：'chat' 已移除 —— AI 总控改成了右侧常驻面板，不再是标签页（见 ChatPanel）
@@ -1983,6 +1983,11 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  // 自主执行模式：默认开启。指令交给总控模型自己决策并调用工具，全过程无需人工确认。
+  const [autoMode, setAutoMode] = useState(true);
+  const [run, setRun] = useState<{ steps: AgentStep[]; status: string } | null>(null);
+  const [toolCount, setToolCount] = useState(0);
+  const [killOn, setKillOn] = useState(false);
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
 
   // 加载该项目的历史对话
@@ -1997,6 +2002,22 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
 
   useEffect(() => { loadHistory(); }, [projectKey]);
 
+  // 拉取总控可用工具数与急停状态（失败不影响对话，静默降级）
+  useEffect(() => {
+    agentApi.tools()
+      .then((d) => { setToolCount(d.count || 0); setKillOn(!!d.kill?.on); })
+      .catch(() => {});
+  }, []);
+
+  const toggleKill = async () => {
+    try {
+      const d = await agentApi.setKill(!killOn, !killOn ? '前端手动急停' : '');
+      setKillOn(!!d.kill?.on);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '急停失败');
+    }
+  };
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
@@ -2010,14 +2031,43 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
     setMessages(prev => [...prev, { role: 'user', content: text, timestamp: new Date().toISOString() }]);
     setInput('');
     try {
-      const data = await chatApi.send(text, projectKey);
-      if (data.success && data.reply) {
-        setMessages(prev => [...prev, { role: 'assistant', content: data.reply, timestamp: new Date().toISOString() }]);
-      } else {
-        setError('AI 未返回内容');
+      // 纯聊天模式：走老链路，只做对话 + 抽取创作设定
+      if (!autoMode) {
+        const data = await chatApi.send(text, projectKey);
+        if (data.success && data.reply) {
+          setMessages(prev => [...prev, { role: 'assistant', content: data.reply, timestamp: new Date().toISOString() }]);
+        } else {
+          setError('AI 未返回内容');
+        }
+        return;
       }
+
+      // 自主执行模式：下发任务 → 轮询 → 逐步展示「它自己做了什么」
+      const started = await agentApi.send(text, projectKey);
+      if (!started.success || !started.job_id) {
+        setError('总控未能启动任务');
+        return;
+      }
+      setRun({ steps: [], status: 'running' });
+      const deadline = Date.now() + 35 * 60 * 1000;   // 兜底，避免异常时永久轮询
+      for (;;) {
+        await new Promise(r => setTimeout(r, 1200));
+        const job = await agentApi.job(started.job_id);
+        setRun({ steps: job.steps || [], status: job.status || 'running' });
+        if (job.status !== 'running') {
+          if (job.reply) {
+            setMessages(prev => [...prev, { role: 'assistant', content: job.reply, timestamp: new Date().toISOString() }]);
+          } else if (job.error) {
+            setError(job.error);
+          }
+          break;
+        }
+        if (Date.now() > deadline) { setError('总控执行超时（已超过 35 分钟）'); break; }
+      }
+      setRun(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : '发送失败');
+      setRun(null);
     } finally {
       setSending(false);
     }
@@ -2037,10 +2087,40 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
           </span>
           <div className="min-w-0">
             <h3 className="font-semibold text-gray-900 dark:text-white leading-tight">AI总控</h3>
-            <p className="text-[11px] text-gray-500 dark:text-gray-400 leading-tight">项目级对话</p>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <p className="text-[11px] text-gray-500 dark:text-gray-400 leading-tight">
+                {autoMode ? `自主执行 · ${toolCount || '…'} 个功能` : '仅对话'}
+              </p>
+              <button
+                onClick={() => setAutoMode(v => !v)}
+                title={autoMode ? '切回纯聊天（不执行动作）' : '切到自主执行（总控自己干活）'}
+                className={`text-[10px] leading-none px-1.5 py-0.5 rounded border transition-colors ${
+                  autoMode
+                    ? 'border-indigo-300 text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-500/15'
+                    : 'border-gray-300 dark:border-gray-600 text-gray-500 dark:text-gray-400'
+                }`}
+              >
+                {autoMode ? '自主' : '聊天'}
+              </button>
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-0.5 shrink-0">
+          {autoMode && (
+            <button
+              onClick={toggleKill}
+              title={killOn ? '解除急停' : '急停：立即中止总控的一切动作'}
+              className={`p-1.5 rounded-lg transition-colors ${
+                killOn
+                  ? 'text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-500/15'
+                  : 'text-gray-500 dark:text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-500/15'
+              }`}
+            >
+              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+              </svg>
+            </button>
+          )}
           <button
             onClick={loadHistory}
             title="刷新对话"
@@ -2078,14 +2158,17 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
             <div className="w-11 h-11 rounded-xl bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 flex items-center justify-center text-lg mb-3">
               💬
             </div>
-            <p className="text-sm text-gray-600 dark:text-gray-300">用自然语言指挥该项目</p>
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 mb-4">也可以直接点下面的例子试试</p>
+            <p className="text-sm text-gray-600 dark:text-gray-300">
+              {autoMode ? '说一句话，总控自己决定并执行' : '和总控聊聊创作想法'}
+            </p>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 mb-4">
+              {autoMode ? '无需确认，它会直接动手；点右上角方块可随时急停' : '当前只聊天，不会改动任何产物'}
+            </p>
             <div className="w-full space-y-1.5">
-              {[
-                '把第 3 镜重生成一次',
-                '这一集节奏太慢，帮我调整分镜',
-                '主角的服装换成深蓝色',
-              ].map((ex) => (
+              {(autoMode
+                ? ['看看现在生产到哪了', '把第 3 镜重新生成一次', '把最新成片做 2 倍超分', '这一集节奏太慢，重新调整分镜']
+                : ['这一集节奏太慢，帮我调整分镜', '主角的服装换成深蓝色']
+              ).map((ex) => (
                 <button
                   key={ex}
                   onClick={() => setInput(ex)}
@@ -2110,7 +2193,32 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
                 <p className="whitespace-pre-wrap break-words">{msg.content}</p>
               </div>
             ))}
-            {sending && (
+            {/* 自主执行过程：把总控「自己调了哪些功能、成功没有」透明地摊开 */}
+            {run && (
+              <div className="mr-6 px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 space-y-1.5">
+                <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+                  {run.status === 'running' ? (
+                    <span className="w-3 h-3 border-2 border-indigo-400/40 border-t-indigo-500 rounded-full animate-spin inline-block shrink-0" />
+                  ) : (
+                    <span className="w-1.5 h-1.5 rounded-full bg-gray-400 inline-block shrink-0" />
+                  )}
+                  总控执行中 · 已完成 {run.steps.length} 步
+                </div>
+                {run.steps.map((s: AgentStep, i: number) => (
+                  <div key={i} className="flex items-start gap-1.5 text-[11px] leading-snug">
+                    <span className={`shrink-0 ${s.blocked ? 'text-amber-500' : s.ok ? 'text-green-500' : 'text-red-500'}`}>
+                      {s.blocked ? '⊘' : s.ok ? '✓' : '✕'}
+                    </span>
+                    <span className="font-mono text-gray-500 dark:text-gray-400 shrink-0">{s.tool}</span>
+                    <span className="text-gray-600 dark:text-gray-300 break-all">
+                      {s.summary}
+                      {s.cached ? '（复用缓存）' : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {sending && !run && (
               <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 mr-6 px-3 py-2 rounded-lg text-sm text-gray-500 dark:text-gray-400 flex items-center gap-2">
                 <span className="w-3 h-3 border-2 border-indigo-400/40 border-t-indigo-500 rounded-full animate-spin inline-block" />
                 思考中...

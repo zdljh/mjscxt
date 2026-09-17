@@ -93,6 +93,9 @@ DEFAULT_CONFIG = {
     "enable_upscale": True,
     "upscale_scale": 2,            # 超分倍率，FlashVSR 支持 2 / 3 / 4
     "video_mode": "per_shot",      # per_shot（带质检门禁）/ episode / keyframe
+    # 关键帧「跨镜链式」：auto=同场景才串 / always=无条件串 / off=关闭。
+    # 上一镜尾帧作为下一镜首帧参考，镜与镜首尾相接，避免每镜各画各的。
+    "keyframe_chain_mode": "auto",
     # ---- 质量阈值 ----
     "coverage_min_percent": 95.0,      # 原文覆盖率下限
     "consistency_min_score": 80,       # 跨镜一致性分数下限
@@ -135,6 +138,11 @@ def normalize_config(raw: dict, default_project_key: str = "") -> dict:
         cfg["video_mode"] = "per_shot"
     if cfg["video_mode"] == "keyframe":
         cfg["enable_keyframe"] = True      # 关键帧模式必须先生成尾帧
+    try:
+        import keyframe as _kf
+        cfg["keyframe_chain_mode"] = _kf.norm_chain_mode(cfg.get("keyframe_chain_mode"))
+    except Exception:  # noqa: BLE001
+        cfg["keyframe_chain_mode"] = "auto"
     if not cfg.get("project_key"):
         cfg["project_key"] = default_project_key or cfg.get("novel_id") or ""
     return cfg
@@ -555,10 +563,13 @@ def step_keyframe(ctx) -> dict:
         pct = 42 + int((done / max(total, 1)) * 40)
         ctx["progress"](f"尾帧 {done}/{total}", min(pct, 82), phase="keyframe")
 
+    _kf_verify, _kf_vretries = A._keyframe_qc_verifier(ctx["project_name"])
     report = A.keyframe.generate_keyframes(
         shots, sb_map, kf_dir, seed=ctx["config"].get("seed"),
         timeout=int(ctx.get("timeout_per_segment") or 900),
-        only_missing=True, progress_cb=_cb)
+        only_missing=True, progress_cb=_cb,
+        chain_mode=ctx["config"].get("keyframe_chain_mode") or "auto",
+        verify_cb=_kf_verify, max_verify_retries=_kf_vretries)
     recheck = probe_keyframe(ctx)
     if not recheck.get("done"):
         return {"ok": False, "detail": {"report": report, "probe": recheck},
@@ -593,7 +604,8 @@ def step_video(ctx) -> dict:
         (ctx["project_name"], shots, char_refs, scene_refs, {}, True, mode,
          int(ctx.get("timeout_per_segment") or 900),
          ctx.get("episode_tag") or f"ep{ctx['episode_no']:02d}",
-         ctx["episode_no"]),
+         ctx["episode_no"],
+         cfg.get("keyframe_chain_mode") or "auto"),
         "generation_state", "lock",
         init={"total": len(shots), "phase": "视频生成", "qc": A._qc_brief("video")},
         prefix="pipe_video")

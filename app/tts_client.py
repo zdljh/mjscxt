@@ -241,6 +241,66 @@ def list_voices() -> Dict:
 
 # ===================== 配音计划（角色 → 音色） =====================
 
+# 中性情绪：这类词出现时没必要切 design 模式（切了反而可能让音色漂移，白花时间）
+_NEUTRAL_EMOTIONS = ("平静", "平靜", "平常", "正常", "无", "無", "普通", "一般", "",
+                     "中性", "陈述", "陳述", "陈述句")
+
+# 情绪 → 语气描述（给 VoiceDesign 节点的中文指令）
+_EMOTION_HINTS = {
+    "愤怒": "愤怒地咬牙说出，语速偏快、声音发紧",
+    "生气": "带怒气地说，语气冲",
+    "低沉": "压低声音，语速缓慢、语气沉重",
+    "悲伤": "带着哭腔，声音颤抖、语速慢",
+    "难过": "声音低哑，带着失落",
+    "惊喜": "语气上扬，带着意外的兴奋",
+    "兴奋": "语速快、音调高，情绪饱满",
+    "紧张": "语速急促、声音发紧，带着不安",
+    "恐惧": "声音发抖、气息不稳，带着害怕",
+    "害怕": "声音发抖、怯懦",
+    "冷静": "语气平稳克制，不带起伏",
+    "坚定": "语气斩钉截铁，字字有力",
+    "温柔": "语气温柔舒缓，带着笑意",
+    "疑惑": "语气上扬，带着疑问",
+    "嘲讽": "带着讽刺与轻蔑，语调拖长",
+    "疲惫": "气息虚弱，语速缓慢",
+    "焦急": "语速很快，透着急切",
+}
+
+
+def _emotion_aware() -> bool:
+    """是否启用情绪化配音（TTS_DEFAULT_PARAMS.emotion_aware，默认开）"""
+    try:
+        return bool(TTS_DEFAULT_PARAMS.get("emotion_aware", True))
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _is_neutral_emotion(emotion: str) -> bool:
+    e = str(emotion or "").strip()
+    if not e:
+        return True
+    return any(k and k in e for k in _NEUTRAL_EMOTIONS)
+
+
+def _emotion_instruct(emotion: str, char_desc: str = "") -> str:
+    """把「角色音色底稿 + 该镜情绪」拼成 VoiceDesign 的 instruct。
+
+    角色描述放前面用于稳住音色，情绪描述放后面控制语气 —— 顺序反了会
+    让模型把情绪当成音色特征，导致同一角色每句听起来都不像同一个人。
+    """
+    e = str(emotion or "").strip()
+    hint = ""
+    for k, v in _EMOTION_HINTS.items():
+        if k in e:
+            hint = v
+            break
+    if not hint:
+        hint = f"语气：{e}"
+    desc = str(char_desc or "").strip()
+    # 角色描述可能自带「，」结尾，这里统一裁剪避免重复标点
+    return f"{desc}；{hint}".strip("；， ").strip("；") if desc else hint
+
+
 def default_voice_map(characters: List[dict], project: str = "", episode: int = 1) -> Dict:
     """按剧本角色生成默认音色映射：同角色固定 speaker + seed（全剧一致）
 
@@ -386,6 +446,17 @@ def build_dub_plan(script: Dict, voice_map: Optional[Dict] = None,
     vmap.setdefault("characters", {})
     vmap.setdefault("lines", {})
 
+    # 角色音色底稿：情绪化配音时固定这部分，只让「情绪」变，避免每句音色漂移
+    _char_desc = {}
+    for _ch in characters:
+        _nm = str(_ch.get("name") or "").strip()
+        if not _nm:
+            continue
+        _char_desc[_nm] = "，".join(
+            str(_ch.get(k) or "").strip() for k in
+            ("voice_style", "personality", "appearance", "description")
+            if str(_ch.get(k) or "").strip())[:120]
+
     # 逐句角色覆盖：voice_map["lines"][str(shot_id)] = {"character": "...", ...}
     lines: List[Dict] = []
     for shot in script.get("shots") or []:
@@ -411,6 +482,17 @@ def build_dub_plan(script: Dict, voice_map: Optional[Dict] = None,
             base_voice = vmap["characters"].get(char_name) or default_voice_map(
                 [{"name": char_name}], project, episode)["characters"].get(char_name)
             voice = normalize_voice(override, base_voice)
+            # ---- 情绪化配音 ----
+            # 剧本每镜都带 emotion 字段（如「愤怒 / 低沉 / 惊喜」），但此前**完全没被
+            # 送进 TTS**：每句都用角色级固定 preset 音色，于是所有台词听起来一个调。
+            # 这里把该镜情绪拼进 instruct，并在确实有情绪时切到 design 模式
+            # （preset 模式下 CustomVoice 节点会把 instruct 当备注忽略，只有
+            #  VoiceDesign 节点才真正按 instruct 控制语气）。
+            emotion = str(shot.get("emotion") or "").strip()
+            if emotion and _emotion_aware() and not _is_neutral_emotion(emotion):
+                desc = _char_desc.get(char_name) or ""
+                voice = dict(voice, mode="design",
+                             instruct=_emotion_instruct(emotion, desc))
             suffix = f"_{li + 1}" if multi else ""
             out_name = (f"ep{int(episode):02d}_shot{int(shot_id):02d}{suffix}"
                         f"_{safe_name(char_name, 12)}.wav")
@@ -424,6 +506,7 @@ def build_dub_plan(script: Dict, voice_map: Optional[Dict] = None,
                 "character": char_name,
                 "text": text,
                 "duration_hint": shot.get("duration"),
+                "emotion": emotion,
                 "voice": voice,
                 "out_name": out_name,
                 "out_path": os.path.abspath(out_path) if out_dir_wav else "",

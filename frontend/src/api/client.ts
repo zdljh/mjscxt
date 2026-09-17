@@ -20,6 +20,7 @@ import type {
   Provider, ProvidersResponse,
   AIConfigResponse, AITestResult,
   UpscaleEnv, UpscaleSource, UpscaleSubmitResponse, UpscaleTask, UpscaleArtifact,
+  AgentJob, AgentTool, AgentGuards, AgentKillState,
 } from '../types';
 
 const API_BASE = '/api';
@@ -218,6 +219,38 @@ export const autonomousApi = {
       method: 'POST',
       body: JSON.stringify({ message }),
     }),
+};
+
+// --- 总控 AI 自主执行（function-calling agent） ---
+//
+// 与 chatApi 的区别：chatApi 只聊天 + 抽取创作设定，不执行任何动作；
+// agentApi 会把指令交给模型，由模型自己决定调哪些工具、直接把活干完。
+// 安全靠后端护栏（工具白名单 / 昂贵动作配额 / 冷却 / 急停），不需要人工确认。
+export const agentApi = {
+  send: (message: string, project?: string) =>
+    request<{ success: boolean; job_id: string; project: string }>('/agent/chat', {
+      method: 'POST',
+      // 后端 _chat_project 只认 project_name，这里必须用它，否则会落到「上一个活跃项目」
+      body: JSON.stringify({ message, project_name: project || '' }),
+    }),
+  job: (jobId: string) => request<{ success: boolean } & AgentJob>(`/agent/job/${jobId}`),
+  tools: () =>
+    request<{
+      success: boolean;
+      count: number;
+      tools: AgentTool[];
+      guards: AgentGuards;
+      kill: AgentKillState;
+    }>('/agent/tools'),
+  setKill: (on: boolean, reason?: string) =>
+    request<{ success: boolean; kill: AgentKillState }>('/agent/kill', {
+      method: 'POST',
+      body: JSON.stringify({ on, reason: reason || '' }),
+    }),
+  log: (limit = 100) =>
+    request<{ success: boolean; count: number; items: Record<string, unknown>[] }>(
+      `/agent/log?limit=${limit}`
+    ),
 };
 
 // --- Memory ---

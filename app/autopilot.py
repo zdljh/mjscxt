@@ -105,6 +105,13 @@ PLAN_DEFAULTS = {
     "step_max_retries": 2,
     "auto_repair": True,
     "overwrite_script": False,
+    # ---- 无人值守（24h 托管）相关 ----
+    # 挂起等人工的集，超过 N 小时自动复活重试。0 = 永不复活、必须人工处理。
+    # 没有这个开关时，24h 跑一夜会攒下一堆「等人工」的集，第二天全堵在那儿。
+    "auto_revive_hours": 6.0,
+    # 成片产出后自动验收（不再堆在「待验收」里等人点）。
+    # 注意：待验收**并不阻塞**后续集生产，这个开关只是消除人工动作、让看板干净。
+    "auto_accept": False,
 }
 
 
@@ -595,6 +602,10 @@ def _one_round() -> bool:
     for plan in enabled_projects():
         project = plan["project"]
         try:
+            _auto_revive(project, plan)      # 先解挂超期的失败集，再挑下一集
+        except Exception as e:  # noqa: BLE001
+            logger.warning("%s 自动复活扫描失败：%s", project, e)
+        try:
             pick = _pick_episode(project, plan)
         except Exception as e:  # noqa: BLE001
             logger.warning("%s 集列表计算失败，跳过：%s", project, e)
@@ -604,6 +615,49 @@ def _one_round() -> bool:
         _produce(project, plan, pick)
         return True
     return False
+
+
+def _auto_revive(project: str, plan: dict) -> int:
+    """自动复活：把「挂起等人工」超过 auto_revive_hours 的集重新放回队列。
+
+    24h 无人值守下，失败集如果只能靠人工点掉，一夜下来就全堵死了。
+    这里按时间自动解挂（默认 6 小时），并留痕说明是系统自动复活的。
+    返回复活的集数。
+    """
+    hours = plan.get("auto_revive_hours")
+    try:
+        hours = float(hours if hours is not None else PLAN_DEFAULTS["auto_revive_hours"])
+    except (TypeError, ValueError):
+        hours = float(PLAN_DEFAULTS["auto_revive_hours"])
+    if hours <= 0:
+        return 0
+    try:
+        import pipeline
+    except ImportError:
+        return 0
+
+    revived = 0
+    for d in (pipeline.list_dead_letters(project) or []):
+        if d.get("resolved"):
+            continue
+        marked = str(d.get("marked_at") or "").strip()
+        try:
+            t = time.mktime(time.strptime(marked, "%Y-%m-%d %H:%M:%S"))
+        except (ValueError, TypeError):
+            continue                       # 时间格式异常 → 不动它，交给人工
+        if (time.time() - t) < hours * 3600:
+            continue
+        try:
+            ep = int(d.get("episode_no"))
+            pipeline.resolve_dead_letter(project, ep, note=f"自动复活（挂起已超过 {hours:g} 小时）")
+            # 复活后要把尝试计数清零，否则下一次失败又会立刻被挂起
+            _ATTEMPTS.setdefault(project, {})[ep] = 0
+            revived += 1
+            logger.info("%s 第%s集自动复活（挂起于 %s，已超过 %g 小时）",
+                        project, ep, marked, hours)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("%s 自动复活失败：%s", project, e)
+    return revived
 
 
 def _pick_episode(project: str, plan: dict):
@@ -763,6 +817,13 @@ def _produce(project: str, plan: dict, pick: dict) -> None:
             })
         except Exception as e:  # noqa: BLE001
             logger.warning("交付物登记失败：%s", e)
+        # 无人值守：产出即自动验收（待验收不阻塞生产，这里只是替人点掉那一下）
+        if plan.get("auto_accept"):
+            try:
+                pipeline.set_deliverable_review(project, episode_no, "accepted",
+                                                note="自动验收（托管 auto_accept）")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("自动验收失败：%s", e)
         with _LOCK:
             _STATE["totals"]["episodes_done"] = int(_STATE["totals"].get("episodes_done") or 0) + 1
         _ATTEMPTS.setdefault(project, {})[episode_no] = 0

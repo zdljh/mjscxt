@@ -255,6 +255,9 @@ TTS_DEFAULT_PARAMS = {
     "repetition_penalty": 1.05,
     "max_new_tokens": 2048,
     "batch_lines": 4,               # 一次 ComfyUI 提交内合并的台词句数（模型只加载一次）
+    # 情绪化配音：把剧本每镜的 emotion 送进 TTS，有情绪时自动切 VoiceDesign 模式。
+    # 关掉则退回「每个角色一个固定 preset 音色」的老行为（所有台词一个调）。
+    "emotion_aware": True,
     "keep_model_loaded": False,     # 批次结束后卸载模型，避免与 H3 抢显存
     "timeout": 1800,                # 单批配音等待上限（秒）
 }
@@ -303,6 +306,12 @@ WORKFLOW_TEMPLATE = {
     "multiview_gen": "分镜生成.json",            # Qwen Edit 2511 多视角编辑（角色多视图/物品场景3D多视角）
     "storyboard_gen": "分镜生成.json",           # Qwen Edit 2511 分镜生成
 }
+
+# 关键帧「跨镜链式」默认模式：上一镜尾帧 = 下一镜首帧（与参考工作流一致）
+#   auto   = 仅相邻两镜同场景时串帧（默认，跨场景切场不串，避免把上一场的画面带进新场）
+#   always = 无条件串帧
+#   off    = 关闭（旧行为：每镜用自己的分镜图当首帧，镜与镜画面各画各的）
+KEYFRAME_CHAIN_MODE = _env("KEYFRAME_CHAIN_MODE", "auto").strip().lower() or "auto"
 
 # 多视角生成配置
 MULTIVIEW_CONFIG = {

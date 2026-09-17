@@ -1,9 +1,14 @@
-"""最终回归：覆盖本轮所有修复点。"""
+"""最终回归：覆盖本轮所有修复点。
+
+默认打 5000（正式实例）。验证临时实例时用 REG_BASE 覆盖：
+    REG_BASE=http://127.0.0.1:5077 python _final_regression.py
+"""
+import os
 import urllib.parse
 
 import requests
 
-BASE = "http://127.0.0.1:5000"
+BASE = os.environ.get("REG_BASE", "http://127.0.0.1:5000")
 results = []
 
 

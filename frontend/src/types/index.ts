@@ -585,3 +585,52 @@ export interface UpscaleArtifact {
   size_mb: number;
   mtime: string;
 }
+
+// ===================== 总控 AI 自主执行（agent） =====================
+
+/** 一次工具调用的执行记录 */
+export interface AgentStep {
+  tool: string;
+  args: Record<string, unknown>;
+  ok: boolean;
+  cached?: boolean;
+  blocked?: boolean;
+  elapsed_sec?: number;
+  summary: string;
+  result?: string;
+}
+
+/** GET /api/agent/job/<id> —— 总控任务状态 */
+export interface AgentJob {
+  id: string;
+  project: string;
+  message: string;
+  status: 'running' | 'done' | 'failed' | 'killed' | 'timeout';
+  steps: AgentStep[];
+  reply: string;
+  error: string;
+  created: number;
+  updated: number;
+  expensive_used: number;
+}
+
+/** GET /api/agent/tools —— 工具清单 */
+export interface AgentTool {
+  name: string;
+  description: string;
+  risk: 'safe' | 'write' | 'expensive';
+  expensive: boolean;
+}
+
+export interface AgentGuards {
+  max_steps: number;
+  max_expensive: number;
+  max_turn_sec: number;
+  cooldown_sec: number;
+}
+
+export interface AgentKillState {
+  on: boolean;
+  reason: string;
+  at: number;
+}
