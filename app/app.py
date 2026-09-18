@@ -3035,7 +3035,7 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
             return {"prompt": prompt, "duration": dur, "reference_images": refs,
                     "name": f"shot_{seq:02d}"}, sb_local
 
-        # ---------- 模式 episode：整集一次提交，工作流段数 = 该集分镜数 ----------
+        # ---------- 模式 episode：整集 N 段一次生成（H3 原生衔接）+ 整片 QC 门控 ----------
         if mode == 'episode':
             segs, shot_meta_map = [], []
             for i, shot in enumerate(shots):
@@ -3046,62 +3046,95 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                 shot_meta_map.append({"shot_id": shot_id, "seq": seq,
                                       "duration": seg["duration"],
                                       "used_storyboard": bool(sb_local)})
+            # 质检配置（与 per_shot 保持一致）
+            qc_cfg = _qc_load_cfg()
+            qc_on = qc_client.video_qc_ready(qc_cfg)
+            qc_declared = bool(qc_cfg.get("enabled") and qc_cfg.get("video_enabled"))
+            max_retries = int(qc_cfg.get("max_retries", 0)) if qc_on else 0
+            eff_style = (shot.get("style") if shot else None) or _style_res.get("style") or ""
+
+            # 整片 QC 门控回调：对 N 段一次生成出的单个连续整集视频抽帧质检
+            def _seg_qc_fn(video_path, shot_desc, cfg, style):
+                """QC 门控：对整片抽帧 → 多模态判定 → 返回 {"passed": bool, "verdict": {...}, "gate": {...}}"""
+                fr_dir = os.path.join(QC_DIR, project_name, "frames",
+                                      f"episode_full_{os.path.basename(video_path)}")
+                verdict = qc_client.check_video(video_path, shot_desc, cfg,
+                                               frames_dir=fr_dir,
+                                               style=style)
+                gate = _qc_gate(verdict)
+                return {"passed": gate.get("accept", False), "verdict": verdict, "gate": gate}
+
             with lock:
                 generation_state[task_id].update({
                     "current": 0, "progress": 5,
-                    "phase": f"整集 {len(segs)} 段一次生成（每段=一个分镜）",
+                    "phase": f"整集 {len(segs)} 段一次生成（H3 原生衔接，整片 QC 门控）",
                     "segment_count": len(segs),
                 })
-            app.logger.info(f"[episode] 整集一次生成：{len(segs)} 段，"
-                            f"分镜 {[s['name'] for s in segs]}")
-            result = comfyui_client.generate_h3_sequence(
+            app.logger.info(f"[episode] 整集生成开始：{len(segs)} 段，qc_on={qc_on}，max_retries={max_retries}")
+
+            result = comfyui_client.generate_h3_sequence_sequential(
                 segments=segs,
                 filename_prefix=f"comic_drama/{project_name}_{episode_tag or 'episode'}",
                 seed=None,
                 timeout_per_segment=timeout_per_segment,
                 size=_size,
+                qc_fn=_seg_qc_fn if qc_on else None,
+                qc_cfg=qc_cfg,
+                qc_style=eff_style,
+                max_retries=max_retries,
             )
-            files = result.get('files') or []
-            # 源文件存在性校验：ComfyUI 返回了路径但文件缺失时明确判失败
-            missing_src = bool(files) and not os.path.isfile(files[0])
-            if not files or missing_src:
+            files = result.get("files") or []
+            episode_failed = bool(result.get("failed"))
+            attempts_used = result.get("attempts_used", 1)
+            qc_results = result.get("qc_results") or []
+            ep_name = f"{episode_tag or 'episode'}_full.mp4"
+
+            if not files:
                 with lock:
                     generation_state[task_id]["results"].append({
                         "success": False, "mode": "episode",
                         "segment_count": len(segs),
-                        "error": (f"ComfyUI 返回的视频文件不存在: {files[0]}" if missing_src
-                                  else "ComfyUI 未返回视频文件（可能未安装 H3 节点或超时）"),
+                        "qc_results": qc_results,
+                        "error": "整片生成失败（ComfyUI 未返回视频文件或整片 QC 全部不通过）",
                     })
-            else:
-                src = files[0]
-                ep_name = f"{episode_tag or 'episode'}_full.mp4"
-                dst = os.path.join(videos_dir, ep_name)
-                if os.path.abspath(src) != os.path.abspath(dst):
-                    shutil.move(src, dst)
-                item = {"success": True, "mode": "episode",
-                        "segment_count": len(segs),
-                        "path": dst, "url": f"{_vurl}/{ep_name}",
-                        "segments": [{"index": s.get("index"), "name": s.get("name"),
-                                      "duration": s.get("duration"),
-                                      "refs": len(s.get("refs") or [])}
-                                     for s in (result.get("segments") or [])],
-                        "shots": shot_meta_map,
-                        "prompt_id": result.get("prompt_id"),
-                        "timeout": result.get("timeout")}
-                # H3 音轨策略：默认保留原生音效（并保证有音轨，便于拼接）
-                item["audio"] = _h3_audio_policy(dst)
                 with lock:
-                    generation_state[task_id]["results"].append(item)
-                    generation_state[task_id]["progress"] = 100
-                    generation_state[task_id]["phase"] = "整集视频生成完成"
-                app.logger.info(f"[episode] 产物落盘: {dst}（{len(segs)} 段 → 1 条整集视频）")
+                    generation_state[task_id].update({
+                        "status": "failed",
+                        "success_count": 0,
+                        "error": "整片生成失败或整片 QC 未通过",
+                    })
+                return
+
+            src = files[0]
+            dst = os.path.join(videos_dir, ep_name)
+            if os.path.abspath(src) != os.path.abspath(dst):
+                shutil.move(src, dst)
+            qc_passed = not episode_failed
+            item = {"success": True, "mode": "episode",
+                    "segment_count": len(segs),
+                    "qc_passed": qc_passed,
+                    "attempts_used": attempts_used,
+                    "path": dst, "url": f"{_vurl}/{ep_name}",
+                    "shots": shot_meta_map,
+                    "qc": _qc_summary([], qc_declared, qc_on, max_retries),
+                    "qc_results": qc_results,
+                    "prompt_id": result.get("prompt_id")}
+            # H3 音轨策略
+            item["audio"] = _h3_audio_policy(dst)
+            with lock:
+                generation_state[task_id]["results"].append(item)
+                generation_state[task_id]["progress"] = 100
+                generation_state[task_id]["phase"] = (
+                    f"整集 {len(segs)} 段视频生成完成（QC 通过）" if qc_passed
+                    else f"整集 {len(segs)} 段视频生成（QC 未通过，保留最后生成成片供人工复核）")
+            app.logger.info(f"[episode] 产物落盘: {dst}（qc_passed={qc_passed}，attempts={attempts_used}）")
             with lock:
                 results = generation_state[task_id]["results"]
                 ok = sum(1 for r in results if r.get("success"))
                 generation_state[task_id].update({
-                    "status": "completed" if ok else "failed",
+                    "status": "completed" if ok and qc_passed else "failed",
                     "success_count": ok,
-                    "error": "" if ok else "整集视频生成失败",
+                    "error": "" if qc_passed else "整片 QC 未通过（已保留最后生成成片）",
                 })
             return
 

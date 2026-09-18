@@ -788,12 +788,15 @@ def run_job(job: dict, ep: dict, history: list, timeout: int):
             return
 
         # ---- 让模型决策 ----
+        _decision_started = time.time()
         try:
             if text_mode:
-                content = client.chat(messages, temperature=0.4, max_tokens=2048)
+                content = client.chat(messages, temperature=0.4, max_tokens=2048,
+                                      timeout=min(timeout, 120))
                 calls, final_reply = _fallback_parse_actions(content)
             else:
-                resp = client.chat_tools(messages, TOOL_SCHEMAS, temperature=0.3, max_tokens=2048)
+                resp = client.chat_tools(messages, TOOL_SCHEMAS, temperature=0.3,
+                                         max_tokens=2048, timeout=min(timeout, 120))
                 calls = [{"id": c["id"], "name": c["name"], "args": _safe_args(c["arguments"])}
                          for c in (resp.get("tool_calls") or [])]
                 final_reply = resp.get("content") or ""
@@ -810,8 +813,24 @@ def run_job(job: dict, ep: dict, history: list, timeout: int):
                                "没有要执行的动作时 actions 填空数组。"
                                f"可用工具：\n{_TOOL_INDEX}）",
                 })
+                # 模型决策本身可能耗时很久（网关卡顿 / 大上下文），
+                # 回到循环顶部前再做一次时间检查，避免卡死。
+                if time.time() - started > MAX_TURN_SEC:
+                    job["steps"].append({"tool": "_timeout", "ok": False,
+                                         "summary": "模型决策超上限，中止本轮"})
+                    _finish(job, "timeout",
+                             reply=f"模型决策耗时过长（超过 {MAX_TURN_SEC}s），已自动停止。")
+                    return
                 continue
             _finish(job, "failed", error=f"模型调用失败：{msg[:300]}")
+            return
+
+        # 模型决策本身耗时检查：防止 LLM 网关长时间阻塞导致任务永远 running
+        if time.time() - started > MAX_TURN_SEC:
+            job["steps"].append({"tool": "_timeout", "ok": False,
+                                 "summary": "模型决策超上限，中止本轮"})
+            _finish(job, "timeout",
+                   reply=f"模型决策耗时过长（超过 {MAX_TURN_SEC}s），已自动停止。")
             return
 
         # ---- 没有动作 → 结束 ----
@@ -853,6 +872,14 @@ def run_job(job: dict, ep: dict, history: list, timeout: int):
                 messages.append(tool_msg)
 
         job["expensive_used"] = stats.get("expensive", 0)
+
+        # 动作执行可能阻塞很久（异步工具等任务结束），回到循环顶部前再查时间
+        if time.time() - started > MAX_TURN_SEC:
+            job["steps"].append({"tool": "_timeout", "ok": False,
+                                 "summary": "动作执行超上限，中止本轮"})
+            _finish(job, "timeout",
+                   reply=f"动作执行耗时过长（超过 {MAX_TURN_SEC}s），已自动停止。")
+            return
 
     _finish(job, "done",
             reply=f"已完成 {len(job['steps'])} 步，但单轮步数达到上限 {MAX_STEPS}。"

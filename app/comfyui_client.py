@@ -1366,6 +1366,133 @@ class ComfyUIClient:
 
     # ===================== 视频生成（H3 · 动态段数：一个分镜一段） =====================
 
+    def generate_h3_sequence_sequential(
+        self,
+        segments: List[dict],
+        filename_prefix: str = "comic_drama/episode",
+        seed: int = None,
+        timeout_per_segment: int = 900,
+        template_file: str = None,
+        size=None,
+        qc_fn=None,
+        qc_cfg: dict = None,
+        qc_style: str = "",
+        max_retries: int = 2,
+    ) -> dict:
+        """H3 整集视频生成（N 段一个工作流，原生 H3ContinuousSeamlessJoinV14 衔接）
+        + 整片 QC 门控。
+
+        设计说明：H3 多段无缝衔接依赖同一工作流内 previous_latent / handover
+        连线（段实例间张量传递），无法拆成多次独立 ComfyUI 任务再跨任务喂隐变量。
+        因此「逐段提交」在 H3 层级不成立；本方法保持 N 段一次提交，产出 **单个
+        连续整集视频**，生成后对整片做抽帧质检，不通过则整片重试（换随机种子）。
+
+        - segments: 同 generate_h3_sequence
+        - qc_fn: 可选；qc_fn(video_path, shot_desc, qc_cfg, style) 返回
+          {"passed": bool, "verdict": {...}, ...}；通过才保留成片，不通过则整片重试
+        - max_retries: 整片 QC 不通过时最多重试次数（换随机种子）
+        返回 dict：
+          {"files": [video_path], "segments": [...], "qc_results": [...],
+           "failed": bool, "attempts_used": int, "prompt_id": str}
+        """
+        segs = [dict(s or {}) for s in (segments or [])]
+        if not segs:
+            raise ValueError("generate_h3_sequence_sequential: segments 不能为空")
+        n = len(segs)
+        logger.info(f"[H3-episode] 整集生成：{n} 段一次提交，qc_fn={bool(qc_fn)}, "
+                    f"max_retries={max_retries}")
+
+        qc_results: List[dict] = []
+        attempts_used = 0
+        cur_seed = seed
+        best_file = None       # 最后一次生成成功的文件（供 QC 全不通过时兜底）
+        last_prompt_id = ""
+        passed = False
+        last_seg_report: List[dict] = []
+
+        for attempt in range(max_retries + 1):
+            attempts_used = attempt + 1
+            if attempt > 0:
+                cur_seed = None   # 重试换随机种子，避免重复失败结果
+                logger.info(f"[H3-episode] 第 {attempt + 1} 次整片重试（随机种子）")
+
+            # ---------- 生成（N 段一个工作流 → 单个连续成片） ----------
+            result = None
+            try:
+                result = self.generate_h3_sequence(
+                    segments=segs,
+                    filename_prefix=filename_prefix,
+                    seed=cur_seed,
+                    timeout_per_segment=timeout_per_segment,
+                    template_file=template_file,
+                    size=size,
+                )
+            except Exception as e:
+                logger.warning(f"[H3-episode] 第 {attempt + 1} 次生成异常: {e}")
+                continue
+
+            files = result.get("files") or []
+            last_prompt_id = result.get("prompt_id") or last_prompt_id
+            last_seg_report = result.get("segments") or []
+            if not files:
+                logger.warning(f"[H3-episode] 第 {attempt + 1} 次：ComfyUI 未返回视频文件")
+                continue
+            if not os.path.isfile(files[0]):
+                logger.warning(f"[H3-episode] 第 {attempt + 1} 次：文件不存在 {files[0]}")
+                continue
+
+            best_file = files[0]
+
+            # ---------- 整片 QC 门控 ----------
+            if qc_fn:
+                # 用所有段提示词拼接代表整片
+                shot_desc = "\n".join((s.get("prompt") or "") for s in segs)
+                try:
+                    qc_result = qc_fn(best_file, shot_desc, qc_cfg, qc_style)
+                except Exception as qc_err:
+                    logger.warning(f"[H3-episode] 第 {attempt + 1} 次 QC 调用异常: {qc_err}")
+                    qc_results.append({"attempt": attempt + 1, "passed": None,
+                                       "reason": f"QC 异常: {qc_err}"})
+                    continue
+                qc_passed = qc_result.get("passed", False)
+                qc_results.append({
+                    "attempt": attempt + 1, "passed": qc_passed,
+                    "reason": (qc_result.get("verdict") or {}).get("reason") or "",
+                    "file": best_file,
+                })
+                if qc_passed:
+                    logger.info(f"[H3-episode] 第 {attempt + 1} 次整片 QC 通过")
+                    passed = True
+                    break
+                logger.warning(f"[H3-episode] 第 {attempt + 1} 次整片 QC 不通过"
+                               f"（reason={(qc_result.get('verdict') or {}).get('reason') or '-'}），"
+                               f"{'重试' if attempt < max_retries else '放弃'}")
+            else:
+                logger.info("[H3-episode] 整片生成成功（无 QC 门控）")
+                passed = True
+                break
+
+        if not best_file:
+            logger.error(f"[H3-episode] {n} 段整集生成失败（无成片）")
+            return {
+                "files": [], "segments": last_seg_report,
+                "qc_results": qc_results, "failed": True,
+                "attempts_used": attempts_used, "prompt_id": last_prompt_id,
+                "segment_count": n,
+            }
+
+        logger.info(f"[H3-episode] 完成：产物 {best_file}，通过={passed}，"
+                    f"attempts={attempts_used}")
+        return {
+            "files": [best_file],
+            "segments": last_seg_report,
+            "qc_results": qc_results,
+            "failed": not passed,
+            "attempts_used": attempts_used,
+            "prompt_id": last_prompt_id,
+            "segment_count": n,
+        }
+
     def generate_h3_sequence(self, segments: List[dict],
                              filename_prefix: str = "comic_drama/episode",
                              emit_audio: bool = None,
