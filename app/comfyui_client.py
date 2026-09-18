@@ -36,6 +36,7 @@ from config import (
 from dialogue_utils import (dialogue_text as _dlg_text, format_line as _dlg_line,
                             dialogue_speaker as _dlg_speaker)
 from h3_episode_builder import H3EpisodeBuilder
+import style_kit
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -800,20 +801,44 @@ class ComfyUIClient:
         # 正向通常有多个文本槽（如 prompt/image1..3），取最后一个可用候选
         return sorted(candidates, key=lambda x: int(x) if str(x).isdigit() else 0)[-1]
 
+    def _find_negative_text_node(self, api_prompt: dict,
+                                 class_types=("CLIPTextEncode",)) -> Optional[str]:
+        """在提示词编码节点中定位负向节点（含负向关键词者）——风格负向词追加用"""
+        hits = []
+        for nid, node in api_prompt.items():
+            if node.get("class_type") not in class_types:
+                continue
+            texts = [str(v) for v in (node.get("inputs") or {}).values() if isinstance(v, str)]
+            joined = " ".join(texts).lower()
+            if any(h.lower() in joined for h in NEGATIVE_HINTS):
+                hits.append(nid)
+        if not hits:
+            return None
+        return sorted(hits, key=lambda x: int(x) if str(x).isdigit() else 0)[-1]
+
     def _generate_base_image(self, workflow_file: str, prompt_zh: str,
-                             asset_type: str = None, seed: int = None) -> List[str]:
+                             asset_type: str = None, seed: int = None,
+                             style: str = "", size=None) -> List[str]:
         """通用基础图生成：更新正向提示词节点
 
         P0 修复（同轮补充）：
         - asset_type="scene" → 清洗人物描述并追加"空场景"声明（场景资产不得带人）；
         - clean_conflict_negative_tokens 剔除与 3D 正向风格冲突的负向词；
         - seed 用于质检不达标时的重生成（保证与上一版结果不同）。
+
+        风格落地（2026-09-18 修复）：
+        - style 非空 → 把风格后缀拼进正向提示词（此前完全没有这一步，用户敲定的风格
+          一个资产都没落到提示词里）；
+        - size 非空 → 覆写尺寸节点，让「竖屏 9:16」真正体现在画布上（此前尺寸来自
+          模板硬编码的 1664×928 横向）。
         """
         api_prompt, meta = self.load_workflow(workflow_file, return_meta=True)
         node_id = self._find_positive_text_node(api_prompt)
         if node_id is None:
             logger.error(f"{workflow_file} 中未找到正向提示词节点，转换元信息: {meta}")
             return []
+        # 风格注入：必须在场景去人之前拼好，保证风格词不被 sanitize 丢掉
+        prompt_zh = style_kit.with_style(prompt_zh, style) if style else prompt_zh
         # 场景资产去人
         if asset_type == "scene":
             prompt_zh = self.sanitize_scene_prompt(prompt_zh)
@@ -827,6 +852,18 @@ class ComfyUIClient:
                     node["inputs"][k] = prompt_zh
         logger.info(f"[{workflow_file}] 正向提示词节点 {node_id} 已更新（共 {len(api_prompt)} 节点）")
         self.clean_conflict_negative_tokens(api_prompt)                 # P0：清理风格冲突负向词
+        # 负向词：按风格再压一批「画风打架」的词（如国漫风不该出现写实照片）
+        if style:
+            self._append_style_negative(api_prompt, style)
+        # 画幅落地：尺寸节点覆写
+        if size:
+            hit = style_kit.apply_latent_size(api_prompt, size)
+            if hit:
+                logger.info("[%s] 画幅已按风格覆写为 %s×%s：%s",
+                            workflow_file, size[0], size[1], ",".join(hit))
+            else:
+                logger.warning("[%s] 未找到尺寸节点，画幅 %s×%s 未能落地（沿用模板尺寸）",
+                               workflow_file, size[0], size[1])
         if seed is not None:
             logger.info(f"资产采样种子已注入: {self._inject_seed(api_prompt, seed)}")
         self._harden_no_watermark(api_prompt)   # C 项⑧：图片一律去水印
@@ -835,30 +872,55 @@ class ComfyUIClient:
         history = self.wait_for_completion(prompt_id)
         return self.get_output_files(history, ".png")
 
-    def generate_character_base(self, prompt_zh: str, seed: int = None) -> List[str]:
+    def _append_style_negative(self, api_prompt: dict, style: str) -> None:
+        """把「与目标风格冲突」的词追加到负向提示词节点（找不到负向节点则跳过）"""
+        negs = style_kit.negative_for_style(style)
+        if not negs:
+            return
+        try:
+            node_id = self._find_negative_text_node(api_prompt)
+        except Exception:  # noqa: BLE001
+            node_id = None
+        if not node_id:
+            return
+        node = api_prompt[node_id]
+        cur = ""
+        for k in ("text", "prompt"):
+            if isinstance(node.get("inputs", {}).get(k), str):
+                cur = node["inputs"][k]
+                node["inputs"][k] = (cur.rstrip("，,。") + "，" + "，".join(negs)) if cur.strip() else "，".join(negs)
+                break
+
+    def generate_character_base(self, prompt_zh: str, seed: int = None,
+                                style: str = "", size=None) -> List[str]:
         logger.info(f"生成角色基础图: {prompt_zh[:50]}...")
         return self._generate_base_image(WORKFLOW_TEMPLATE["character_gen"], prompt_zh,
-                                         asset_type="character", seed=seed)
+                                         asset_type="character", seed=seed, style=style, size=size)
 
-    def generate_item_base(self, prompt_zh: str, seed: int = None) -> List[str]:
+    def generate_item_base(self, prompt_zh: str, seed: int = None,
+                           style: str = "", size=None) -> List[str]:
         logger.info(f"生成物品基础图: {prompt_zh[:50]}...")
         return self._generate_base_image(WORKFLOW_TEMPLATE["item_gen"], prompt_zh,
-                                         asset_type="item", seed=seed)
+                                         asset_type="item", seed=seed, style=style, size=size)
 
-    def generate_scene_base(self, prompt_zh: str, seed: int = None) -> List[str]:
+    def generate_scene_base(self, prompt_zh: str, seed: int = None,
+                            style: str = "", size=None) -> List[str]:
         logger.info(f"生成场景基础图: {prompt_zh[:50]}...")
         return self._generate_base_image(WORKFLOW_TEMPLATE["scene_gen"], prompt_zh,
-                                         asset_type="scene", seed=seed)
+                                         asset_type="scene", seed=seed, style=style, size=size)
 
     # ===================== 第二阶段：多视角生成 =====================
 
     def generate_multiview(self, base_image_path: str, asset_type: str,
                            asset_name: str, base_prompt_zh: str,
-                           seed: int = None) -> Dict[str, str]:
+                           seed: int = None, style: str = "", size=None) -> Dict[str, str]:
         """基于基础图生成多视角图（Qwen Edit 2511）
 
         character → 4 视图（正/左/右/背）；item / scene → 4 视角（正/左45/右45/俯视）
-        P0 修复：正向提示词统一补「竖屏 9:16」画幅声明（base 图已是竖屏 → 多视角保持竖屏）；
+
+        风格落地（2026-09-18 修复）：原 docstring 声称"统一补竖屏 9:16 画幅声明"，
+        但代码里并没有这一步 —— 风格与画幅都是模板自带的，用户的设定到不了多视角图。
+        现在 style / size 由调用方传入并真正生效。
         seed 供 app 层质检不达标时重生成。
         """
         views = MULTIVIEW_CONFIG["character_views"] if asset_type == "character" \
@@ -876,17 +938,20 @@ class ComfyUIClient:
             ) from e
         logger.info(f"基础图已上传到 ComfyUI output 目录: {output_name}")
 
+        # 风格后缀：拼在 base_desc 之后，保证每个视角都带风格
+        styled_desc = style_kit.with_style(base_prompt_zh, style, with_tail=False) if style \
+            else base_prompt_zh
         # P0：场景多视角同样必须去人（基础图与多视角一致，避免视角转换时"带出"人物）
         if asset_type == "scene":
-            base_prompt_zh = self.sanitize_scene_prompt(base_prompt_zh)
+            styled_desc = self.sanitize_scene_prompt(styled_desc)
 
         results = {}
         for view in views:
             logger.info(f"生成 {asset_name} {view['label']}...")
-            view_prompt = self._build_multiview_prompt(asset_type, base_prompt_zh, view)
+            view_prompt = self._build_multiview_prompt(asset_type, styled_desc, view)
             if asset_type == "scene" and SCENE_NO_CHARACTER_SUFFIX not in view_prompt:
                 view_prompt = view_prompt.rstrip("。;； ") + SCENE_NO_CHARACTER_SUFFIX
-            img_path = self._run_multiview_workflow(output_name, view_prompt, seed=seed)
+            img_path = self._run_multiview_workflow(output_name, view_prompt, seed=seed, size=size)
             if img_path:
                 results[view["key"]] = img_path
             else:
@@ -910,7 +975,7 @@ class ComfyUIClient:
 
     def _run_multiview_workflow(self, uploaded_image_name: str, prompt_zh: str,
                                 image_dir: str = ANNOTATED_DIR,
-                                seed: int = None) -> Optional[str]:
+                                seed: int = None, size=None) -> Optional[str]:
         """运行多视角编辑工作流（分镜生成.json：Qwen Edit 2511）"""
         api_prompt, meta = self.load_workflow(WORKFLOW_TEMPLATE["multiview_gen"], return_meta=True)
         if seed is not None:
@@ -923,6 +988,14 @@ class ComfyUIClient:
         else:
             logger.warning("分镜生成.json 未定位到正向提示词节点")
         self.clean_conflict_negative_tokens(api_prompt)   # P0：清理风格冲突负向词
+        # 画幅落地（与基础图一致，否则多视角会把竖屏 base 图改成模板的横屏尺寸）
+        if size:
+            hit = style_kit.apply_latent_size(api_prompt, size)
+            if hit:
+                logger.info("多视角画幅已覆写为 %s×%s：%s", size[0], size[1], ",".join(hit))
+            else:
+                logger.info("多视角工作流无尺寸节点，画幅继承参考图（基础图 %s×%s）",
+                            size[0], size[1])
         self._harden_no_watermark(api_prompt)   # C 项⑧：图片一律去水印
 
         # 2) 参考图：3 个 LoadImageOutput 全部替换（P0-3），且按节点类型补目录标注（P0-5）
@@ -999,10 +1072,19 @@ class ComfyUIClient:
             )
         if shot.get("emotion"):
             parts.append(f"情绪氛围：{shot['emotion']}。")
+        # 风格与画幅：优先用镜头自带 style（由剧本阶段注入，来自用户与总控敲定的设定）；
+        # 历史缺陷：这里写死「国漫3D渲染风格，竖屏 9:16 构图」，用户换任何风格都不生效。
+        style_clause = ""
+        shot_style = style_kit.normalize_style(shot.get("style"))
+        if shot_style:
+            clause = style_kit.style_suffix(shot_style, head="画面风格", with_tail=False)
+            style_clause = f"{clause}；" if clause else ""
+        else:
+            style_clause = "国漫3D渲染风格；"
         parts.append(
             "要求：画面中人物的脸型、发型、服装、配饰与角色参考图完全一致，"
             "物品的形状、材质、颜色与物品参考图一致，环境氛围与场景参考图一致；"
-            "竖屏 9:16 构图，国漫3D渲染风格，"
+            + style_clause +
             "光影细腻，构图清晰；镜头景别必须与上述规定一致，"
             "画面中不得出现任何文字、字幕、台词文本、水印、logo 或标识"
             "（尤其不得在右下角出现「AI生成」等生成标识）。"
@@ -1067,12 +1149,14 @@ class ComfyUIClient:
 
     def generate_storyboard(self, prompt_zh: str, ref_images: List[str],
                             filename_prefix: str = "comic_drama_sb/shot",
-                            seed: int = None, timeout: int = 900) -> dict:
+                            seed: int = None, timeout: int = 900,
+                            size=None) -> dict:
         """使用 分镜生成.json（Qwen Edit 2511）生成单张分镜图
 
         ref_images: 参考图列表（本地绝对路径或 /api/... HTTP 资源路径），最多 3 张，
                     按顺序对应正向节点的 image1 / image2 / image3 槽位。
         seed:       可选随机种子（质检不达标重生成时传入，保证产出与上一次不同）。
+        size:       可选 (宽, 高)，按用户敲定的画幅覆写尺寸节点（竖屏 9:16 落地）。
         """
         api_prompt, _meta = self.load_workflow(WORKFLOW_TEMPLATE["storyboard_gen"], return_meta=True)
         seed_changed = self._inject_seed(api_prompt, seed)
@@ -1085,6 +1169,15 @@ class ComfyUIClient:
             raise RuntimeError("分镜生成.json 未定位到正向提示词节点（TextEncodeQwenImageEditPlus）")
         api_prompt[node_id]["inputs"]["prompt"] = prompt_zh
         self.clean_conflict_negative_tokens(api_prompt)                 # P0：清理风格冲突负向词
+        if size:
+            hit = style_kit.apply_latent_size(api_prompt, size)
+            if hit:
+                logger.info("分镜图幅已覆写为 %s×%s：%s", size[0], size[1], ",".join(hit))
+            else:
+                # 分镜生成.json 是「参考图编辑」型（FluxKontextImageScale 无尺寸参数），
+                # 输出画幅继承第一张参考图 → 画幅由基础资产图的尺寸决定，这里空转属正常。
+                logger.info("分镜工作流无尺寸节点，画幅继承参考图（%s×%s）"
+                            "—— 由基础资产图尺寸决定", size[0], size[1])
         self._harden_no_watermark(api_prompt)   # C 项⑧：分镜图一律去水印
 
         # 2) 参考图上传到 ComfyUI output 目录（LoadImageOutput 只认 output 目录 + [output] 标注）
@@ -1280,7 +1373,8 @@ class ComfyUIClient:
                              timeout: int = None,
                              timeout_per_segment: int = 900,
                              template_file: str = None,
-                             save_build_to: str = None) -> dict:
+                             save_build_to: str = None,
+                             size=None) -> dict:
         """H3 多段一次生成：**工作流段数 = len(segments)**，一个分镜对应一段。
 
         与 generate_video 的差异（修复"每个分镜跑了 10 段"）：
@@ -1294,6 +1388,7 @@ class ComfyUIClient:
         timeout:  总超时（秒）；None 时按 1200 + timeout_per_segment × 段数 估算
         timeout_per_segment: 单段预估耗时（默认 900s，用于总超时兜底）
         save_build_to: 可选，把重建后的 UI 工作流落盘（便于复现/排障）
+        size: 可选 (宽, 高)，按用户敲定的画幅覆写模板分辨率（竖屏 9:16 → (544, 960)）
         """
         segs = [dict(s or {}) for s in (segments or [])]
         if not segs:
@@ -1303,7 +1398,8 @@ class ComfyUIClient:
         tpl_path = os.path.join(COMFYUI_WORKFLOWS_DIR, tpl_name)
         builder = H3EpisodeBuilder(tpl_path)
         default_duration = float((segs[0] or {}).get("duration") or 5.0)
-        wf, layout = builder.build(n, duration=default_duration)
+        wf, layout = builder.build(n, duration=default_duration,
+                                   resolution_override=tuple(size) if size else None)
         if save_build_to:
             os.makedirs(os.path.dirname(save_build_to), exist_ok=True)
             with open(save_build_to, "w", encoding="utf-8") as f:

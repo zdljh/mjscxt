@@ -262,11 +262,14 @@ class H3EpisodeBuilder:
         return lk
 
     # ------------------------------------------------------------------ 构建
-    def build(self, n_segments: int, duration: float = 5.0) -> Tuple[dict, dict]:
+    def build(self, n_segments: int, duration: float = 5.0,
+              resolution_override: Optional[Tuple[int, int]] = None) -> Tuple[dict, dict]:
         """按目标段数重建工作流。
 
         n_segments: 目标段数（= 该集分镜数）
         duration: 段默认时长（秒）
+        resolution_override: 可选 (宽, 高)，覆盖模板 ResolutionSelector 的分辨率
+                             （用户设定竖屏 9:16 时传入 (544, 960)）
         """
         if n_segments < 1:
             raise ValueError(f"段数必须 >= 1，当前 {n_segments}")
@@ -274,10 +277,13 @@ class H3EpisodeBuilder:
         seg_ids = analysis["segments"]
         if not seg_ids:
             raise RuntimeError("模板中未找到 H3 段实例（子图实例），无法重建")
-        # 分辨率：与模板 ResolutionSelector（16:9 × 0.5MP × 32）保持一致，
-        # 段实例的 width/height 输入重建后不再由 GetNode 注入，改用该数值。
-        resolution = self._template_resolution()
-        if resolution is None:
+        # 分辨率：模板 ResolutionSelector 默认 16:9 × 0.5MP × 32 → 960×544 横屏。
+        # 用户若敲定了竖屏 9:16，必须在这里覆写，否则提示词里写着「竖屏」而画布是横屏。
+        resolution = (tuple(resolution_override) if resolution_override
+                      else self._template_resolution())
+        if resolution_override:
+            logger.info(f"H3 段分辨率已按用户设定覆写：{resolution[0]}×{resolution[1]}")
+        elif resolution is None:
             logger.warning("模板未找到可用的 ResolutionSelector，段实例沿用模板自带宽高")
         else:
             logger.info(f"H3 段分辨率取自模板 ResolutionSelector：{resolution[0]}×{resolution[1]}")

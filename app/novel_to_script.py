@@ -21,8 +21,9 @@ import re
 import time
 from datetime import datetime
 
-from llm_client import LLMError, LLMTruncatedError
+from llm_client import LLMError, LLMTruncatedError, LLMGatewayUnavailable
 from dialogue_utils import dialogue_text as _dlg_text, normalize_lines as _dlg_lines
+import style_kit
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +259,31 @@ def _robust_json(client, prompt: str, system: str, temperature: float, max_token
                                "truncated": bool(meta.get("truncated"))})
 
 
+def _gateway_down_fallback(e, chunk: dict, per_chunk: int, bible: dict,
+                           produced: list) -> list:
+    """「LLM 网关不可用」时的统一处置（不是普通的单块失败）
+
+    实测教训：网关上游没算力时，每一块都会失败 → 每块都按原文兜底 →
+    整集 6/6 兜底，脚本却仍记成「生成成功」。这种剧本没有分镜设计、没有台词，
+    配音链路读不到 dialogue 就只出 1 句，用户根本无从判断哪一镜有问题。
+    所以分两种情况：
+    - **还没产出任何真实镜头** → 直接失败。产出兜底剧本比报错更糟。
+    - **已有真实产出** → 剩余块兜底，保住已完成部分，并在 warnings 里如实标注降级。
+    """
+    if not produced:
+        hint = getattr(e, "hint", "") or "请到「AI 设置」检查 base_url / model 是否可用"
+        raise LLMError(
+            "LLM 网关不可用，已中止生成：继续下去只会得到一份「无分镜、无台词」的"
+            f"原文兜底剧本（该剧本配音只能出 0 句）。原因：{e}　处置建议：{hint}"
+        ) from e
+    return _fallback_shots_for_chunk(chunk, per_chunk, bible)
+
+
+def _gateway_down_warning(chunk: dict, n_fb: int) -> str:
+    return (f"⚠ LLM 网关不可用：第 {chunk['index']} 块已按原文兜底生成 {n_fb} 镜。"
+            "本集为**降级产出**（该块无分镜设计、无台词），网关恢复后建议重跑本集。")
+
+
 def _split_chunk_in_half(chunk: dict) -> list:
     """把子块按中点附近的句末标点一分为二（保证不丢字），用于截断后的进一步切分"""
     text = str(chunk.get("text") or "")
@@ -396,12 +422,13 @@ def build_bible(client, outlines: list, novel_title: str, style: str, episodes: 
   "title": "剧名（4-12 字）",
   "theme": "一句话主题/卖点（30 字以内）",
   "style": "{style}",
-  "characters": [{{"name": "姓名", "age": "年龄", "identity": "身份/阵营（15 字以内）", "appearance": "外貌（含发色/瞳色/标志特征，60 字以内；若上方设定库已锁定则该字段必须与锁定值逐字一致）", "outfit": "本集服装状态（20 字以内，与上集结尾一致；若本集确有换装必须体现原因）", "personality": "性格（30 字以内）", "voice_style": "配音风格（15 字以内）", "reference_prompt_zh": "中文参考图提示词：角色三视图设定图描述，60 字以内", "reference_prompt_en": "English prompt for character reference sheet, under 40 words"}}],
-  "items": [{{"name": "物品名", "category": "武器/法宝/道具/服饰", "appearance": "外观（50 字以内）", "owner": "持有人", "importance": "重要/临时（重要=后续章节会重复出现或推动剧情，临时=仅本集使用），只输出重要道具", "reference_prompt_zh": "中文参考图提示词，50 字以内", "reference_prompt_en": "English prompt, under 35 words"}}],
-  "scenes": [{{"name": "场景名", "location": "地点类型", "appearance": "环境与氛围（60 字以内）", "reference_prompt_zh": "中文参考图提示词，50 字以内", "reference_prompt_en": "English prompt, under 35 words"}}],
+  "characters": [{{"name": "姓名", "age": "年龄", "identity": "身份/阵营（15 字以内）", "appearance": "外貌（含发色/瞳色/标志特征，60 字以内；若上方设定库已锁定则该字段必须与锁定值逐字一致）", "outfit": "本集服装状态（20 字以内，与上集结尾一致；若本集确有换装必须体现原因）", "personality": "性格（30 字以内）", "voice_style": "配音风格（15 字以内）", "reference_prompt_zh": "中文参考图提示词：角色三视图设定图描述，60 字以内，**必须在末尾原样带上【风格要求】里的风格词**", "reference_prompt_en": "English prompt for character reference sheet, under 40 words, ending with the style keywords"}}],
+  "items": [{{"name": "物品名", "category": "武器/法宝/道具/服饰", "appearance": "外观（50 字以内）", "owner": "持有人", "importance": "重要/临时（重要=后续章节会重复出现或推动剧情，临时=仅本集使用），只输出重要道具", "reference_prompt_zh": "中文参考图提示词，50 字以内，**必须在末尾原样带上【风格要求】里的风格词**", "reference_prompt_en": "English prompt, under 35 words, ending with the style keywords"}}],
+  "scenes": [{{"name": "场景名", "location": "地点类型", "appearance": "环境与氛围（60 字以内）", "reference_prompt_zh": "中文参考图提示词，50 字以内，**必须在末尾原样带上【风格要求】里的风格词**", "reference_prompt_en": "English prompt, under 35 words, ending with the style keywords"}}],
   "production_notes": {{"style_guide": "画面与叙事风格说明（60 字以内）"}}
 }}
 【硬性约束】characters 最多 6 个（只保留主要角色，按戏份排序）；items 最多 5 个；scenes 最多 6 个；不要输出示例里的占位文字。若上方提供了「项目级设定库」，则已登记角色的 name / appearance / personality 必须与该库完全一致（禁止改名、禁止改外观），只允许更新 outfit（当前服装状态）。
+【风格红线】characters / items / scenes 三个数组里**每一条** reference_prompt_zh 的结尾都必须逐字包含【风格要求】的完整风格描述；缺了风格词的条目视为不合格输出。
 【格式红线】直接以 {{ 作为输出的第一个字符；严禁输出任何推理过程、思考草稿、英文说明、markdown 代码块标记或前后缀解释文字；整个 JSON 输出控制在 1200 字以内（字段描述能短则短）。"""
     bible_retry_kw = {"max_attempts": 4, "token_ladder": (6000, 8192, 16384, 24576)}
     data = {}
@@ -458,14 +485,21 @@ def _fallback_bible(outlines: list, novel_title: str, style: str) -> dict:
         for s in (o.get("scenes") or [])[:6]:
             if isinstance(s, dict):
                 _pick(s, scenes, ["location", "appearance"])
+    out_chars, out_items, out_scenes = (list(chars.values())[:6], list(items.values())[:5],
+                                        list(scenes.values())[:6])
+    # 兜底路径同样要带风格：否则一旦 bible 汇总失败，资产提示词又回到「零风格词」老样子
+    eff = style_kit.normalize_style(style)
+    if eff:
+        for group in (out_chars, out_items, out_scenes):
+            style_kit.apply_asset_style(group, eff)
     return {
         "title": (novel_title or "")[:20],
         "theme": "",
-        "style": style,
-        "characters": list(chars.values())[:6],
-        "items": list(items.values())[:5],
-        "scenes": list(scenes.values())[:6],
-        "production_notes": {"style_guide": style},
+        "style": eff,
+        "characters": out_chars,
+        "items": out_items,
+        "scenes": out_scenes,
+        "production_notes": {"style_guide": eff},
         "_degraded": True,
     }
 
@@ -498,8 +532,9 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
 【本段剧情摘要】{outline.get('summary', '')}
 【本段情节要点】{json.dumps(outline.get('key_beats') or [], ensure_ascii=False)}
 【输出要求】严格只输出一个 JSON 对象，不要 markdown 代码块、不要解释文字，结构如下：
-{{"shots": [{{"camera": "景别+运镜（必须取自上方运镜术语表，如 中景跟拍/特写推入，10 字以内）", "location": "所属场景名（必须来自可用场景）", "description": "画面内容描述（80 字以内，写清人物动作、外貌衣着、环境光线与画面构图，尽量沿用原文措辞）", "narration": "旁白文本（承载原文的心理活动/背景补叙/环境描写，尽量照原文措辞，60 字以内；无则空字符串）", "dialogue": [{{"speaker": "说话角色名（必须与可用角色完全一致）", "text": "该角色台词（≤60 字，原文对话尽量原样保留）"}}], "emotion": "情绪（8 字以内）", "audio_cues": "音效/配乐提示（60 字以内；旁白请以「旁白:」开头）", "characters_in_shot": ["出场角色名"], "items_in_shot": ["出场物品名"], "prompt_h3": "英文画面描述（60 词以内，描述主体、动作、环境、光线、运镜）"}}]}}
+{{"shots": [{{"camera": "景别+运镜（必须取自上方运镜术语表，如 中景跟拍/特写推入，10 字以内）", "location": "所属场景名（必须来自可用场景）", "description": "画面内容描述（80 字以内，写清人物动作、外貌衣着、环境光线与画面构图，尽量沿用原文措辞）", "narration": "旁白文本（承载原文的心理活动/背景补叙/环境描写，尽量照原文措辞，60 字以内；会被合成进成片，无台词的镜头必须填。确实无需旁白时写空字符串，但不得与 dialogue 同时为空）", "dialogue": [{{"speaker": "说话角色名（必须与可用角色完全一致）", "text": "该角色台词（≤60 字，原文对话尽量原样保留）"}}], "emotion": "情绪（8 字以内）", "audio_cues": "音效/配乐提示（60 字以内；旁白请以「旁白:」开头）", "characters_in_shot": ["出场角色名"], "items_in_shot": ["出场物品名"], "prompt_h3": "英文画面描述（60 词以内，描述主体、动作、环境、光线、运镜）"}}]}}
 【台词要求】dialogue 必须是数组，数组元素为 {{"speaker": 角色名, "text": 台词}}；speaker 必须精确等于「可用角色」中的名字，禁止写“旁白/众人”等未登记角色；无台词的镜头 dialogue 写 []（空数组），禁止写成字符串或 null。
+【音轨不空约束（每镜必须有人声）】成片配音链路只读 dialogue 与 narration；audio_cues 里写「雨声」「风声」这类音效**不会产生任何人声**。因此每个镜头必须满足其中之一：① dialogue 至少 1 条台词；② narration 有实质文字（**不少于 8 个字**，承载该镜的心理/背景/环境旁白，会被合成进成片）。**严禁 narration 与 dialogue 同时为空**——那会形成「静默镜」，成片到该镜头完全无声（实测曾出现 24 镜里 18 镜无声）。纯画面/纯动作镜头（无台词）必须补写 narration，把该镜发生了什么讲出来。
 【硬性约束】shots 数组元素个数必须在 {shots_target} ~ {shots_cap} 之间：上方原文的全部情节都要落到镜头里，不得删减情节、不得跳过段落、不得合并概括（内容多时用更多镜头承载，而不是少写镜头）；name 字段必须与上面「可用角色/物品/场景」中的名字完全一致，不要新造名字。若上方给出「本集必须出现的原文金句」，必须把每句**原样**写进对应角色的 dialogue.text（不得改写、不得拆分、不得省略）。上一集已发生的事件禁止在本集重演。
 【逐句归属自检（细节零删减）】逐句回看原文，确保每一句（含背景补叙、过渡句、环境句）都落在某条镜头的 description / narration / dialogue / audio_cues 里；短句可合并到相邻镜头，但不得整句丢弃。心理活动与背景补叙优先用 narration 承载，并尽量保留原句措辞。"""
     label = f"shots#{chunk.get('index')}"
@@ -618,6 +653,11 @@ def estimate_shot_duration(shot: dict) -> float:
     """
     dialogue = _dlg_text(shot.get("dialogue"))
     dialogue = re.sub(r"^[^：:]{1,12}[：:]", "", dialogue)          # 去掉“角色名：”前缀
+    if not dialogue:
+        # 无台词时改用旁白长度推算：旁白现在也会被合成进成片
+        # （见 tts_client.build_dub_plan 的「旁白补声」）。若仍按「无台词」给 3 秒基准，
+        # 一句 60 字旁白（≈13 秒）会硬贴在 3 秒画面上 → 音画错位、旁白被截断。
+        dialogue = str(shot.get("narration") or "").strip()
     speak_sec = len(dialogue) / CHARS_PER_SECOND if dialogue else 0.0
     desc_sec = min(2.0, len(str(shot.get("description") or "")) / 60.0)
     raw = SHOT_DURATION_SILENT + speak_sec + desc_sec
@@ -709,6 +749,10 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
     scenes = [s.get("name") for s in (bible.get("scenes") or []) if isinstance(s, dict)]
     chars = [c.get("name") for c in (bible.get("characters") or []) if isinstance(c, dict)]
     items = [i.get("name") for i in (bible.get("items") or []) if isinstance(i, dict)]
+    # 风格：镜头级落一次 style，下游（分镜图 / 视频提示词）才有值可用。
+    # 历史缺陷：这里不写 style，导致 comfyui_client 里 shot.get("style", "3D动漫渲染")
+    # 永远回落硬编码默认值 —— 用户与总控敲定的风格一个镜头都传不到。
+    shot_style = style_kit.normalize_style(bible.get("style"))
     shots = []
     sid = start_id
     for s in raw_shots:
@@ -732,6 +776,7 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
             "emotion": str(s.get("emotion") or "平静").strip()[:20],
             "audio_cues": str(s.get("audio_cues") or "").strip()[:60],
             "prompt_h3": str(s.get("prompt_h3") or "").strip(),
+            "style": shot_style,          # ← 风格注入：分镜图/视频提示词的风格来源
             "characters_in_shot": [c for c in (s.get("characters_in_shot") or []) if c in chars] or chars[:1],
             "items_in_shot": [i for i in (s.get("items_in_shot") or []) if i in items],
         }
@@ -869,11 +914,20 @@ def convert_novel_to_script(client, novel_meta: dict, novel_text: str, style: st
                         ["name", "location", "appearance", "reference_prompt_zh", "reference_prompt_en"])
     if not characters:
         raise LLMError("模型未返回有效角色设定，转换中止")
+    # 风格：以调用方传入的 style 为准 + 确定性补写（模型经常漏风格词）
+    eff_style = style_kit.normalize_style(style) or style_kit.normalize_style(bible.get("style"))
+    style_filled = style_kit.apply_asset_style(characters, eff_style) \
+        + style_kit.apply_asset_style(items, eff_style) \
+        + style_kit.apply_asset_style(scenes, eff_style)
+    if eff_style and style_filled:
+        logger.info("全剧设定：已为 %d 条资产参考提示词补写风格「%s」", style_filled, eff_style)
     bible = {"title": str(bible.get("title") or novel_title)[:40],
              "theme": str(bible.get("theme") or "")[:200],
-             "style": str(bible.get("style") or style)[:60],
+             "style": eff_style[:60],
              "characters": characters, "items": items, "scenes": scenes,
              "production_notes": bible.get("production_notes") or {}}
+
+    # ③ 逐块写分镜（镜头数按每块原文体量自动扩展，不再按 target_shots 摊薄砍内容）
 
     # ③ 逐块写分镜（镜头数按每块原文体量自动扩展，不再按 target_shots 摊薄砍内容）
     all_shots = []
@@ -885,6 +939,12 @@ def convert_novel_to_script(client, novel_meta: dict, novel_text: str, style: st
         try:
             all_shots.extend(build_shots_for_chunk(client, bible, outlines[i] or {"summary": "", "key_beats": []},
                                                    chunk, per_chunk))
+        except LLMGatewayUnavailable as e:
+            # 网关问题不是「这一块运气不好」，重试无用 —— 见 _gateway_down_fallback 说明
+            fb = _gateway_down_fallback(e, chunk, per_chunk, bible, all_shots)
+            all_shots.extend(fb)
+            warnings.append(_gateway_down_warning(chunk, len(fb)))
+            logger.error(f"第 {chunk['index']} 块因网关不可用降级兜底 {len(fb)} 镜：{e}")
         except LLMError as e:
             # 兜底：按原文逐句生成承载镜头，绝不静默丢弃该段原文
             fb = _fallback_shots_for_chunk(chunk, per_chunk, bible)
@@ -1166,9 +1226,17 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
                         ["name", "location", "appearance", "reference_prompt_zh", "reference_prompt_en"])
     if not characters:
         raise LLMError("模型未返回有效角色设定，转换中止")
+    # 风格：以调用方传入的 style 为准（模型的返回值可能是自我发挥，用户意图优先）
+    eff_style = style_kit.normalize_style(style) or style_kit.normalize_style(bible.get("style"))
+    # 确定性补写：模型经常漏风格词（实测角色/物品/场景三条全漏），这里兜底补一次
+    style_filled = style_kit.apply_asset_style(characters, eff_style) \
+        + style_kit.apply_asset_style(items, eff_style) \
+        + style_kit.apply_asset_style(scenes, eff_style)
+    if eff_style and style_filled:
+        logger.info("第%s集：已为 %d 条资产参考提示词补写风格「%s」", episode_no, style_filled, eff_style)
     bible = {"title": str(bible.get("title") or novel_title)[:40],
              "theme": str(bible.get("theme") or "")[:200],
-             "style": str(bible.get("style") or style)[:60],
+             "style": eff_style[:60],
              "characters": characters, "items": items, "scenes": scenes,
              "production_notes": bible.get("production_notes") or {}}
 
@@ -1199,6 +1267,11 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
             warnings.append(f"第 {chunk['index']} 子块分镜被截断失败（已自动提额并尝试二次切分），"
                             f"已按原文兜底生成 {len(fb)} 镜（内容未丢，建议人工润色）：{e}")
             logger.warning(f"第 {chunk['index']} 子块分镜被截断失败，已兜底 {len(fb)} 镜：{e}")
+        except LLMGatewayUnavailable as e:
+            fb = _gateway_down_fallback(e, chunk, per_chunk, bible, all_shots)
+            all_shots.extend(fb)
+            warnings.append(_gateway_down_warning(chunk, len(fb)))
+            logger.error(f"第 {chunk['index']} 子块因网关不可用降级兜底 {len(fb)} 镜：{e}")
         except LLMError as e:
             fb = _fallback_shots_for_chunk(chunk, per_chunk, bible)
             all_shots.extend(fb)

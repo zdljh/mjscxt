@@ -495,7 +495,7 @@ def step_assets(ctx) -> dict:
             continue
         ctx["progress"](f"生成{kind}资产（{len(assets)} 个）", 20, phase=f"assets:{kind}")
         final = _run_task_worker(
-            A._generate_asset_task, (assets, kind, ctx["project_name"]),
+            A._generate_asset_task, (assets, kind, ctx["project_name"], ctx["config"].get("style") or ""),
             "generation_state", "lock",
             init={"total": len(assets), "asset_type": kind, "phase": f"{kind} 资产"},
             prefix=f"pipe_asset_{kind}")
@@ -526,7 +526,7 @@ def step_storyboard(ctx) -> dict:
     ctx["progress"](f"生成分镜图（{len(shots)} 镜）", 34, phase="storyboard")
     final = _run_task_worker(
         A._storyboard_worker, (ctx["project_name"], shots, char_idx, item_idx, scene_idx,
-                               ctx["episode_no"]),
+                               ctx["episode_no"], ctx["config"].get("style") or ""),
         "generation_state", "lock",
         init={"total": len(shots), "phase": "分镜图生成"},
         prefix="pipe_sb")
@@ -605,7 +605,8 @@ def step_video(ctx) -> dict:
          int(ctx.get("timeout_per_segment") or 900),
          ctx.get("episode_tag") or f"ep{ctx['episode_no']:02d}",
          ctx["episode_no"],
-         cfg.get("keyframe_chain_mode") or "auto"),
+         cfg.get("keyframe_chain_mode") or "auto",
+         cfg.get("style") or ""),
         "generation_state", "lock",
         init={"total": len(shots), "phase": "视频生成", "qc": A._qc_brief("video")},
         prefix="pipe_video")
@@ -637,21 +638,36 @@ def step_final(ctx) -> dict:
     out = final_path(ctx)
     os.makedirs(os.path.dirname(out), exist_ok=True)
 
-    # 按剧本镜头顺序（而非文件名字典序）拼接，保证叙事顺序正确
-    files = []
-    for i, s in enumerate(shots):
-        seq = A._shot_seq(s.get("shot_id", i + 1), i + 1)
-        p = os.path.join(vd["dir"], f"shot_{seq:02d}.mp4")
-        if _nonempty(p):
-            files.append(p)
-    if not files:
-        raise PipelineError("该集没有可拼接的镜头视频")
+    # 整集模式（video_mode=episode）：step_video 由 H3 一次生成「整集视频」，
+    # 磁盘上根本没有逐镜 shot_XX.mp4。此时不能按逐镜拼接，直接把整集视频
+    # 采用为成片，否则会误报「该集没有可拼接的镜头视频」而整集卡死。
+    mode = (ctx["config"].get("video_mode") or "per_shot")
+    if mode == "episode":
+        src = vd.get("file") or ""
+        if not _nonempty(src):
+            raise PipelineError("整集模式未找到整集视频文件，无法合成成片")
+        ctx["progress"]("整集模式：采用整集视频作为成片", 70, phase="final")
+        files = [src]
+        tmp = out + ".episode.mp4"
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        shutil.copy2(src, tmp)
+    else:
+        # 按剧本镜头顺序（而非文件名字典序）拼接，保证叙事顺序正确
+        files = []
+        for i, s in enumerate(shots):
+            seq = A._shot_seq(s.get("shot_id", i + 1), i + 1)
+            p = os.path.join(vd["dir"], f"shot_{seq:02d}.mp4")
+            if _nonempty(p):
+                files.append(p)
+        if not files:
+            raise PipelineError("该集没有可拼接的镜头视频")
 
-    ctx["progress"](f"合成成片（{len(files)} 段）", 70, phase="final")
-    tmp = out + ".concat.mp4"
-    if os.path.exists(tmp):
-        os.remove(tmp)
-    A.video_processor.concat_videos(files, tmp)
+        ctx["progress"](f"合成成片（{len(files)} 段）", 70, phase="final")
+        tmp = out + ".concat.mp4"
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        A.video_processor.concat_videos(files, tmp)
     if not _nonempty(tmp):
         raise PipelineError("片段拼接失败（未产出有效文件）")
 
@@ -1273,6 +1289,37 @@ def set_deliverable_review(project_name: str, episode_no: int, review: str,
     if review == "rejected":
         # 打回 = 该集需要重做：清掉死信状态让流水线重新尝试
         resolve_dead_letter(project_name, episode_no, note="成片被打回，重新生产")
+    return item
+
+
+def mark_deliverable_stale(project_name: str, episode_no: int, reason: str,
+                           detail: dict = None) -> dict:
+    """把该集已登记的成片标记为「已过期」（镜头被重做，成片需要重新合成）
+
+    用户闭环里很关键的一步：对某镜不满意 → 重做该镜 → 但成片还是旧的。
+    这里给交付物打标，验收页就能提示「镜头有更新，请重新合成后再验收」，
+    而不是让用户对着过期成片点验收。
+    """
+    A = _A()
+    idx_path = os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot", project_name, "deliverables.json")
+    if not _nonempty(idx_path):
+        return {}
+    try:
+        with open(idx_path, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+    item = (data.get("items") or {}).get(str(int(episode_no)))
+    if not isinstance(item, dict):
+        return {}
+    meta = item.setdefault("meta", {})
+    stale = meta.setdefault("stale", {})
+    stale.update({"reason": reason, "detail": detail or {}, "marked_at": _now()})
+    item["updated_at"] = _now()
+    tmp = idx_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, idx_path)
     return item
 
 
