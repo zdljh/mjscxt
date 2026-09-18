@@ -116,3 +116,7 @@ frontend/src_backup/
 # Git Bash 里 `> nul` 会真的建出一个名为 nul 的文件，而非丢弃输出
 nul
 
+
+# 大文件构建产物（超过 GitHub 100MB 限制，禁止入库）
+electron-app/electron-v33-official.zip
+*.zip
