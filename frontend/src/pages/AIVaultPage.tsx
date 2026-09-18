@@ -9,7 +9,24 @@ interface ModuleState {
   model: string;
   api_key: string;
   has_api_key: boolean;
+  /** 思考档位：'' = 不注入（服务端默认），其余为 low / high / max */
+  reasoning_effort: string;
 }
+
+const EMPTY_MODULE: ModuleState = {
+  base_url: '', model: '', api_key: '', has_api_key: false, reasoning_effort: '',
+};
+
+/** 思考档位下拉的兜底选项（后端会下发 reasoning_effort_options，拿不到时用这份） */
+const FALLBACK_REASONING_OPTIONS = ['', 'low', 'high', 'max'];
+
+/** 档位的中文说明（键为后端下发的原始值） */
+const REASONING_EFFORT_LABELS: Record<string, string> = {
+  '': '默认（不注入该参数，由服务端决定）',
+  low: 'low · 思考最少，省 token 最快',
+  high: 'high · 思考较充分',
+  max: 'max · 思考最充分，最贵最慢',
+};
 
 interface SystemSettings {
   comfyui_url: string;
@@ -56,10 +73,11 @@ const MODULE_CONFIG: Record<ModuleKey, {
 export function AIVaultPage() {
   // AI 模块配置状态
   const [config, setConfig] = useState<Record<ModuleKey, ModuleState>>({
-    text: { base_url: '', model: '', api_key: '', has_api_key: false },
-    qc: { base_url: '', model: '', api_key: '', has_api_key: false },
-    chat: { base_url: '', model: '', api_key: '', has_api_key: false },
+    text: { ...EMPTY_MODULE },
+    qc: { ...EMPTY_MODULE },
+    chat: { ...EMPTY_MODULE },
   });
+  const [reOptions, setReOptions] = useState<string[]>(FALLBACK_REASONING_OPTIONS);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
@@ -90,24 +108,30 @@ export function AIVaultPage() {
           if (raw.comfyui?.url) {
             setSysSettings(prev => ({ ...prev, comfyui_url: String(raw.comfyui.url) }));
           }
+          if (Array.isArray(raw.reasoning_effort_options) && raw.reasoning_effort_options.length) {
+            setReOptions(raw.reasoning_effort_options.map((x: unknown) => String(x)));
+          }
           setConfig({
             text: {
               base_url: c.text?.base_url || '',
               model: c.text?.model || '',
               api_key: c.text?.api_key || '',
               has_api_key: c.text?.has_api_key || false,
+              reasoning_effort: c.text?.reasoning_effort || '',
             },
             qc: {
               base_url: c.qc?.base_url || '',
               model: c.qc?.model || '',
               api_key: c.qc?.api_key || '',
               has_api_key: c.qc?.has_api_key || false,
+              reasoning_effort: c.qc?.reasoning_effort || '',
             },
             chat: {
               base_url: c.chat?.base_url || '',
               model: c.chat?.model || '',
               api_key: c.chat?.api_key || '',
               has_api_key: c.chat?.has_api_key || false,
+              reasoning_effort: c.chat?.reasoning_effort || '',
             },
           });
         })
@@ -151,16 +175,20 @@ export function AIVaultPage() {
         module,
         state.base_url.trim(),
         state.model.trim(),
-        state.api_key.trim() || undefined
+        state.api_key.trim() || undefined,
+        state.reasoning_effort
       );
       if (result.success) {
         showMessage('success', result.message || `${MODULE_CONFIG[module].title} 配置已保存`);
-        if (result.module_config?.has_api_key !== undefined) {
-          setConfig(prev => ({
-            ...prev,
-            [module]: { ...prev[module], has_api_key: result.module_config.has_api_key },
-          }));
-        }
+        setConfig(prev => ({
+          ...prev,
+          [module]: {
+            ...prev[module],
+            has_api_key: result.module_config?.has_api_key ?? prev[module].has_api_key,
+            // 回显后端归一化后的档位：非法值会被后端清成 ''，前端要跟着收敛
+            reasoning_effort: result.module_config?.reasoning_effort ?? prev[module].reasoning_effort,
+          },
+        }));
       } else {
         showMessage('error', '保存失败');
       }
@@ -188,11 +216,20 @@ export function AIVaultPage() {
         state.model.trim(),
         state.api_key.trim() || undefined,
         probe,
-        30
+        30,
+        state.reasoning_effort
       );
       setTestResult(prev => ({ ...prev, [module]: result }));
       if (result.success) {
-        showMessage('success', `${MODULE_CONFIG[module].title} 连接测试成功 (${result.response_time_ms}ms)`);
+        const ms = result.latency_ms ?? result.response_time_ms;
+        // success 但没拿到正文时不要报「测试成功」——那会让人以为模型已就绪
+        const partial = result.verdict !== 'ok';
+        showMessage(
+          partial ? 'error' : 'success',
+          partial
+            ? `${MODULE_CONFIG[module].title} 链路可达，但模型未返回正文（多为思考占用额度），请查看提示`
+            : `${MODULE_CONFIG[module].title} 连接测试成功${typeof ms === 'number' ? ` (${ms}ms)` : ''}`
+        );
       } else {
         showMessage('error', result.error || result.guide || '连接测试失败');
       }
@@ -214,7 +251,7 @@ export function AIVaultPage() {
       if (result.success) {
         setConfig(prev => ({
           ...prev,
-          [module]: { base_url: '', model: '', api_key: '', has_api_key: false },
+          [module]: { ...EMPTY_MODULE },
         }));
         showMessage('success', result.message);
       }
@@ -441,6 +478,32 @@ export function AIVaultPage() {
                     <p className="text-xs text-gray-400 mt-1">密钥已保存，留空则保持原值</p>
                   )}
                 </div>
+                {/* 思考档位：只对「思考不可关闭」的模型（如 GLM-5.3-Flash）有意义。
+                    可关思考的模型（Qwen/vLLM 系）用 enable_thinking=false，不在这里调。 */}
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                    思考档位（可选）
+                  </label>
+                  <select
+                    value={state.reasoning_effort}
+                    onChange={e => updateField(moduleKey, 'reasoning_effort', e.target.value)}
+                    className="input-field text-sm"
+                  >
+                    {reOptions.map(opt => (
+                      <option key={opt || '__default__'} value={opt}>
+                        {REASONING_EFFORT_LABELS[opt] || opt}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-gray-400 mt-1">
+                    仅「思考不可关闭」的模型需要设置（如 GLM-5.3-Flash，它没有关闭思考的开关，
+                    只能调档）。留空 = 不注入该参数、由服务端取默认档；
+                    <span className="text-amber-600 dark:text-amber-400">
+                      档位越高越贵（默认档通常是最贵的 max）
+                    </span>
+                    ，长 JSON 任务建议 low。
+                  </p>
+                </div>
               </div>
 
               {/* Action Buttons */}
@@ -472,27 +535,50 @@ export function AIVaultPage() {
               </div>
 
               {/* Test Result */}
-              {result && (
-                <div className={`p-3 rounded-lg text-sm ${
-                  result.success
+              {result && (() => {
+                // success=true 但没拿到正文（额度被思考占用）既不是「配置错」也不是「就绪」，
+                // 用琥珀色单独区分，避免用户看到红叉/绿勾后被误导。
+                const partial = result.success && result.verdict !== 'ok';
+                const ms = result.latency_ms ?? result.response_time_ms;
+                const box = partial
+                  ? 'bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400'
+                  : result.success
                     ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400'
-                    : 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400'
-                }`}>
-                  <div className="flex items-center gap-2">
-                    <span className="text-lg">{result.success ? '✓' : '✗'}</span>
-                    <span className="font-medium">{result.success ? '测试成功' : '测试失败'}</span>
-                    {result.response_time_ms && (
-                      <span className="text-xs opacity-75">({result.response_time_ms}ms)</span>
+                    : 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400';
+                return (
+                  <div className={`p-3 rounded-lg text-sm ${box}`}>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-lg">{partial ? '!' : result.success ? '✓' : '✗'}</span>
+                      <span className="font-medium">
+                        {partial ? '链路可达（未返回正文）' : result.success ? '测试成功' : '测试失败'}
+                      </span>
+                      {typeof ms === 'number' && (
+                        <span className="text-xs opacity-75">({ms}ms)</span>
+                      )}
+                      {result.max_tokens != null && (
+                        <span className="text-xs opacity-75">max_tokens={result.max_tokens}</span>
+                      )}
+                      {result.disable_thinking === false && (
+                        <span className="text-xs opacity-75">思考：开</span>
+                      )}
+                      {result.vision === false && <span className="text-xs opacity-75">不支持图像</span>}
+                      {result.vision === null && result.uncertain && (
+                        <span className="text-xs opacity-75">视觉能力未确认</span>
+                      )}
+                    </div>
+                    {result.reply ? (
+                      <p className="mt-1 text-xs opacity-75 break-all">模型回复：{result.reply}</p>
+                    ) : null}
+                    {result.hint && <p className="mt-1 text-xs opacity-75">{result.hint}</p>}
+                    {!result.success && result.error && (
+                      <p className="mt-1 text-xs opacity-75">{result.error}</p>
+                    )}
+                    {!result.success && result.guide && (
+                      <p className="mt-1 text-xs opacity-75">{result.guide}</p>
                     )}
                   </div>
-                  {!result.success && result.error && (
-                    <p className="mt-1 text-xs opacity-75">{result.error}</p>
-                  )}
-                  {!result.success && result.guide && (
-                    <p className="mt-1 text-xs opacity-75">{result.guide}</p>
-                  )}
-                </div>
-              )}
+                );
+              })()}
             </div>
           );
         })}

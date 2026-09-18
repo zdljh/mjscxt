@@ -25,6 +25,39 @@ DEFAULT_TIMEOUT = 240
 HTTP_TRANSIENT_CODES = (429, 500, 502, 503, 504)
 HTTP_RETRY_MAX = 3            # 单次请求最大尝试次数（含首次）
 HTTP_RETRY_BACKOFF = (3, 8)   # 每次重试前的等待秒数
+
+# ---- 网关级快速失败 / 熔断（2026-09-17 新增）----
+# 背景（实测）：当上游整体没算力时，请求不会快速报错，而是**挂到超时**。
+# 按原逻辑重试 3 次 × 每次 240~300s → 单块分镜 672 秒才降级；一集 6 块 ≈ 1 小时纯等待，
+# 最后产出一份「无分镜无台词、配音 0 句」的兜底剧本 —— 比直接报错更糟。
+# 上游没算力，等 3 秒重试是不会变好的，所以分两层拦：
+#   ① 单次调用内：识别到「上游无算力」就直接放弃，不把 3 次超时都打完；
+#   ② 跨调用：同一网关连续失败达阈值 → 熔断 cooldown 秒，期间直接抛错、不打网络。
+# ⚠️ 本地/内网地址（ollama 等）不适用 ①：本地模型冷启动瞬间 503 是真的会自愈，仍按原逻辑重试。
+GATEWAY_UNAVAILABLE_CODES = (500, 502, 503, 504)
+UPSTREAM_UNAVAILABLE_MARKERS = (
+    "no available workers", "all circuits open", "upstream_error",
+    "no available channel", "service unavailable",
+)
+GATEWAY_FAILFAST_THRESHOLD = 2      # 连续 N 次「上游不可用」→ 熔断
+GATEWAY_CIRCUIT_COOLDOWN_SEC = 600  # 熔断冷却时长；期间直接快速失败
+GATEWAY_UNAVAILABLE_MAX_ATTEMPTS = 1  # 判定为「上游不可用」后允许的尝试次数（远端=1，不重试）
+
+# 网络层异常：requests 的封装类型 + 标准库 socket 层。
+# ⚠️ 只写 requests.exceptions.Timeout / ConnectionError 是不够的：`socket.timeout` 在
+# Python 3.10+ 就是内置 `TimeoutError`（OSError 子类），某些传输/中间件路径会原样抛出来，
+# 那种情况此前会掉进「请求异常」分支 → 不计入网关不可用，等于白等一轮超时。
+NETWORK_ERRORS = (
+    requests.exceptions.Timeout,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.ChunkedEncodingError,
+    TimeoutError,   # == socket.timeout
+    OSError,        # ConnectionResetError / ConnectionRefusedError 等
+)
+
+# 同一网关的连续失败计数：{origin: {"fails": int, "opened_at": float, "detail": str}}
+_GATEWAY_STATE: dict = {}
+
 JSON_RETRY_HINT = "上一次输出不是合法 JSON。请只输出一个合法 JSON 对象，不要包含 markdown 代码块、注释或任何解释文字。"
 TRUNCATION_RETRY_HINT = (
     "上一次输出因长度上限被截断（finish_reason=length），JSON 未闭合。"
@@ -44,6 +77,18 @@ DISABLE_THINKING_DEFAULT = False
 MIN_TOKENS_WHEN_THINKING = 1024
 MAX_TOKENS_CEILING = 32768
 
+# ---- 思考「档位」模型（GLM-5.3 之类思考不可关闭的模型） ----
+# GLM-5.3-Flash 是 always-on reasoning：没有 enable_thinking 开关，
+# 只有 reasoning_effort = low / high / max（默认 max），官方建议 max_tokens ≥ 2048。
+# 所以「关思考」这条路对它根本不适用，必须换成一个额度更足的下限。
+# 另注：该参数各家网关封装位置不同（顶层 / chat_template_kwargs），
+# 这里按 vLLM Recipe 与 Qubrid 文档采用 chat_template_kwargs 形式，必要时用
+# REASONING_EFFORT_STYLE 切换。
+REASONING_EFFORT_LEVELS = ("low", "high", "max")
+MIN_TOKENS_WHEN_REASONING_EFFORT = 2048
+# "chat_template_kwargs"（默认，zai/vLLM 风格）| "top_level"（部分网关）
+REASONING_EFFORT_STYLE = "chat_template_kwargs"
+
 
 class LLMError(Exception):
     """LLM 调用失败（面向用户的友好错误）"""
@@ -55,6 +100,82 @@ class LLMReasoningOnlyError(LLMError):
     允许思考后这是可恢复的：思考吃光了 max_tokens，加额度重来即可，
     不该当成致命错误直接失败。
     """
+
+
+class LLMGatewayUnavailable(LLMError):
+    """网关整体不可用（上游没算力 / 连续超时 / 熔断中）。
+
+    刻意做成 LLMError 的子类：现有 `except LLMError` 的地方不用改就能兜住；
+    但调用方**应该**单独识别它 —— 这类错误重试无用，正确处置是
+    「立刻停下、把网关问题告诉用户」，而不是逐块降级成原文兜底。
+    """
+
+    def __init__(self, message: str, base_url: str = "", streak: int = 0,
+                 detail: str = "", cooling: bool = False):
+        super().__init__(message)
+        self.base_url = base_url
+        self.streak = int(streak or 0)
+        self.detail = detail or ""
+        self.cooling = bool(cooling)
+
+    @property
+    def hint(self) -> str:
+        if self.cooling:
+            return (f"该网关（{self.base_url}）刚被判定为不可用，已暂停请求 "
+                    f"{GATEWAY_CIRCUIT_COOLDOWN_SEC} 秒以免空等。"
+                    "请到「AI 设置」换一个可用的 base_url / 模型，或稍后重试。")
+        return ("网关连续不可用（多为上游没有可用算力/配额耗尽）。"
+                "重试无用，请到「AI 设置」更换 base_url 或模型后重试。"
+                "可用 AI 设置里的「测试连接」先确认网关是否活着。")
+
+
+def _gateway_origin(url: str) -> str:
+    """熔断按「网关」粒度而非完整 URL：同网关下换模型/换路径同样受保护"""
+    p = urlparse(url or "")
+    return f"{p.scheme}://{p.netloc}" if p.netloc else (url or "")
+
+
+def _is_upstream_unavailable(status: int, body: str) -> bool:
+    """响应体里出现「上游没算力」的明确标记 → 重试也不会变好"""
+    if status not in GATEWAY_UNAVAILABLE_CODES:
+        return False
+    low = (body or "").lower()
+    return any(m in low for m in UPSTREAM_UNAVAILABLE_MARKERS)
+
+
+def gateway_circuit_state(base_url: str) -> dict:
+    """查询某网关的熔断状态（供探针/接口展示，不触发任何请求）"""
+    st = _GATEWAY_STATE.get(_gateway_origin(base_url)) or {}
+    opened_at = float(st.get("opened_at") or 0)
+    remain = max(0, int(opened_at + GATEWAY_CIRCUIT_COOLDOWN_SEC - time.time()))
+    return {"open": remain > 0, "cooldown_remain_sec": remain,
+            "fails": int(st.get("fails") or 0), "detail": st.get("detail") or ""}
+
+
+def _note_gateway_failure(url: str, detail: str) -> int:
+    """记一次网关级失败，返回当前连续失败次数"""
+    key = _gateway_origin(url)
+    st = _GATEWAY_STATE.setdefault(key, {"fails": 0, "opened_at": 0.0, "detail": ""})
+    st["fails"] = int(st.get("fails") or 0) + 1
+    st["detail"] = (detail or "")[:200]
+    if st["fails"] >= GATEWAY_FAILFAST_THRESHOLD:
+        st["opened_at"] = time.time()
+        logger.error(f"网关 {key} 连续 {st['fails']} 次不可用 → 熔断 "
+                     f"{GATEWAY_CIRCUIT_COOLDOWN_SEC}s（期间不再发起请求）")
+    return st["fails"]
+
+
+def _clear_gateway_failure(url: str) -> None:
+    key = _gateway_origin(url)
+    st = _GATEWAY_STATE.get(key)
+    if st and (st.get("fails") or st.get("opened_at")):
+        logger.info(f"网关 {key} 已恢复，熔断计数清零")
+    _GATEWAY_STATE.pop(key, None)
+
+
+def reset_gateway_circuits() -> None:
+    """手动清空全部熔断状态（供「测试连接」/诊断使用：用户换完网关要能立刻重试）"""
+    _GATEWAY_STATE.clear()
 
 
 class LLMTruncatedError(LLMError):
@@ -234,6 +355,13 @@ class LLMClient:
         self.last_error = ""
         # 思考模式开关（默认关闭，可由配置项 disable_thinking 覆盖）
         self.disable_thinking = bool(self.config.get("disable_thinking", DISABLE_THINKING_DEFAULT))
+        # 思考档位（思考不可关闭的模型用，如 GLM-5.3）：low / high / max，留空=不注入
+        _re = str(self.config.get("reasoning_effort") or "").strip().lower()
+        self.reasoning_effort = _re if _re in REASONING_EFFORT_LEVELS else ""
+        if _re and not self.reasoning_effort:
+            logger.warning(
+                f"reasoning_effort={_re!r} 不是合法档位（仅 {'/'.join(REASONING_EFFORT_LEVELS)}），"
+                f"已忽略。注意：部分模型会把非法值静默解析成最高档（最贵），务必用合法值。")
         # 最近一次 chat_json_robust 的诊断信息（attempts / finish_reason / max_tokens / truncated）
         self.last_json_meta = {}
 
@@ -241,6 +369,16 @@ class LLMClient:
     @property
     def configured(self) -> bool:
         return bool(self.base_url and self.api_key and self.model)
+
+    @staticmethod
+    def gateway_circuit_state(base_url: str) -> dict:
+        """某网关的熔断状态（类方法入口，方便调用方统一从 LLMClient 取）"""
+        return gateway_circuit_state(base_url)
+
+    @staticmethod
+    def reset_gateway_circuits() -> None:
+        """清空熔断计数（用户改完 AI 设置点「测试连接」时必须先清，否则会被旧熔断直接拦掉）"""
+        reset_gateway_circuits()
 
     def require_configured(self):
         if not self.configured:
@@ -259,9 +397,21 @@ class LLMClient:
     # ---- 底层调用 ----
     def _post(self, payload: dict, timeout: int = None, chat_url: str = None) -> dict:
         url = chat_url or self.chat_url
+        local = _is_local(url)
+
+        # ① 熔断中：直接快速失败，不打网络（否则又是几十秒起步的空等）
+        state = gateway_circuit_state(url)
+        if state["open"]:
+            raise LLMGatewayUnavailable(
+                f"网关 {_gateway_origin(url)} 处于熔断冷却中"
+                f"（剩余 {state['cooldown_remain_sec']}s，连续失败 {state['fails']} 次）："
+                f"{state['detail'] or '上游不可用'}",
+                base_url=_gateway_origin(url), streak=state["fails"],
+                detail=state["detail"], cooling=True)
+
         session = requests.Session()
         # 本地/内网地址不走系统代理，避免 localhost 被代理拦截
-        if _is_local(url):
+        if local:
             session.trust_env = False
         headers = {
             "Content-Type": "application/json",
@@ -269,31 +419,60 @@ class LLMClient:
         }
         t0 = time.time()
         attempts = max(1, int(HTTP_RETRY_MAX))
+        # ② 远端网关 + 判定为「上游没算力」→ 只试 1 次。
+        #    本地地址例外：本地模型冷启动的瞬时 503 是真的会自愈，保留重试。
+        upstream_bad = False
+        upstream_detail = ""
         resp = None
         last_err = None
-        for idx in range(attempts):
+        idx = 0
+        while idx < attempts:
             if idx:
                 time.sleep(HTTP_RETRY_BACKOFF[min(idx - 1, len(HTTP_RETRY_BACKOFF) - 1)])
+            idx += 1
             try:
                 resp = session.post(url, headers=headers, json=payload,
                                     timeout=timeout or self.timeout)
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            except NETWORK_ERRORS as e:
                 last_err = e
                 resp = None
-                logger.warning(f"LLM 请求瞬时失败（第 {idx + 1}/{attempts} 次重试）：{e}")
+                # 远端超时/连不上 = 「网关不可用」的典型形态（实测上游没算力时会挂到超时）
+                if not local:
+                    upstream_bad = True
+                    upstream_detail = f"{type(e).__name__}: {e}"
+                logger.warning(f"LLM 请求瞬时失败（第 {idx}/{attempts} 次）：{e}")
+                if upstream_bad:
+                    break
                 continue
             except Exception as e:  # noqa: BLE001
                 raise LLMError(f"请求异常：{e}") from e
             if resp.status_code in HTTP_TRANSIENT_CODES:
-                last_err = LLMError(f"接口返回 HTTP {resp.status_code}：{(resp.text or '')[:200]}")
+                body = resp.text or ""
+                last_err = LLMError(f"接口返回 HTTP {resp.status_code}：{body[:200]}")
                 logger.warning(f"LLM 接口瞬时不可用（HTTP {resp.status_code}，"
-                               f"第 {idx + 1}/{attempts} 次），将退避后重试")
+                               f"第 {idx}/{attempts} 次），将退避后重试")
+                if not local and _is_upstream_unavailable(resp.status_code, body):
+                    upstream_bad = True
+                    upstream_detail = f"HTTP {resp.status_code}：{body[:200]}"
+                    logger.error(f"上游明确报「无可用算力」，放弃重试：{body[:200]}")
+                    # ⚠️ 必须先把 resp 置空再 break：下面靠 `resp is None` 判定是否失败，
+                    # 漏了这行会直接掉进 `resp.status_code >= 400` 分支，
+                    # 抛成普通 LLMError，熔断/快速失败就整个失效了。
+                    resp = None
+                    break
                 resp = None
                 continue
             break
         latency = int((time.time() - t0) * 1000)
         if resp is None:
+            if upstream_bad:
+                streak = _note_gateway_failure(url, upstream_detail)
+                raise LLMGatewayUnavailable(
+                    f"网关 {_gateway_origin(url)} 不可用"
+                    f"（第 {streak} 次连续失败，已尝试 {idx}/{attempts} 次）：{upstream_detail}",
+                    base_url=_gateway_origin(url), streak=streak, detail=upstream_detail)
             raise LLMError(f"接口连续 {attempts} 次瞬时不可用（含超时/连接失败）：{last_err}")
+        _clear_gateway_failure(url)
 
         if resp.status_code >= 400:
             body = (resp.text or "")[:400]
@@ -344,11 +523,29 @@ class LLMClient:
     def _build_payload(self, messages: list, temperature: float, max_tokens: int) -> dict:
         """构造 OpenAI 兼容请求体
 
-        disable_thinking 为真时注入 chat_template_kwargs.enable_thinking=false，
-        避免混合推理模型把思考过程写进 content（会撑爆 max_tokens 并导致 JSON 解析失败）。
+        思考控制分两种模型形态（**互斥，reasoning_effort 优先**）：
+
+        1. **可关思考**（Qwen / vLLM 系）：`disable_thinking=True` 时注入
+           `chat_template_kwargs.enable_thinking=false`。
+        2. **思考不可关闭**（GLM-5.3-Flash 等 always-on reasoning）：没有 enable_thinking，
+           只有 `reasoning_effort = low|high|max`（默认 max）。此时「关思考」无从谈起，
+           只能选档位 + 给足额度下限。
+
+        两种情况下都抬高一档 max_tokens 下限：思考要吃 token，给太少必然只剩 reasoning_content。
         """
-        # 允许思考时抬高一档额度下限：思考要吃 token，给太少必然只剩 reasoning_content
-        if not getattr(self, "disable_thinking", DISABLE_THINKING_DEFAULT):
+        thinking_on = False
+        if self.reasoning_effort:
+            thinking_on = True
+            try:
+                mt = int(max_tokens or 0)
+            except (TypeError, ValueError):
+                mt = 0
+            if 0 < mt < MIN_TOKENS_WHEN_REASONING_EFFORT:
+                logger.info(f"reasoning_effort={self.reasoning_effort} 模式下 max_tokens 由 {mt} "
+                            f"抬到 {MIN_TOKENS_WHEN_REASONING_EFFORT}")
+                max_tokens = MIN_TOKENS_WHEN_REASONING_EFFORT
+        elif not getattr(self, "disable_thinking", DISABLE_THINKING_DEFAULT):
+            thinking_on = True
             try:
                 mt = int(max_tokens or 0)
             except (TypeError, ValueError):
@@ -363,7 +560,17 @@ class LLMClient:
             "max_tokens": max_tokens,
             "stream": False,
         }
-        if getattr(self, "disable_thinking", DISABLE_THINKING_DEFAULT):
+        if self.reasoning_effort:
+            kwargs = {"reasoning_effort": self.reasoning_effort}
+            # clear_thinking 默认 false，聊天场景官方建议显式传 true（避免上一轮思考串场）
+            kwargs["clear_thinking"] = True
+            if REASONING_EFFORT_STYLE == "top_level":
+                payload.update(kwargs)
+            else:
+                payload["chat_template_kwargs"] = kwargs
+        elif getattr(self, "disable_thinking", DISABLE_THINKING_DEFAULT):
+            # ⚠️ 注意：这个参数只有 Qwen/vLLM 系认。GLM-5.3 这类 always-on 模型请改用
+            # reasoning_effort，否则会出现「以为关了思考、其实还在按 max 档烧 token」。
             payload["chat_template_kwargs"] = {"enable_thinking": False}
         return payload
 
@@ -546,6 +753,11 @@ class LLMClient:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
+        def _thinking_floor() -> int:
+            """本 client 的思考额度下限：档位模式下 GLM 系建议 ≥2048，其余 ≥1024"""
+            return (MIN_TOKENS_WHEN_REASONING_EFFORT if self.reasoning_effort
+                    else MIN_TOKENS_WHEN_THINKING)
+
         def _next_tokens(value: int) -> int:
             for t in ladder:
                 if t > value:
@@ -560,7 +772,7 @@ class LLMClient:
             except LLMReasoningOnlyError as e:
                 # 思考吃光额度：加码再来一次，别让「允许思考」变成「调用失败」
                 last_err = e
-                nxt = _next_tokens(max(cur, MIN_TOKENS_WHEN_THINKING))
+                nxt = _next_tokens(max(cur, _thinking_floor()))
                 logger.warning(f"模型只吐思考内容（第 {attempts} 次，max_tokens={cur}），"
                                f"提高到 {nxt} 重试")
                 history.append({"attempt": attempts, "max_tokens": cur,
@@ -633,34 +845,56 @@ class LLMClient:
 
     # ---- 连接测试 ----
     def test_connection(self) -> dict:
+        """连通测试：验证 base_url / api_key / model 三者可用
+
+        ⚠️ 这里必须走 `_build_payload` 而不是自己拼 body。
+        曾经自己拼 `max_tokens=32`，在「允许思考」模式下思考本身就要几百 token，
+        于是正文永远为空、`reply` 里只剩模型的自我独白（「The user asks: …」），
+        用户看到这句会直接判定「AI 配错了」，而实际上链路是通的。
+        现在由 `_build_payload` 统一抬到 MIN_TOKENS_WHEN_THINKING，
+        并额外返回 finish_reason / thinking_only 等诊断字段。
+        """
         if not self.base_url:
             return {"success": False, "error": "请先填写 base_url"}
         if not self.api_key:
             return {"success": False, "error": "请先填写 api_key"}
         if not self.model:
             return {"success": False, "error": "请先填写 model"}
-        payload = {
+        messages = [
+            {"role": "system", "content": "你是连接测试助手。不要解释、不要思考，直接按要求输出。"},
+            {"role": "user", "content": "请只回复两个字：连通"},
+        ]
+        base_out = {
+            "chat_url": self.chat_url,
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": "你是连接测试助手。"},
-                {"role": "user", "content": "请只回复两个字：连通"},
-            ],
-            "temperature": 0,
-            "max_tokens": 32,
-            "stream": False,
+            "disable_thinking": bool(getattr(self, "disable_thinking",
+                                             DISABLE_THINKING_DEFAULT)),
         }
+        payload = self._build_payload(messages, 0, 256)
+        base_out["max_tokens"] = payload.get("max_tokens")
         try:
             data = self._post(payload, timeout=45)
-            content = self._extract_content(data).strip()
-            return {
-                "success": True,
-                "chat_url": self.chat_url,
-                "model": self.model,
-                "latency_ms": data.get("_latency_ms"),
-                "reply": content[:80],
-            }
+            content, finish_reason = self._extract_choice(data)
+            content = (content or "").strip()
+            out = dict(base_out, success=True, latency_ms=data.get("_latency_ms"),
+                       finish_reason=finish_reason,
+                       truncated=self.is_truncated(finish_reason),
+                       thinking_only=False, reply=content[:200], verdict="ok")
+            if self.is_truncated(finish_reason):
+                out["hint"] = "链路正常，但回复被长度上限截断（不影响连通性判定）。"
+            return out
+        except LLMReasoningOnlyError:
+            # 走到这里说明 HTTP 通了、模型也确实回答了，只是把额度全用在思考上。
+            # 这**不是配置错误**，绝不能给用户报「测试失败」（这正是之前的误判来源：
+            # 失败文案里还带着模型的自我独白「The user asks: …」）。
+            return dict(base_out, success=True, thinking_only=True, truncated=True,
+                        finish_reason="reasoning_only", reply="",
+                        verdict="reachable_but_no_content",
+                        hint=("链路可达，模型把 token 全用在思考上、没有输出正文。"
+                              "这通常不影响正式任务；若正式任务报「正文为空」，"
+                              "请提高该模块的 max_tokens，或对轻量任务关闭思考模式。"))
         except LLMError as e:
-            return {"success": False, "chat_url": self.chat_url, "model": self.model, "error": str(e)}
+            return dict(base_out, success=False, error=str(e), verdict="failed")
 
 
 def client_from_config(config_path: str, timeout: int = DEFAULT_TIMEOUT) -> LLMClient:

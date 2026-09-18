@@ -266,10 +266,43 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
                             文件缺失
                           </span>
                         )}
+                        {d.meta?.stale && (
+                          <span
+                            className="px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-700 dark:bg-orange-500/20 dark:text-orange-300"
+                            title={d.meta.stale.reason || '成片已过期'}
+                          >
+                            成片已过期
+                          </span>
+                        )}
+                        {d.meta?.incomplete_shots && (
+                          <span
+                            className="px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300"
+                            title={d.meta?.warning || '镜头数不齐，成片可能不完整'}
+                          >
+                            可能不完整 {d.meta?.shots_ready ?? '?'}/{d.meta?.shots_total ?? '?'}
+                          </span>
+                        )}
                       </div>
                       <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                         {d.filename} · {sizeText(d.size)}
+                        {typeof d.meta?.duration_sec === 'number' && d.meta.duration_sec > 0 && (
+                          <span> · {d.meta.duration_sec.toFixed(1)}s</span>
+                        )}
                       </p>
+                      {d.meta?.stale && (
+                        <p className="text-xs text-orange-600 dark:text-orange-400 mt-1">
+                          {d.meta.stale.reason || '同集镜头已重做'}
+                          {d.meta.stale.detail?.shot_id != null && (
+                            <span>（涉及镜头 #{d.meta.stale.detail.shot_id}）</span>
+                          )}
+                          ，请重新混音合成后再验收
+                        </p>
+                      )}
+                      {d.meta?.incomplete_shots && d.meta?.warning && (
+                        <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                          {d.meta.warning}
+                        </p>
+                      )}
                       {d.review === 'rejected' && d.review_note && (
                         <p className="text-xs text-gray-600 dark:text-gray-300 mt-1">
                           打回原因: {d.review_note}

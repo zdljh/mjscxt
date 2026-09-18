@@ -66,6 +66,11 @@ VOICE_PRESETS = [
 SPEAKER_KEYS = tuple(v["speaker"] for v in VOICE_PRESETS)
 MALE_POOL = ["Ryan", "Aiden", "Dylan", "Eric", "Uncle_fu"]
 FEMALE_POOL = ["Serena", "Vivian", "Ono_anna", "Sohee"]
+# 旁白发言人名（非角色表中的真实角色）。它是「无台词镜头的旁白补声」用的伪角色名，
+# 与 build_dub_plan 里原有的说话人兜底值保持一致。
+NARRATION_SPEAKER = "旁白"
+# 旁白补声的最小字数：太短（如「……」）不值得单独合成一句。
+NARRATION_MIN_CHARS = 4
 
 LANGUAGES = ["Auto", "Chinese", "English", "Japanese", "Korean", "French",
              "German", "Spanish", "Portuguese", "Russian", "Italian"]
@@ -468,6 +473,18 @@ def build_dub_plan(script: Dict, voice_map: Optional[Dict] = None,
         dlg_rows = _norm_dlg_lines(shot.get("dialogue"), characters, cast)
         if not dlg_rows and shot.get("dialogue_text"):
             dlg_rows = _norm_dlg_lines(shot.get("dialogue_text"), characters, cast)
+        # ---- 旁白补声：修「静默镜 → 成片整段无声」 ----
+        # 此前 build_dub_plan **只读 dialogue**，剧本的 narration（心理活动/背景补叙/
+        # 环境描写）完全不进配音 → 「无台词但有旁白」的镜头成片照样无声
+        # （实测《雨夜归人》第 1 集 24 镜 / 台词 3 / 无台词镜 21，其中 18 镜连旁白也是空的）。
+        # 这里在该镜没有任何台词时，用默认「旁白」音色把 narration 念出来，与
+        # dialogue_utils.audit_script 的 silent 口径（台词或旁白有其一即不算静默）对齐。
+        narration_voiced = False
+        if not dlg_rows:
+            _nar = clean_line_text(shot.get("narration"))
+            if len(_nar) >= NARRATION_MIN_CHARS:
+                dlg_rows = [{"speaker": NARRATION_SPEAKER, "text": _nar}]
+                narration_voiced = True
         override = (vmap.get("lines") or {}).get(str(shot_id)) or {}
         multi = len(dlg_rows) > 1
         for li, row in enumerate(dlg_rows):
@@ -478,7 +495,7 @@ def build_dub_plan(script: Dict, voice_map: Optional[Dict] = None,
             char_name = _first_present(
                 override.get("character"), dlg_speaker,
                 shot.get("dialogue_speaker"), shot.get("speaker"), shot.get("character"),
-                cast[0] if cast else "", "旁白")
+                cast[0] if cast else "", NARRATION_SPEAKER)
             base_voice = vmap["characters"].get(char_name) or default_voice_map(
                 [{"name": char_name}], project, episode)["characters"].get(char_name)
             voice = normalize_voice(override, base_voice)
@@ -505,6 +522,8 @@ def build_dub_plan(script: Dict, voice_map: Optional[Dict] = None,
                 "shot_id": shot_id,
                 "character": char_name,
                 "text": text,
+                # "narration" = 由该镜旁白补声生成的配音行（无台词镜头），便于前端/审计区分
+                "source": "narration" if narration_voiced else "dialogue",
                 "duration_hint": shot.get("duration"),
                 "emotion": emotion,
                 "voice": voice,

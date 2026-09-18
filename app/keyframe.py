@@ -30,6 +30,8 @@ import random
 import shutil
 from typing import Callable, Dict, List, Optional, Tuple
 
+import style_kit
+
 logger = logging.getLogger(__name__)
 
 # 链式模式：auto=同场景才串 / always=无条件串 / off=关闭（旧行为）
@@ -115,6 +117,11 @@ def build_end_frame_prompt(shot: dict, char_refs: Optional[List[dict]] = None,
     items = [i for i in (shot.get("items_in_shot") or []) if i]
 
     parts: List[str] = []
+    # 风格落地：尾帧也要显式带上目标风格（图生图虽靠参考图延续画风，但显式注入
+    # 能在模型弱化参考时兜底，避免「分镜图有风格、尾帧又跑偏」）
+    style_norm = style_kit.normalize_style(shot.get("style") or "")
+    if style_norm:
+        parts.append(style_kit.style_emphasis(style_norm))
     if chained:
         parts.append(f"参考图是**上一镜结束时的画面**。本镜（「{camera}」）承接该画面继续推进："
                      f"保持参考图的角色外观、服装、发型、配色、场景环境、光照与整体画风完全不变，"

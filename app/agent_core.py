@@ -73,6 +73,21 @@ def _qp(project):
     return quote(_p(project), safe="")
 
 
+def _settings_keys_hint() -> str:
+    """把「创作设定」的合法字段名喂给模型。
+
+    实测教训：模型会自造键名（例如 color_tone / camera_language），
+    而后端 `normalize_settings()` 只保留白名单内的字段，其余**静默丢弃** ——
+    用户明明说了「冷色调、克制镜头」，落盘后却只剩一个 style，
+    等于白沟通一场。这里把合法键名直接写进工具描述。
+    """
+    try:
+        import ai_chat  # 惰性引入：agent_core 与 ai_chat 之间避免顶层强耦合
+        return "、".join(f["key"] for f in ai_chat.SETTING_FIELDS)
+    except Exception:  # noqa: BLE001
+        return "style、art_style、tone、color_palette、pacing、characters、extra_notes"
+
+
 def _schema(props: dict, required: list = None) -> dict:
     return {"type": "object", "properties": props, "required": required or []}
 
@@ -96,7 +111,7 @@ TOOLS = [
         "description": "查询项目托管状态：自动生产开关、当前在做的事、待验收数、异常数。参数可选，不传则用当前项目上下文。",
         "parameters": _schema({"project": _proj_prop()}),
         "risk": "safe", "expensive": False,
-        "call": lambda a, c: ("GET", f"/api/autopilot/status{_qp(a.get('project') or c.get('project'))}", {}),
+        "call": lambda a, c: ("GET", f"/api/autopilot/status?project={_qp(a.get('project') or c.get('project'))}", {}),
     },
     {
         "name": "get_progress",
@@ -211,7 +226,11 @@ TOOLS = [
     },
     {
         "name": "apply_creative_settings",
-        "description": "把创作设定（风格、色调、角色外形、镜头语言等）写入项目，后续生成都会带上。",
+        "description": "把创作设定（风格、画风、色调、节奏、角色外形等）写入项目，后续生成都会带上。"
+                       "settings 的键**只能用这些**：" + _settings_keys_hint() +
+                       "。用别的键名会被后端丢弃（不会报错但也不生效）。"
+                       "例如「冷色调」→ color_palette，「镜头节奏克制」→ pacing，"
+                       "「暗黑武侠」→ genre 或 tone。不确定的补充要求放 extra_notes。",
         "parameters": _schema({"project": _proj_prop(), "settings": _OBJ}, ["settings"]),
         "risk": "write", "expensive": False,
         "call": lambda a, c: ("POST", "/api/ai/chat/apply",
@@ -237,26 +256,30 @@ TOOLS = [
     },
     {
         "name": "resolve_exception",
-        "description": "处理一条生产异常（标记已解决/忽略），让托管继续往下跑。",
-        "parameters": _schema({"project": _proj_prop(), "exception_id": _STR,
-                               "action": {"type": "string", "description": "resolve 或 ignore"}},
-                              ["exception_id"]),
+        "description": "处理一条生产异常（标记已解决，让托管继续往下跑）。"
+                       "必须传 episode_no（异常清单里每条的集号，不是 id）。",
+        "parameters": _schema({"project": _proj_prop(), "episode_no": _INT,
+                               "note": _STR}, ["episode_no"]),
         "risk": "write", "expensive": False,
         "call": lambda a, c: ("POST", "/api/autopilot/exceptions/resolve",
                               {"project": a.get("project") or c.get("project"),
-                               "exception_id": a.get("exception_id"),
-                               "action": a.get("action") or "resolve"}),
+                               "episode_no": int(a.get("episode_no") or c.get("episode_no") or 0),
+                               "note": a.get("note") or ""}),
     },
     {
         "name": "review_deliverable",
-        "description": "验收/打回一条成片交付物。action=approve 或 reject。",
-        "parameters": _schema({"project": _proj_prop(), "episode": _INT,
-                               "action": _STR, "reason": _STR}, ["episode", "action"]),
+        "description": "验收/打回一条成片交付物。review 取值：accepted（验收通过）/ "
+                       "rejected（打回重做）/ pending。必须传 episode_no。",
+        "parameters": _schema({"project": _proj_prop(), "episode_no": _INT,
+                               "review": {"type": "string",
+                                          "description": "accepted / rejected / pending"},
+                               "note": _STR}, ["episode_no", "review"]),
         "risk": "write", "expensive": False,
         "call": lambda a, c: ("POST", "/api/autopilot/deliverables/review",
                               {"project": a.get("project") or c.get("project"),
-                               "episode": a.get("episode"), "action": a.get("action"),
-                               "reason": a.get("reason") or ""}),
+                               "episode_no": int(a.get("episode_no") or c.get("episode_no") or 0),
+                               "review": a.get("review") or "pending",
+                               "note": a.get("note") or ""}),
     },
 
     # ---------- 生产调度 ----------
@@ -351,21 +374,23 @@ TOOLS = [
     },
     {
         "name": "generate_tts",
-        "description": "为整集批量配音（TTS）。",
+        "description": "为整集批量配音（TTS）。调用后会等到配音任务真正结束才返回结果。",
         "parameters": _schema({"project": _proj_prop(), "episode": _INT}),
         "risk": "expensive", "expensive": True,
         "call": lambda a, c: ("POST", "/api/tts/generate",
                               {"project_name": a.get("project") or c.get("project"),
                                "episode": a.get("episode") or c.get("episode") or 1}),
+        "poll": {"status": "/api/tts/status/{task_id}", "timeout": 1800},
     },
     {
         "name": "mix_audio",
-        "description": "把配音与画面合成为带声音的成片。",
+        "description": "把配音与画面合成为带声音的成片。调用后会等到合成任务真正结束才返回结果。",
         "parameters": _schema({"project": _proj_prop(), "episode": _INT}),
         "risk": "expensive", "expensive": True,
         "call": lambda a, c: ("POST", "/api/mix/generate",
                               {"project_name": a.get("project") or c.get("project"),
                                "episode": a.get("episode") or c.get("episode") or 1}),
+        "poll": {"status": "/api/mix/status/{task_id}", "pick": "task", "timeout": 900},
     },
     {
         "name": "upscale_video",
@@ -382,6 +407,7 @@ TOOLS = [
                                   "scale": int(a.get("scale") or 2),
                                   "attach_audio": True,
                               }.items() if v is not None}),
+        "poll": {"status": "/api/upscale/status/{task_id}", "timeout": 3600},
     },
     {
         "name": "export_project",
@@ -430,6 +456,10 @@ SYSTEM_PROMPT = """你是这部漫剧的**总控导演 AI**，有权直接操作
   **不要为了「保险」重复调用同一个昂贵动作**——完全相同的参数在冷却期内会被直接复用缓存结果。
 - 工具返回 success:false 时，先读 error 判断原因（环境没配好 / 依赖产物不存在 / 参数非法），
   能修的自己修（比如先补跑配音再混音），修不了就如实告诉用户卡在哪、缺什么。
+- 配音(generate_tts) / 混音(mix_audio) / 超分(upscale_video) 是**异步长任务**，
+  系统已自动等到任务真正结束才把结果给你。若结果里出现 `timeout: true`，
+  说明任务**仍在后台运行**：请如实汇报「正在后台合成中」+ 当前阶段与进度，
+  并让用户稍后再问，**绝对不能说成「已完成」**。
 - 绝对不要调用工具去删除任何东西；系统没有给你删除能力。
 
 汇报风格：简短、说人话、讲结果，不复述工具返回的原始 JSON。
@@ -443,7 +473,14 @@ SYSTEM_PROMPT = """你是这部漫剧的**总控导演 AI**，有权直接操作
   4. 其他特殊要求
 - 只有当用户明确确认了风格参数后，才调用生产工具
 - 如果项目已有配置的风格，直接引用并确认，不要重复询问
-- 汇报时把确认的风格参数清晰列给用户看，让用户知道你将按什么风格生产"""
+- 汇报时把确认的风格参数清晰列给用户看，让用户知道你将按什么风格生产
+
+项目纪律（极重要）：
+- 你**只服务于当前会话绑定的那个项目**。所有带 project 参数的工具都必须指向它，
+  不要因为某个项目「查不到」就换成别的项目继续干。
+- 如果连不上当前项目（工具返回 404 / success:false），就**如实报告这个项目查不到**，
+  并说明可能原因；**绝不允许**拿其他项目的数据来汇报。
+- 用户说「这个项目」「我的项目」时，指的就是会话绑定的项目，不要反问是哪个。"""
 
 
 # ===================== 内部调用 =====================
@@ -480,6 +517,73 @@ def _call_api(method: str, path: str, payload: dict = None) -> dict:
     if ok and isinstance(data, dict) and data.get("success") is False:
         ok = False
     return {"ok": ok, "status": resp.status_code, "data": data}
+
+
+# ===================== 异步任务等待 =====================
+#
+# ⚠️ 2026-09-17 实测教训：配音 / 混音 / 超分这三个接口是**异步**的，POST 只返回
+# {"task_id": ..., "status": "started"} 就立刻返回。而 agent 之前把「HTTP 200」等同于
+# 「任务完成」，于是用户听到的是「配音已完成」——实际上后台任务还卡在「准备配音」阶段，
+# 一个音频文件都没产出，下游混音随即 400「未找到配音清单」，用户永远拿不到带声成片。
+# 这里给异步工具补上「派发 → 轮询状态接口到终态 → 如实汇报」的闭环。
+
+POLL_INTERVAL_SEC = 5
+POLL_DEFAULT_TIMEOUT_SEC = 1500      # 单轮等待上限（25 分钟，与 MAX_TURN_SEC 对齐）
+_TERMINAL_OK = ("completed", "done", "success", "ok", "finished")
+_TERMINAL_BAD = ("failed", "error", "cancelled", "canceled", "timeout")
+
+
+def _extract_task_id(data) -> str:
+    """从异步接口响应里取出任务 id（兼容 task_id / id / job_id 三种命名）"""
+    if not isinstance(data, dict):
+        return ""
+    for k in ("task_id", "id", "job_id"):
+        v = data.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def _poll_state(data: dict, pick: str) -> dict:
+    """取出状态对象：mix 接口把任务嵌在 task 下，其余为平铺"""
+    if not isinstance(data, dict):
+        return {}
+    if pick == "task" and isinstance(data.get("task"), dict):
+        return data["task"]
+    return data
+
+
+def _await_task(poll: dict, task_id: str) -> dict:
+    """轮询异步任务到终态；超时则如实返回「仍在后台运行」，绝不谎报完成"""
+    tmpl = str(poll.get("status") or "")
+    if not tmpl or not task_id:
+        return {"ok": True, "task_id": task_id, "note": "已派发（该任务无状态接口，无法确认完成）"}
+    timeout = float(poll.get("timeout") or POLL_DEFAULT_TIMEOUT_SEC)
+    pick = str(poll.get("pick") or "flat")
+    path = tmpl.format(task_id=quote(str(task_id), safe=""))
+    t0 = time.time()
+    state = {}
+    while True:
+        r = _call_api("GET", path)
+        state = _poll_state(r.get("data") or {}, pick) or state
+        status = str((state or {}).get("status") or "").lower()
+        el = round(time.time() - t0, 1)
+        if status in _TERMINAL_OK:
+            return {"ok": True, "task_id": task_id, "status": status, "elapsed_sec": el,
+                    "note": "异步任务已完成", "data": state}
+        if status in _TERMINAL_BAD:
+            return {"ok": False, "task_id": task_id, "status": status, "elapsed_sec": el,
+                    "error": str((state or {}).get("error") or (state or {}).get("message")
+                                 or "异步任务失败"),
+                    "data": state}
+        if el > timeout:
+            return {"ok": False, "task_id": task_id, "status": status or "unknown",
+                    "elapsed_sec": el, "timeout": True, "data": state,
+                    "error": (f"等待 {int(timeout / 60)} 分钟仍未完成，任务仍在后台运行"
+                              f"（当前阶段：{(state or {}).get('phase') or '未知'}，"
+                              f"进度：{(state or {}).get('progress') or 0}%）。"
+                              "请如实告知用户「正在后台合成中」，**不要声称已完成**。")}
+        time.sleep(POLL_INTERVAL_SEC)
 
 
 def _canon(args: dict) -> str:
@@ -524,6 +628,20 @@ def execute_tool(name: str, args: dict, ctx: dict, stats: dict, job_id: str = ""
                 "error": f"本轮昂贵动作已达上限 {MAX_EXPENSIVE} 次，拒绝执行 {name}。"
                          f"请先向用户汇报当前结果，需要继续请让用户重新下指令。"}
 
+    # ⚠️ 项目钉死（2026-09-17 实测教训）：
+    # 本会话绑定的项目就是用户当前打开的项目，绝不允许模型自己换成别的项目。
+    # 之前 get_status 因 URL 拼接错误恒 404，模型于是改调 list_projects，
+    # 然后「抓一个能读到的项目」继续干活 —— 用户看到的就是「我新建项目，对话却报告旧项目」。
+    # 这里把 args.project 强制归一到会话项目，并留审计痕迹。
+    bound = _p(ctx.get("project"))
+    if bound and isinstance(args, dict):
+        asked = _p(args.get("project"))
+        if asked and asked != bound:
+            _audit(bound, job_id, f"{name}#project_pinned",
+                   {"requested": asked, "forced": bound},
+                   {"ok": True, "note": "跨项目请求已钉回当前项目"})
+            args = {**args, "project": bound}
+
     key = hashlib.md5((name + "|" + _canon({**args, "__p": ctx.get("project")})).encode("utf-8")).hexdigest()
     now = time.time()
     hit = _COOLDOWN.get(key)
@@ -545,6 +663,34 @@ def execute_tool(name: str, args: dict, ctx: dict, stats: dict, job_id: str = ""
     res["elapsed_sec"] = round(time.time() - t0, 1)
     if tool["expensive"]:
         stats["expensive"] = stats.get("expensive", 0) + 1
+
+    # 异步工具：POST 返回 200 只代表「派发成功」，必须轮询到终态才能向用户汇报结果。
+    # 否则会出现「配音已完成」这类谎报（实测教训，见上方说明）。
+    if res.get("ok") and tool.get("poll"):
+        tid = _extract_task_id(res.get("data"))
+        if not tid:
+            res = {"ok": False, "status": res.get("status"), "data": res.get("data"),
+                   "error": (f"{name} 未返回任务 id，无法确认是否真的开始执行；"
+                             "请如实告知用户「结果未知」，不要声称已完成")}
+        else:
+            dispatch = res.get("data")
+            waited = _await_task(tool["poll"], tid)
+            res = {
+                "ok": bool(waited.get("ok")),
+                "status": res.get("status"),        # 保留 HTTP 状态码（审计字段语义不变）
+                "task_id": tid,
+                "task_status": waited.get("status"),
+                "dispatch": dispatch,               # 派发时的原始响应，便于排查
+                "data": waited.get("data") or dispatch,
+            }
+            if waited.get("note"):
+                res["note"] = waited["note"]
+            if waited.get("error"):
+                res["error"] = waited["error"]
+            if waited.get("timeout"):
+                res["timeout"] = True
+            res["elapsed_sec"] = round(time.time() - t0, 1)
+
     if res.get("ok") and tool["risk"] != "safe":
         _COOLDOWN[key] = (now, res)
     _audit(ctx.get("project", ""), job_id, name, args or {}, res)

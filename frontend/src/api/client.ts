@@ -12,7 +12,7 @@ import type {
   KeyframePlanResponse,
   StoryboardCanvasResponse,
   TTSEnv, TTSPlanResponse, TTSTask,
-  MixEnv, MixPlanResponse, MixTask,
+  MixEnv, MixPlanResponse, MixTask, MixStatusResponse,
   QCConfig, QCResponse,
   Episode, EpisodeListResponse,
   AutopilotStatus, AutopilotProgress,
@@ -35,6 +35,13 @@ async function readError(response: Response): Promise<string> {
     const raw = data?.error || data?.message || data?.detail;
     if (typeof raw === 'string' && raw.trim()) detail = raw.trim();
     else if (raw) detail = JSON.stringify(raw);
+    // 后端常带 `hint`（例如「这集可能是兜底生成的，没有台词」）或 `guide`
+    // （例如视觉模型不适配的替代建议）。这些是给用户看的处置办法，
+    // 只把 error 抛出去会让用户看到问题却不知道怎么办。
+    const extra = data?.hint || data?.guide;
+    if (typeof extra === 'string' && extra.trim()) {
+      detail = detail ? `${detail}（${extra.trim()}）` : extra.trim();
+    }
   } catch {
     try {
       const text = (await response.text()).trim();
@@ -392,6 +399,35 @@ export const storyboardApi = {
     ),
 };
 
+// --- Video（单镜视频） ---
+// 接口：POST /api/video/retry-shot（同步，直到 ComfyUI 出片才返回）
+// 之前后端早已可用，但前端零引用 —— 用户对某一镜不满意时无法只重做这一镜。
+// mode: reference（分镜图+主角锚点，默认）/ keyframe（首尾帧插值，需已生成尾帧）
+export const videoApi = {
+  retryShot: (data: {
+    project_name: string;
+    shot_id: string | number;
+    episode_no?: number;
+    mode?: 'reference' | 'keyframe';
+    seed?: number;
+    timeout?: number;
+  }) =>
+    request<{
+      success: boolean;
+      project: string;
+      shot_id: string | number;
+      seq: number;
+      mode: string;
+      path: string;
+      /** 可直接播放/下载：/api/videos/<项目>/[epNN/]shot_NN.mp4 */
+      url: string;
+      ref_count: number;
+      duration: number;
+      /** 后端已把同集旧成片标记为「需重新合成」 */
+      deliverable_marked_stale?: boolean;
+    }>('/video/retry-shot', { method: 'POST', body: JSON.stringify(data) }),
+};
+
 // --- TTS ---
 export const ttsApi = {
   env: (project?: string) =>
@@ -439,7 +475,7 @@ export const mixApi = {
       '/mix/generate',
       { method: 'POST', body: JSON.stringify(data) }
     ),
-  status: (taskId: string) => request<MixTask>(`/mix/status/${taskId}`),
+  status: (taskId: string) => request<MixStatusResponse>(`/mix/status/${taskId}`),
   tasks: () => request<{ success: boolean; items: MixTask[] }>('/mix/tasks'),
   list: (project: string) =>
     request<{ success: boolean; items: any[] }>(
@@ -629,20 +665,27 @@ export const exportApi = {
 // 之前写成 '/api/ai/config' 实际会请求 /api/api/ai/config → 404，AI 配置页整体不可用。
 export const aiConfigApi = {
   get: () => request<AIConfigResponse>('/ai/config'),
-  save: (module: string, base_url: string, model: string, api_key?: string) =>
+  /**
+   * 保存单个模块。
+   * reasoning_effort = 思考档位（'' | 'low' | 'high' | 'max'），只对「思考不可关闭」的模型
+   * （如 GLM-5.3-Flash）有意义：留空 = 不注入该参数，由服务端取默认档。
+   * 用 undefined 表示「不改动」，用空串表示「清空」——两者语义不同，别合并。
+   */
+  save: (module: string, base_url: string, model: string, api_key?: string, reasoning_effort?: string) =>
     request<{ success: boolean; module_config: any; config: AIConfigResponse['config']; message: string }>(
       '/ai/config',
-      { method: 'POST', body: JSON.stringify({ module, base_url, model, api_key }) }
+      { method: 'POST', body: JSON.stringify({ module, base_url, model, api_key, reasoning_effort }) }
     ),
   clear: (module?: string) =>
     request<{ success: boolean; config: AIConfigResponse['config']; message: string }>(
       '/ai/config/clear',
       { method: 'POST', body: JSON.stringify({ module }) }
     ),
-  test: (module: string, base_url: string, model: string, api_key?: string, probe?: string, timeout?: number) =>
+  test: (module: string, base_url: string, model: string, api_key?: string, probe?: string, timeout?: number,
+         reasoning_effort?: string) =>
     request<AITestResult>(
       '/ai/test',
-      { method: 'POST', body: JSON.stringify({ module, base_url, model, api_key, probe, timeout }) }
+      { method: 'POST', body: JSON.stringify({ module, base_url, model, api_key, probe, timeout, reasoning_effort }) }
     ),
 };
 

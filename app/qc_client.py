@@ -56,6 +56,16 @@ CRITICAL_RULE_NOTE = (
     "宁可严格也不得放过有明显缺陷的画面。"
 )
 
+# 风格一致性硬规则：追加到所有图片/视频质检提示词末尾，保证用户自定义的旧配置
+# 也同样具备风格检测能力（与 WATERMARK_EXEMPT_NOTE / CRITICAL_RULE_NOTE 同一机制）。
+# {style} 由 check_image / check_video 在运行时替换为目标风格串；无风格时整段不追加。
+STYLE_CHECK_NOTE = (
+    "\n【风格一致性判定·重要】若上方「目标风格」非空，请务必额外检查画面整体画风/"
+    "渲染方式/笔触/配色是否与「{style}」一致；若明显偏离（例如目标为国漫偏写实，"
+    "却出现写实照片、真人摄影、3D 写实渲染、卡通赛璐璐等），必须在 issues 中写明"
+    "「风格不符/画风不符」并输出 style_match=false。"
+)
+
 # 代码侧关键缺陷词表（命中即阻断，与模型分数无关）
 # 注意：不含「水印/字幕/logo/文字」——这些按 WATERMARK_EXEMPT_NOTE 不计缺陷。
 CRITICAL_ISSUE_KEYWORDS = (
@@ -98,6 +108,70 @@ def find_critical_issues(issues) -> list:
     return hits
 
 
+# 风格达标检测：用户与总控敲定的风格串（如「国漫风格，偏写实」）在成图/成片上
+# 是否被落实。此前质检只查「畸变/糊化/一致性」，完全不管风格，导致风格跑偏也不会
+# 触发「不达标 → 改提示词重生成」。这里把风格也纳入质检判定维度。
+# 注意：风格不达标与「画面崩坏」是两类缺陷，前者只强制 passed=False（触发重试），
+# 后者（find_critical_issues）额外打 blocked=True（关键缺陷阻断）。
+
+# 「风格/画风」后接的否定词，覆盖「画风与目标不符」「风格不一致」等变体表述。
+_STYLE_NEG_WORDS = ("不符", "不一致", "不匹配", "不对", "偏离", "跑偏", "错误", "缺失", "不统一")
+
+# 独立的「风格错误」信号词（不需「风格/画风」前缀，直接命中；
+# 多为「目标风格被替换成别的风格」的表述）。
+STYLE_ISSUE_KEYWORDS = (
+    "写实照片", "真人摄影", "3D写实", "写实渲染", "卡通渲染", "赛璐璐",
+    "不是国漫", "不像国漫", "非国漫", "国漫风格缺失", "缺少国漫",
+)
+
+
+def find_style_issues(issues, style=None) -> list:
+    """从 issues 文本中筛出「风格/画风不达标」类条目。
+
+    匹配两路（任一命中即判定风格缺陷）：
+    1) 独立风格错误词（如「写实照片」「3D写实」，说明目标风格被替换）；
+    2) 「风格/画风」+ 否定词的组合（覆盖「画风与目标不符」「风格不一致」等变体；
+       「风格一致」「画风统一」这类肯定表述不含否定词，不会被误伤）。
+
+    style 参数暂仅用于未来按目标风格做更精细匹配，当前以词表为主。
+    """
+    hits: list = []
+    for it in (issues or []):
+        s = str(it)
+        if any(k in s for k in STYLE_ISSUE_KEYWORDS):
+            hits.append(s[:200])
+            continue
+        if ("风格" in s or "画风" in s) and any(n in s for n in _STYLE_NEG_WORDS):
+            hits.append(s[:200])
+    return hits
+
+
+def _apply_style_gate(verdict: dict, style) -> dict:
+    """在质检结论上叠加「风格达标」判定（幂等，永不抛异常）。
+
+    判定来源（任一命中即判定风格不达标，强制 passed=False）：
+    1) 模型显式返回 style_match=false（prompt 里要求输出的字段）；
+    2) issues 命中 STYLE_ISSUE_KEYWORDS（代码侧兜底，不依赖模型自觉）。
+
+    结果写入 verdict["style_mismatch"] / verdict["style_issues"]，供入库闸门与
+    教训库识别「风格缺陷」以触发改写提示词重生成。
+    """
+    verdict = verdict or {}
+    if not style or not verdict.get("ok"):
+        return verdict
+    issues = list(verdict.get("issues") or [])
+    sm = verdict.get("style_match")
+    style_hits = find_style_issues(issues, style)
+    mismatch = bool(sm is False) or bool(style_hits)
+    verdict["style_mismatch"] = mismatch
+    verdict["style_issues"] = style_hits
+    if mismatch:
+        verdict["passed"] = False
+        if style_hits and not verdict.get("reason"):
+            verdict["reason"] = "画面风格与目标风格不符：" + "；".join(style_hits[:2])
+    return verdict
+
+
 def _finalize_verdict(verdict: dict, pass_score: int) -> dict:
     """代码侧硬闸：单向收紧质检结论（只会把「通过」改成「不通过」，绝不反向放行）
 
@@ -127,11 +201,14 @@ DEFAULT_IMAGE_PROMPT = (
     "你是漫剧分镜图片质检员。请检查这张 AI 生成的分镜图是否达到可直接使用的标准：\n"
     "1) 人物：脸型/发型/服装/配饰与设定一致，无五官畸变、多手多脚、肢体错位；\n"
     "2) 画面：无严重糊化、噪点、色块、扭曲；\n"
-    "3) 构图：主体完整清晰，场景与镜头描述相符。\n"
-    "4) 水印/角标/logo/字幕即使存在，也不计入缺陷、不扣分。\n"
+    "3) 构图：主体完整清晰，场景与镜头描述相符；\n"
+    "4) 风格：画面整体画风/渲染方式/笔触/配色必须与目标风格一致，不得偏离；\n"
+    "5) 水印/角标/logo/字幕即使存在，也不计入缺陷、不扣分。\n"
+    "目标风格：{style}\n"
     "镜头信息：{shot_desc}\n"
     "请只输出一个 JSON 对象，不要任何解释文字，格式：\n"
-    '{"score": 0-100 的整数, "pass": true 或 false, "reason": "一句话结论", "issues": ["具体问题1", "具体问题2"]}'
+    '{"score": 0-100 的整数, "pass": true 或 false, "style_match": true 或 false, '
+    '"reason": "一句话结论", "issues": ["具体问题1", "具体问题2"]}'
 )
 
 DEFAULT_AUDIO_PROMPT = (
@@ -153,11 +230,14 @@ DEFAULT_VIDEO_PROMPT = (
     "请判断该视频片段是否达到可直接使用的标准：\n"
     "1) 画面：无严重闪烁、撕裂、糊化、崩坏或色块；\n"
     "2) 一致性：人物外观与场景在整段视频中保持稳定，无明显畸变；\n"
-    "3) 内容：与镜头描述相符，主体清晰。\n"
-    "4) 水印/角标/logo/字幕即使存在，也不计入缺陷、不扣分。\n"
+    "3) 内容：与镜头描述相符，主体清晰；\n"
+    "4) 风格：画面整体画风/渲染方式/笔触/配色必须与目标风格一致，不得偏离；\n"
+    "5) 水印/角标/logo/字幕即使存在，也不计入缺陷、不扣分。\n"
+    "目标风格：{style}\n"
     "镜头信息：{shot_desc}\n"
     "请只输出一个 JSON 对象，不要任何解释文字，格式：\n"
-    '{"score": 0-100 的整数, "pass": true 或 false, "reason": "一句话结论", "issues": ["具体问题1", "具体问题2"]}'
+    '{"score": 0-100 的整数, "pass": true 或 false, "style_match": true 或 false, '
+    '"reason": "一句话结论", "issues": ["具体问题1", "具体问题2"]}'
 )
 
 # ===================== 剧本质检提示词 =====================
@@ -824,18 +904,44 @@ def test_vision(ep: dict, timeout: int = 60) -> dict:
         {"type": "text", "text": "这是一张测试图片，请只回复：OK"},
         {"type": "image_url", "image_url": {"url": "data:image/png;base64," + _PROBE_PNG_B64}},
     ]
+    # max_tokens 不能给小：混合推理模型（允许思考时）会先吐几百 token 的思考，
+    # 给 16 会让正文永远为空，用户看到「reply 为空」会误判成模型不支持视觉。
     payload = {"model": ep["model"],
                "messages": [{"role": "user", "content": content}],
-               "temperature": 0, "max_tokens": 16, "stream": False}
+               "temperature": 0, "max_tokens": 256, "stream": False}
     try:
         r = _post_chat(ep, payload, timeout, retries=1, backoff=1.0)
     except Exception as e:  # noqa: BLE001
+        # 只返回了思考内容 ⇒ 接口其实是通的、模型也响应了，只是额度被思考吃掉。
+        # 这时不能报「不支持图像」（那会把用户引去换模型），只能说「未确认」。
+        if getattr(e, "kind", "") == "reasoning_only":
+            return {"success": True, "vision": None, "uncertain": True,
+                    "verdict": "reachable_but_no_content",
+                    "error": str(e), "max_tokens": payload["max_tokens"],
+                    "hint": ("接口可达、模型有响应，但额度被思考占用、没有返回正文，"
+                             "因此无法确认是否支持图像输入。请提高质检模块的 max_tokens "
+                             "（建议 ≥1024）后重测。"),
+                    "attempts": getattr(e, "attempts", 1)}
         return {"success": False, "vision": False, "error": str(e),
                 "attempts": getattr(e, "attempts", 1)}
-    return {"success": True, "vision": True, "latency_ms": r["latency_ms"],
-            "url": r["url"], "reply": (r.get("content") or "")[:100],
-            "attempts": int(r.get("attempts", 1)),
-            "retries_used": max(0, int(r.get("attempts", 1)) - 1)}
+    reply = (r.get("content") or "").strip()
+    out = {"success": True, "latency_ms": r["latency_ms"], "url": r["url"],
+           "reply": reply[:100], "attempts": int(r.get("attempts", 1)),
+           "retries_used": max(0, int(r.get("attempts", 1)) - 1),
+           "max_tokens": payload["max_tokens"]}
+    if reply:
+        out["vision"] = True
+        out["verdict"] = "ok"
+    else:
+        # 接口可达，但这次没吐正文（额度被思考占用）→ 视觉能力「未确认」，
+        # 不要谎报 vision=True（否则用户以为质检模型已就绪，实际跑起来全是空判断）
+        out["vision"] = None
+        out["uncertain"] = True
+        out["verdict"] = "reachable_but_no_content"
+        out["hint"] = ("接口可达，但本次没有返回正文（可能额度被思考占用）。"
+                       "无法确认该模型是否支持图像输入；若质检时报「空判断/正文为空」，"
+                       "请提高质检模块的 max_tokens 或改用心智更轻的视觉模型。")
+    return out
 
 
 def _repair_json_quotes(text: str) -> str:
@@ -973,12 +1079,16 @@ def parse_verdict(content: str, pass_score: int) -> dict:
     if isinstance(issues, str):
         issues = [issues]
     # P0：代码侧硬闸（关键缺陷阻断 + 分数不达标强制不通过），只收紧不放宽
+    sm = obj.get("style_match")
+    if isinstance(sm, str):
+        sm = sm.strip().lower() in ("true", "yes", "1", "pass", "一致", "符合")
     return _finalize_verdict({
         "passed": bool(passed) and (score is None or score >= pass_score),
         "score": score,
         "reason": str(obj.get("reason") or obj.get("comment") or "")[:500],
         "issues": [str(x)[:200] for x in issues][:6],
         "raw": text[:1000],
+        "style_match": sm if isinstance(sm, bool) else None,
     }, pass_score)
 
 
@@ -1087,9 +1197,10 @@ def parse_json_loose(content: str) -> dict:
 # ===================== 图片质检 =====================
 
 def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
-                override: dict = None) -> dict:
+                override: dict = None, style: str = "") -> dict:
     """单张图片质检。永不抛异常：失败时返回 ok=False 并带 error。
-    override 仅用于「测试连通性」临时传参，不落盘。"""
+    override 仅用于「测试连通性」临时传参，不落盘。
+    style：目标风格串（用户与总控敲定），用于「风格达标」判定；为空则不做风格检测。"""
     cfg = cfg or _empty_config()
     if not cfg.get("enabled"):
         return {"ok": False, "skipped": True, "reason": "质检总开关未开启"}
@@ -1100,16 +1211,22 @@ def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
         return {"ok": False, "skipped": True, "reason": "质检接口未配置（base_url/api_key/model）"}
     if not image_path or not os.path.isfile(image_path):
         return {"ok": False, "skipped": False, "error": f"图片不存在：{image_path}"}
+    style_norm = str(style or "").strip()
     prompt = (cfg.get("image_prompt") or DEFAULT_IMAGE_PROMPT).replace(
-        "{shot_desc}", shot_desc or "（无）").replace("{pass_score}", str(cfg.get("pass_score", 70)))
+        "{shot_desc}", shot_desc or "（无）").replace(
+        "{pass_score}", str(cfg.get("pass_score", 70))).replace(
+        "{style}", style_norm or "（未指定）")
     prompt = prompt + WATERMARK_EXEMPT_NOTE + CRITICAL_RULE_NOTE   # P0：收紧放行（关键缺陷必须不通过）
+    if style_norm:
+        prompt = prompt + STYLE_CHECK_NOTE.replace("{style}", style_norm)
     try:
-        return _run_vision(ep, prompt, [image_path], cfg)
+        verdict = _run_vision(ep, prompt, [image_path], cfg)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"图片质检调用失败：{e}")
         return {"ok": False, "skipped": False, "error": str(e),
                 "api_attempts": getattr(e, "attempts", 1),
                 "retryable": getattr(e, "retryable", None)}
+    return _apply_style_gate(verdict, style_norm)
 
 
 # ===================== 视频质检（ffmpeg 抽帧） =====================
@@ -1325,9 +1442,10 @@ def extract_frames(video_path: str, out_dir: str, count: int = 3,
 
 def check_video(video_path: str, shot_desc: str = "", cfg: dict = None,
                 override: dict = None, frames_dir: str = None,
-                fallback_meta: dict = None) -> dict:
+                fallback_meta: dict = None, style: str = "") -> dict:
     """视频质检：ffmpeg 抽帧 → 多模态判定。永不抛异常。
-    override 仅用于「测试连通性」临时传参，不落盘。"""
+    override 仅用于「测试连通性」临时传参，不落盘。
+    style：目标风格串，用于「风格达标」判定；为空则不做风格检测。"""
     cfg = cfg or _empty_config()
     if not cfg.get("enabled"):
         return {"ok": False, "skipped": True, "reason": "质检总开关未开启"}
@@ -1346,12 +1464,17 @@ def check_video(video_path: str, shot_desc: str = "", cfg: dict = None,
         return {"ok": False, "skipped": False, "error": fr["error"], "duration": fr["duration"],
                 "frame_meta": fr.get("frame_meta") or [], "video_meta": fr.get("meta") or {}}
 
+    style_norm = str(style or "").strip()
     prompt = (cfg.get("video_prompt") or DEFAULT_VIDEO_PROMPT).replace(
-        "{shot_desc}", shot_desc or "（无）").replace("{frame_count}", str(len(fr["frames"])))
+        "{shot_desc}", shot_desc or "（无）").replace(
+        "{frame_count}", str(len(fr["frames"]))).replace(
+        "{style}", style_norm or "（未指定）")
     ts_brief = "、".join(f"第{i + 1}帧 {fm['actual_ts']}s"
                         for i, fm in enumerate(fr.get("frame_meta") or []))
     prompt = f"共 {len(fr['frames'])} 张抽帧图片（按时间顺序；实际时间戳：{ts_brief}）。\n" + prompt
     prompt = prompt + WATERMARK_EXEMPT_NOTE + CRITICAL_RULE_NOTE   # P0：收紧放行（关键缺陷必须不通过）
+    if style_norm:
+        prompt = prompt + STYLE_CHECK_NOTE.replace("{style}", style_norm)
     try:
         verdict = _run_vision(ep, prompt, fr["frames"], cfg)
     except Exception as e:  # noqa: BLE001
@@ -1369,7 +1492,7 @@ def check_video(video_path: str, shot_desc: str = "", cfg: dict = None,
                     "timestamps": fr.get("timestamps") or [],
                     "duration_source": (fr.get("meta") or {}).get("source"),
                     "video_meta": fr.get("meta") or {}})
-    return verdict
+    return _apply_style_gate(verdict, style_norm)
 
 
 # ===================== 质检历史持久化 =====================

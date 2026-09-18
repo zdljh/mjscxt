@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# ===================== 音轨工具（H3 出片去音轨：后续统一由 QwenTTS 配音） =====================
+# ===================== 音轨工具（H3 出片音轨策略见 config：H3_EMIT_AUDIO / H3_STRIP_AUDIO） =====================
 
 def probe_media(path: str) -> Dict:
     """ffprobe 读取媒体信息（含视频/音频流清单），任何异常都落到 info.error，不抛出"""
@@ -144,6 +144,64 @@ def ensure_no_audio(video_path: str, backup: bool = True) -> Dict:
     return report
 
 
+def ensure_audio_track(video_path: str, sample_rate: int = 48000) -> Dict:
+    """确保视频**含有**音轨：已有音轨直接返回；没有则补一条等长静音 AAC 轨。
+
+    为什么要补：成片拼接用的是 concat demuxer + `-c copy`。如果部分镜头有音轨、
+    部分没有（H3 未必每镜都出声），拼出来的音轨会错位甚至拼接失败。
+    统一补齐后拼接行为可预测。
+
+    与本项目其它后处理一致：失败不抛异常，只把原因写进返回的 error。
+    """
+    t0 = time.time()
+    report: Dict = {"ok": False, "target": os.path.abspath(video_path) if video_path else "",
+                    "kind": "audio_pad", "changed": False, "method": None}
+    if not video_path or not os.path.exists(video_path):
+        report["error"] = "输入视频不存在"
+        return report
+    before = probe_media(video_path)
+    report["has_audio_before"] = bool(before.get("has_audio"))
+    report["before"] = {k: before.get(k) for k in ("width", "height", "duration", "size_mb")}
+    if before.get("has_audio"):
+        report.update({"ok": True, "changed": False, "has_audio_after": True,
+                       "message": "已有音轨（未改动文件）"})
+        report["elapsed_sec"] = round(time.time() - t0, 2)
+        return report
+    dur = float(before.get("duration") or 0)
+    if dur <= 0:
+        report["error"] = "无法读取视频时长，跳过补音轨"
+        return report
+    tmp_out = os.path.splitext(video_path)[0] + ".audioadded.tmp.mp4"
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", video_path,
+           "-f", "lavfi", "-t", f"{dur:.3f}", "-i", f"anullsrc=r={sample_rate}:cl=stereo",
+           "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
+           "-c:a", "aac", "-b:a", "128k", "-shortest",
+           "-movflags", "+faststart", tmp_out]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    except Exception as e:  # pragma: no cover - 环境相关
+        report["error"] = f"{type(e).__name__}: {e}"
+        return report
+    if r.returncode != 0 or not os.path.exists(tmp_out):
+        report["error"] = (r.stderr or "ffmpeg 补音轨失败").strip()[-300:]
+        return report
+    after = probe_media(tmp_out)
+    if not after.get("has_audio"):
+        report["error"] = "补音轨后仍未检测到音频流"
+        try:
+            os.remove(tmp_out)
+        except OSError:
+            pass
+        return report
+    os.replace(tmp_out, video_path)
+    report.update({"ok": True, "changed": True, "has_audio_after": True,
+                   "method": "silent_aac_pad",
+                   "after": {k: after.get(k) for k in ("width", "height", "duration",
+                                                       "size_mb", "audio_codec")}})
+    report["elapsed_sec"] = round(time.time() - t0, 2)
+    return report
+
+
 
 class VideoPostProcessor:
     """视频后期处理器"""
@@ -212,11 +270,14 @@ class VideoPostProcessor:
             srt_name = os.path.basename(srt_file)
             # 文件名内可能含单引号（项目名极端情况），按 ffmpeg 滤镜语法转义
             filter_arg = "subtitles=filename='" + srt_name.replace("'", r"\'") + "'"
+            # -map 0:a? 保证输入有音轨时不丢（?=可选，无音轨不报错）。
+            # 不显式 map 时 ffmpeg 的 -vf 可能只选视频流，导致 H3 原生音效丢失。
             cmd = [
                 "ffmpeg", "-y",
                 "-i", os.path.abspath(video_path),
                 "-vf", filter_arg,
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-map", "0:v:0", "-map", "0:a?",
                 "-c:a", "copy",
                 os.path.abspath(output_path),
             ]

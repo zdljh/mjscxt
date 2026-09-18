@@ -41,6 +41,7 @@ _MATCH_RULES: List[str] = [
     "背景", "场景", "光影", "对比", "畸变", "糊", "模糊", "噪",
     "灯笼", "水印", "字幕", "肢体", "手", "脸", "眼睛", "比例", "拥挤",
     "人物数量", "多余人", "面板", "文字", "logo", "重复", "武器", "剑",
+    "风格", "画风",
 ]
 
 # 修正建议为空时，按类别给一个兜底建议
@@ -71,6 +72,8 @@ _CLASS_HINTS: dict = {
     "多余人": "移除画面中多余的人物或物体。",
     "武器": "严格还原参考图中的武器造型与细节。",
     "剑": "严格还原参考图中的剑/武器造型，不得变形或换款。",
+    "风格": "严格采用目标风格的画风、渲染方式与配色，不得偏离为其他风格。",
+    "画风": "严格采用目标风格的画风、渲染方式与配色，不得偏离为其他风格。",
 }
 
 # 每条经验最多存活条数（防止无限膨胀）
@@ -332,6 +335,19 @@ def suggest(kind: str, prompt: str, project: str = "", root_dir: str = "") -> Li
     if not root_dir:
         return []
     return get_memory(root_dir).suggestions(kind, prompt, project)
+
+
+def learned_prompt(kind: str, prompt: str, project: str = "",
+                   root_dir: str = "", max_hints: int = 3) -> str:
+    """关键便捷入口：返回叠加了「历史质检修正建议」的提示词；无建议则原样返回。
+
+    ⚠️ 必须放在模块级：生成链路是以 `prompt_memory.learned_prompt(...)` 调用的。
+    此前只有类方法、没有模块级函数，调用处抛 AttributeError 又被 except 静默吞掉，
+    导致「质检不通过 → 改提示词重生成」这条链路**从来没有真正生效**过。
+    """
+    if not root_dir:
+        return prompt
+    return get_memory(root_dir).learned_prompt(kind, prompt, project, max_hints)
 
 
 # ===================== 增强功能：分类、优先级、上下文、衰减 =====================

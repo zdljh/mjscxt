@@ -275,7 +275,9 @@ MIX_DEFAULT_PARAMS = {
     "video_codec": "copy",      # copy = 不重编码画面（快）；reencode = libx264 重编码
     "audio_bitrate": "192k",
     "sample_rate": 48000,
-    "keep_original_audio": False,   # 成片若带原音轨，默认丢弃（H3 成片本身无声）
+    "keep_original_audio": True,    # 成片原音轨（H3 生成的环境音/打斗音效）保留并垫底，
+                                    # 2026-09-17 由 False 改为 True：此前直接丢弃，导致成片只剩 TTS 人声
+    "original_audio_volume": 0.3,   # 原音效垫底音量（0~1）。1.0 会盖住台词；0.3 是"听得到但不抢戏"
     "timeout": 900,             # 单次合成等待上限（秒）
     # 逐句微调（离线标定）：{line_id: 秒}，正值延后
     "line_offsets": {},
@@ -285,9 +287,23 @@ MIX_DEFAULT_PARAMS = {
 MIX_CALIBRATION_PATH = os.path.join(PROJECT_OUTPUT_DIR, "final_dub", "mix_calibration.json")
 
 # ===================== H3 视频音频策略 =====================
-# 后续配音统一由 QwenTTS 负责，H3 生成阶段即不带音轨，避免不同剧情/角色声音不一致
-H3_EMIT_AUDIO = False               # False = 提交工作流前断开 CreateVideo.audio 输入（生成阶段不出音轨）
-H3_STRIP_AUDIO = True               # True = 视频落盘后仍 ffprobe 校验，若存在音轨则用 ffmpeg 剥离（双保险）
+# H3 是「音视频联合生成」模型（主模型 minimax_h3_ref2va ＋ 专属音频 VAE
+# minimax_h3_audio_vae_fp32），工作流里 VAEDecodeAudio → CreateVideo.audio 线路本来就是通的
+# → 画面与音效（打斗/雨声/环境音）**本来就一起产出**。
+#
+# 2026-09-17 起改为「分层保留」：
+#   保留 H3 原生音轨 → 用 HDEMUCS 人声分离剔掉 H3 自己生成的对白人声
+#   （否则会与全剧统一的 QwenTTS 音色打架）→ 音效以 MIX_DEFAULT_PARAMS.original_audio_volume
+#   垫底，QwenTTS 台词叠在上面。
+# 旧策略是 H3_EMIT_AUDIO=False + H3_STRIP_AUDIO=True **全部丢弃**，代价是成片完全没有音效
+# （实测 output/videos/** 与 output/final/** 全部无音频流，唯一音轨来自 TTS）。
+H3_EMIT_AUDIO = True                # True = 保留 CreateVideo.audio 输入（H3 正常产出音轨）
+H3_STRIP_AUDIO = False              # False = 不再 ffprobe 剥离音轨（改由人声分离环节处理）
+# 末镜音轨人声分离（只留音效/环境声，去掉 H3 自带的说话声）
+H3_SFX_ISOLATE = True               # True = 逐镜跑 HDEMUCS 分离；失败 **fail-open** 保留原音轨
+H3_SFX_STEMS = (1, 2)               # HDEMUCS 输出下标：0=Bass 1=Drums 2=Other(音效/环境) 3=Vocals
+                                    # 取 Drums+Other：打斗的撞击/鼓点常被判进 Drums
+H3_SFX_DIR = os.path.join(PROJECT_OUTPUT_DIR, "sfx")   # 分离产物：output/sfx/<项目>/...
 
 # AI 对话（创作总控）：多轮对话历史 + 已生效的项目创作设定
 AI_CHAT_DIR = os.path.join(PROJECT_OUTPUT_DIR, "ai_chat")

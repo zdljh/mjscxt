@@ -199,6 +199,19 @@ def with_style(prompt: str, style, *, with_tail: bool = True) -> str:
     return f"{text}{sep}{suffix}。"
 
 
+def style_emphasis(style) -> str:
+    """生成「强风格指令头」，用于需要强调风格的场景（如尾帧、风格不达标重试）。
+
+    与 :func:`style_suffix` 的区别：后者只是拼在提示词末尾的一句话，容易被模型弱化；
+    本函数把风格要求放到提示词**最前**并声明为最高优先级，用于在风格已跑偏时强力纠正。
+    """
+    norm = normalize_style(style)
+    if not norm:
+        return ""
+    return (f"【风格铁律·最高优先级】本画面必须严格采用「{norm}」的视觉风格、"
+            f"画风、渲染方式与配色，任何环节都不得偏离该风格。")
+
+
 def _style_marker(style) -> str:
     toks = [t for t in style_tokens(style) if not any(a in t for a in _ASPECT_TOKENS)]
     return "，".join(toks)

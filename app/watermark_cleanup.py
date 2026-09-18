@@ -43,6 +43,21 @@ def probe_size(path: str) -> Tuple[int, int]:
     return int(wh[0]), int(wh[1])
 
 
+def probe_has_audio(path: str) -> bool:
+    """该视频是否含音频流（用于决定去水印时保留还是丢弃音轨）。
+
+    2026-09-17：此前 clean_video 一律带 `-an`，把 H3 联合生成的环境音/打斗音效
+    在落盘前就丢掉了（成片因此完全没有音效）。现在改成「有音轨就原样保留」。
+    """
+    try:
+        cmd = [FFPROBE_BIN, "-v", "error", "-select_streams", "a:0",
+               "-show_entries", "stream=codec_name", "-of", "csv=p=0", path]
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        return out.returncode == 0 and bool(out.stdout.strip())
+    except Exception:  # pragma: no cover - 环境相关
+        return False
+
+
 def region_pixels(width: int, height: int,
                   region: Sequence[float] = DEFAULT_REGION) -> Tuple[int, int, int, int]:
     """比例区域 → 像素矩形 (x, y, w, h)，保证不贴边（delogo 要求区域在画面内）。"""
@@ -104,7 +119,8 @@ def clean_video(path: str, region: Sequence[float] = DEFAULT_REGION,
                 backup_dir: Optional[str] = None, crf: int = 18) -> dict:
     """去除视频指定区域内的文字/水印（逐帧区域插值，原地替换，先备份）。
 
-    输出保持无音轨（-an）：项目配音链路在混音阶段统一加音轨。
+    **音轨策略：原样保留**。有音轨则 `-c:a copy`（H3 联合生成的音效不能被这里吃掉）；
+    本来就没有音轨才加 `-an`。2026-09-17 之前是一律 `-an`，导致成片彻底没有音效。
     """
     rec = {"ok": False, "applied": False, "target": path, "kind": "video"}
     if not available():
@@ -117,9 +133,12 @@ def clean_video(path: str, region: Sequence[float] = DEFAULT_REGION,
         rec["region"] = box
         rec["backup"] = _backup(path, backup_dir)
         tmp = os.path.splitext(path)[0] + ".clean.mp4"
+        has_audio = probe_has_audio(path)
+        rec["has_audio"] = has_audio
+        audio_args = ["-c:a", "copy"] if has_audio else ["-an"]
         cmd = [FFMPEG_BIN, "-y", "-v", "error", "-i", path, "-vf", filt,
                "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
-               "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", tmp]
+               "-pix_fmt", "yuv420p"] + audio_args + ["-movflags", "+faststart", tmp]
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
         if out.returncode != 0 or not os.path.exists(tmp):
             rec["error"] = (out.stderr or "ffmpeg 处理失败").strip()[:200]

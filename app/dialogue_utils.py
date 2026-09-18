@@ -164,3 +164,128 @@ def format_line(raw, sep: str = "：", with_speaker: bool = True) -> str:
         return ""
     speaker = dialogue_speaker(raw) if with_speaker else ""
     return f"{speaker}{sep}{text}" if speaker else text
+
+
+# ===================== 剧本「可配音 / 可出片」体检 =====================
+
+
+def _shot_label(shot: dict, idx: int) -> str:
+    sid = shot.get("shot_id")
+    seq = shot.get("seq") or shot.get("shot_no")
+    return f"#{seq if seq else (sid if sid is not None else idx + 1)}"
+
+
+def audit_script(script: Optional[dict]) -> dict:
+    """体检剧本在进入「配音 / 出片」前是否存在内容缺口。
+
+    为什么需要它：LLM 失败时 novel_to_script 会按原文兜底生成镜头
+    （``fallback=True``），这类镜头是 **dialogue=[] 且 prompt_h3=""** ——
+    原文照搬、没有任何台词。脚本生成阶段看起来「成功了」（镜头数正常），
+    但到配音环节就会一句都合不出来，或者合出整集无声；用户完全不知道
+    为什么「配音生成成功却没有声音」。
+
+    这里把这类缺口显式暴露出来，返回：
+      - silent_shots：台词与旁白**同时为空**（该镜配音必然产出 0 句 → 成片无声）
+      - narration_line_count：无台词但有旁白的镜头数（旁白会被
+        tts_client.build_dub_plan 以「旁白」音色合成进成片，故不计入静默）
+      - fallback_shots：兜底生成的镜头（内容照搬原文，需人工润色）
+      - blank_visual_shots：description 与 prompt_h3 均为空（出片没有画面提示）
+      - unknown_speaker_shots：出场角色不在角色表里（音色会退回「旁白」）
+      - warnings：可直接展示给用户的中文提示
+
+    纯函数、无副作用、不依赖项目内其它模块。
+    """
+    script = script if isinstance(script, dict) else {}
+    shots = [s for s in (script.get("shots") or []) if isinstance(s, dict)]
+    # 角色表名集合（用于判断说话人/出场角色是否可识别）
+    known = {n for n in iter_names(script.get("characters") or [])}
+
+    silent, fallback, blank_visual, unknown_speaker = [], [], [], []
+    speakable_lines = 0        # 有台词的镜头数
+    narration_lines = 0        # 无台词但有旁白的镜头数（旁白会被合成进成片，故不算静默）
+    for i, s in enumerate(shots):
+        label = _shot_label(s, i)
+        if s.get("fallback"):
+            fallback.append(label)
+        dlg_text = dialogue_text(s.get("dialogue"))
+        if not dlg_text and str(s.get("dialogue_text") or "").strip():
+            dlg_text = str(s.get("dialogue_text")).strip()
+        narration = str(s.get("narration") or "").strip()
+        if dlg_text:
+            speakable_lines += 1
+        elif narration:
+            narration_lines += 1
+        else:
+            silent.append(label)
+        desc = str(s.get("description") or "").strip()
+        if not desc and not str(s.get("prompt_h3") or "").strip():
+            blank_visual.append(label)
+        cast = s.get("characters_in_shot") or s.get("characters") or []
+        names = []
+        for c in cast:
+            nm = c.get("name") if isinstance(c, dict) else str(c or "")
+            if str(nm or "").strip():
+                names.append(str(nm).strip())
+        if names and known and any(n not in known for n in names):
+            unknown_speaker.append(label)
+
+    warnings: List[str] = []
+    # 整集兜底＝剧本实际上没被模型加工过（实测 E2E 项目「第1集」6/6 都是兜底），
+    # 这种情况必须升级提示，否则用户会以为「剧本生成成功了」。
+    all_fallback = bool(shots) and len(fallback) == len(shots)
+    if all_fallback:
+        warnings.append(
+            f"该集全部 {len(shots)} 个镜头都是「模型失败后按原文兜底」生成的，"
+            f"剧本实际上未经模型加工（无分镜设计、无台词）。建议重新生成剧本，"
+            f"或人工分镜后再进入配音出片。")
+    elif fallback:
+        warnings.append(
+            f"有 {len(fallback)} 个镜头是「模型失败后按原文兜底」生成的（{', '.join(fallback[:8])}"
+            f"{' 等' if len(fallback) > 8 else ''}）：内容照搬原文、没有台词，"
+            f"建议人工润色后再配音出片。")
+    if silent:
+        warnings.append(
+            f"有 {len(silent)} 个镜头既没有台词也没有旁白（{', '.join(silent[:8])}"
+            f"{' 等' if len(silent) > 8 else ''}）：这些镜头在配音环节不会产出任何音频，"
+            f"整集可能出现「无声片段」。")
+    if blank_visual:
+        warnings.append(
+            f"有 {len(blank_visual)} 个镜头既无画面描述也无 H3 提示词（{', '.join(blank_visual[:8])}"
+            f"{' 等' if len(blank_visual) > 8 else ''}）：出片会缺少画面指引。")
+    if unknown_speaker:
+        warnings.append(
+            f"有 {len(unknown_speaker)} 个镜头的出场角色不在角色表里（{', '.join(unknown_speaker[:8])}"
+            f"{' 等' if len(unknown_speaker) > 8 else ''}）：音色会退回默认「旁白」。")
+
+    stats = {
+        "shot_count": len(shots),
+        "speakable_lines": speakable_lines,
+        "narration_line_count": narration_lines,
+        "speakable_line_count_total": speakable_lines + narration_lines,
+        "silent_shot_count": len(silent),
+        "fallback_shot_count": len(fallback),
+        "all_fallback": all_fallback,
+        "blank_visual_shot_count": len(blank_visual),
+        "unknown_speaker_shot_count": len(unknown_speaker),
+    }
+    if shots and speakable_lines == 0 and narration_lines == 0:
+        warnings.insert(0, f"整集 {len(shots)} 个镜头里既没有台词也没有旁白，配音合成会产出 0 句音频。")
+    elif shots and speakable_lines == 0:
+        warnings.insert(0, f"整集 {len(shots)} 个镜头里没有任何台词，只有 {narration_lines} 镜旁白："
+                           f"成片会全片只剩旁白、没有角色对话，建议检查剧本是否漏写台词。")
+    # ok = 「可以直接进配音出片」。四种情况都不放行：
+    #   有静默镜头（台词与旁白同时为空）/ 有空洞画面 /
+    #   整集既无台词也无旁白（配音链路只读 dialogue + narration）/
+    #   整集全是兜底镜头（剧本未经模型加工）。
+    return {
+        "ok": (bool(shots) and not (silent or blank_visual)
+               and (speakable_lines + narration_lines) > 0 and not all_fallback),
+        "stats": stats,
+        "warnings": warnings,
+        "problem_shots": {
+            "silent": silent,
+            "fallback": fallback,
+            "blank_visual": blank_visual,
+            "unknown_speaker": unknown_speaker,
+        },
+    }

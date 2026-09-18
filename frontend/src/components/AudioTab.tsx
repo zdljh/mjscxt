@@ -21,6 +21,12 @@ export function AudioTab({ projectKey }: AudioTabProps) {
   const [mixPlan, setMixPlan] = useState<any>(null);
   const [mixGenerating, setMixGenerating] = useState(false);
   const [mixError, setMixError] = useState('');
+  /** 混音完成后后端回传的「自动登记待验收」结果（null = 尚未出结果） */
+  const [mixDeliverable, setMixDeliverable] = useState<
+    { registered: boolean; reason: string; episode_no: number } | null
+  >(null);
+  /** 混音进度（轮询展示，替代原来只 alert 一下就结束） */
+  const [mixTask, setMixTask] = useState<{ phase?: string; progress?: number } | null>(null);
   
   // Step 3: 音频质检
   const [qcResult, setQcResult] = useState<any>(null);
@@ -83,14 +89,37 @@ export function AudioTab({ projectKey }: AudioTabProps) {
     }
   };
 
-  // 生成混音
+  // 生成混音（异步任务：下发后轮询到终态，顺便把「是否进了验收队列」告诉用户）
   const handleGenerateMix = async () => {
     setMixGenerating(true);
     setMixError('');
+    setMixDeliverable(null);
+    setMixTask(null);
     try {
       const result = await mixApi.generate({ project_name: projectKey });
-      alert(`混音任务已启动: ${result.task_id}`);
-      await loadMixPlan();
+      setMixTask({ phase: '任务已下发', progress: 0 });
+      // 混音本身很快，但配音未就绪时可能排队；最多轮询 10 分钟
+      for (let i = 0; i < 200; i += 1) {
+        await new Promise((r) => setTimeout(r, 3000));
+        let task: any = null;
+        try {
+          const resp = await mixApi.status(result.task_id);
+          task = (resp as any)?.task || resp;
+        } catch {
+          continue; // 单次轮询失败不中断
+        }
+        setMixTask({ phase: task?.phase, progress: task?.progress });
+        if (task?.status === 'completed' || task?.status === 'failed') {
+          if (task.status === 'failed') {
+            setMixError(task.message || '混音失败');
+          } else {
+            setMixDeliverable(task.deliverable || null);
+            await loadMixPlan();
+          }
+          return;
+        }
+      }
+      setMixError('混音任务轮询超时，请到「成品验收」页刷新查看结果');
     } catch (e) {
       setMixError(e instanceof Error ? e.message : '混音生成失败');
     } finally {
@@ -121,7 +150,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
               <span className="text-lg">{step.icon}</span>
               <span>{step.label}</span>
               {activeStep === step.id && (
-                <span className="ml-1 text-xs opacity-75">①②③[idx]</span>
+                <span className="ml-1 text-xs opacity-75">●</span>
               )}
             </button>
             {idx < steps.length - 1 && (
@@ -180,11 +209,22 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                   </div>
                 </div>
 
+                {/* 剧本体检：兜底镜头（无台词、无 prompt_h3）在配音环节会变成
+                    「一句也合不出来」，必须在这里就说清楚，而不是等用户白跑一轮 */}
+                {Array.isArray(ttsPlan.warnings) && ttsPlan.warnings.length > 0 && (
+                  <div className="mb-4 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-400 text-xs space-y-1">
+                    <div className="font-medium">剧本体检提醒</div>
+                    {ttsPlan.warnings.map((w: string, i: number) => (
+                      <div key={i}>· {w}</div>
+                    ))}
+                  </div>
+                )}
+
                 {ttsPlan.lines && ttsPlan.lines.length > 0 && (
                   <div className="max-h-40 overflow-y-auto space-y-1 mb-4">
                     {ttsPlan.lines.slice(0, 10).map((line: any, idx: number) => (
                       <div key={idx} className="text-sm text-gray-600 dark:text-gray-400 px-2 py-1 bg-gray-50 dark:bg-gray-700/30 rounded">
-                        <span className="font-mono text-gray-400">#{line.seq}</span>
+                        <span className="font-mono text-gray-400">#{line.shot_id ?? idx + 1}</span>
                         <span className="ml-2">{line.text}</span>
                         {line.character && <span className="ml-2 text-indigo-500">[{line.character}]</span>}
                       </div>
@@ -192,6 +232,12 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                     {ttsPlan.lines.length > 10 && (
                       <div className="text-xs text-gray-400 text-center py-1">... 还有 {ttsPlan.lines.length - 10} 条台词</div>
                     )}
+                  </div>
+                )}
+
+                {ttsPlan.lines && ttsPlan.lines.length === 0 && (
+                  <div className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-500 text-xs">
+                    该集没有可朗读台词，无法生成配音。请先补台词或重新生成剧本。
                   </div>
                 )}
 
@@ -262,12 +308,41 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                 >
                   {mixGenerating ? '混音中...' : '开始混音'}
                 </Button>
+
+                {mixGenerating && mixTask?.phase && (
+                  <div className="mt-3">
+                    <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400 mb-1">
+                      <span>{mixTask.phase}</span>
+                      <span>{mixTask.progress ?? 0}%</span>
+                    </div>
+                    <div className="h-1.5 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden">
+                      <div
+                        className="h-full bg-violet-500 transition-all"
+                        style={{ width: `${Math.max(0, Math.min(100, mixTask.progress ?? 0))}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
             {mixError && (
               <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
                 {mixError}
+              </div>
+            )}
+
+            {mixDeliverable && (
+              <div
+                className={`p-3 rounded-lg text-sm border ${
+                  mixDeliverable.registered
+                    ? 'bg-green-500/10 border-green-500/30 text-green-600 dark:text-green-400'
+                    : 'bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-400'
+                }`}
+              >
+                {mixDeliverable.registered
+                  ? `带配音成片已生成，并自动加入「成品验收」第 ${mixDeliverable.episode_no} 集待验收`
+                  : `带配音成片已生成，但未进入验收队列：${mixDeliverable.reason || '原因未知'}`}
               </div>
             )}
           </div>

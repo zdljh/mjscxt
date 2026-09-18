@@ -47,6 +47,16 @@
 
 本节记录相对初版的实质性增强。所有条目均已在本机实测通过（含真实模型调用）。
 
+### 风格一致性（端到端闭环）
+
+| 能力 | 落地位置 | 说明 |
+|------|---------|------|
+| 风格统一注入 | `app/style_kit.py` | `normalize_style` / `with_style` / `apply_asset_style` / `style_emphasis`；风格只在单点定义，所有生成入口共用 |
+| 分镜/资产/视频全链路 | `app/app.py` + `app/keyframe.py` | 分镜提示词、角色/场景/物品参考提示词、尾帧 keyframe 均注入风格后缀；视频重试用强化头 |
+| 质检风格达标检测 | `app/qc_client.py` | `find_style_issues`（关键词+否定词兜底）/ `_apply_style_gate`（硬闸门强制 `passed=False`）/ `check_image` + `check_video` 接收 `style` 参数并注入 `{style}` 占位 |
+| 风格不达标→改提示词 | `app/qc_client.py` + `app/prompt_memory.py` | `_qc_gate` 返回 `style_blocked`；`_record_qc_lesson` 注入「严格采用 XX 风格」强化建议；`prompt_memory` 支持「风格/画风」种子词召回 |
+| 视频 worker 补齐反馈 | `app/app.py` `_video_generate_worker` | 重试时调 `learned_prompt(kind="video", ...)` 重写 prompt；保存 `orig_video_prompt` 作为稳定 key |
+
 ### 工程底座
 
 | 能力 | 落地位置 | 说明 |
@@ -316,4 +326,4 @@ custom_nodes/
 
 ---
 
-**版本**: 2.0.0 | **日期**: 2026-09-09
+**版本**: 2.1.0 | **日期**: 2026-09-18

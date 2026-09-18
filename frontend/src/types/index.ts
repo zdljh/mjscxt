@@ -324,6 +324,30 @@ export interface MixTask {
   project_name: string;
   total: number;
   current: number;
+  /** 产物路径（完成后才有） */
+  output_path?: string;
+  /** 播放地址（后端用 _mix_audio_url 计算） */
+  url?: string;
+  /** 混音报告路径 */
+  report_path?: string;
+  /** 合成完成后的统计（entry_count / elapsed_sec / warnings…） */
+  result?: { entry_count?: number; elapsed_sec?: number; warnings?: string[] };
+  /**
+   * 后端新增：带配音成片是否已自动进入「成品验收」队列。
+   * registered=false 时看 reason（例如成片过小被判为半成品）。
+   */
+  deliverable?: {
+    registered: boolean;
+    reason: string;
+    episode_no: number;
+    path: string;
+  };
+}
+
+/** ⚠️ /api/mix/status 返回的是信封 {success, task}，不是裸任务对象 */
+export interface MixStatusResponse {
+  success: boolean;
+  task: MixTask;
 }
 
 // --- QC ---
@@ -414,7 +438,29 @@ export interface Deliverable {
   /** 字节数 */
   size?: number;
   /** 元信息，含 title（章节标题）等 */
-  meta?: { title?: string; chapter_index?: number; elapsed_sec?: number; retries?: number };
+  meta?: {
+    title?: string;
+    chapter_index?: number;
+    elapsed_sec?: number;
+    retries?: number;
+    /** 成片来源：final_video（合并）/ mix（带配音混音）/ probe 等 */
+    source?: string;
+    /** 成片时长（秒） */
+    duration_sec?: number | null;
+    /** 剧本镜头总数 / 已发现镜头视频数（后端自动登记时写入） */
+    shots_total?: number;
+    shots_ready?: number;
+    /** 镜头数不齐时后端打的标记：true 表示成片可能不完整 */
+    incomplete_shots?: boolean;
+    /** 配合 incomplete_shots 的提示文案 */
+    warning?: string;
+    /** 成片登记后被标记为「已过期」（同集镜头重做过，成片需重新合成） */
+    stale?: {
+      reason?: string;
+      marked_at?: string;
+      detail?: { shot_id?: string | number; seq?: number; mode?: string; video?: string };
+    };
+  };
   /** 验收状态：pending 待验收 / accepted 已验收 / rejected 已打回 */
   review?: 'pending' | 'accepted' | 'rejected';
   /** ⚠️ 后端字段名是 `review_note`，不是 `note`（见 pipeline.set_deliverable_review） */
@@ -456,6 +502,8 @@ export interface AIConfigModule {
   base_url: string;
   api_key: string;    // masked on read
   model: string;
+  /** 思考档位：'' = 不注入（服务端默认），其余为 low / high / max。思考不可关闭的模型用 */
+  reasoning_effort?: string;
   updated_at: string | null;
   has_api_key?: boolean;  // whether a real key is stored
   key?: string;       // module key
@@ -483,6 +531,8 @@ export interface AIConfigResponse {
     legacy_path?: string;
     updated_at?: string;
     migrated_from?: string;
+    /** 思考档位可选项（含开头的空串，表示「不注入」） */
+    reasoning_effort_options?: string[];
     /** ComfyUI 地址的实际来源（环境变量），因此只能只读展示 */
     comfyui?: {
       url: string;
@@ -498,9 +548,38 @@ export interface AITestResult {
   probe: string;
   model?: string;
   base_url?: string;
+  chat_url?: string;
+  /** ⚠️ 后端真实字段是 latency_ms；response_time_ms 仅为兼容旧值保留 */
+  latency_ms?: number;
   response_time_ms?: number;
   error?: string;
   guide?: string;
+  /**
+   * 后端给出的人类可读结论：
+   * - `ok`：链路通且拿到了正文
+   * - `reachable_but_no_content`：链路通，但模型这次没输出正文
+   *   （允许思考时额度被思考吃掉）——**不要当成配置错误**
+   * - `failed`：确实连不上 / 鉴权失败
+   */
+  verdict?: 'ok' | 'reachable_but_no_content' | 'failed';
+  /** 模型回复片段（用于人工确认返回的确实是模型内容） */
+  reply?: string;
+  /** 配合非 ok 结论的处置建议 */
+  hint?: string;
+  /** 结束原因（length 表示被截断） */
+  finish_reason?: string;
+  truncated?: boolean;
+  /** 正文为空（把额度全用在思考上） */
+  thinking_only?: boolean;
+  /** 该次探测实际使用的 max_tokens */
+  max_tokens?: number;
+  disable_thinking?: boolean;
+  /** 视觉探测：true 支持 / false 不支持 / null 未确认（无正文） */
+  vision?: boolean | null;
+  /** 视觉探测未确认时为 true */
+  uncertain?: boolean;
+  attempts?: number;
+  retries_used?: number;
 }
 
 // ========== 超分（FlashVSR） ==========

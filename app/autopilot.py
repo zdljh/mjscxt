@@ -470,9 +470,13 @@ def read_history(project_name: str = "", hours: int = 24) -> list:
     return rows
 
 
-def production_curve(hours: int = 24, buckets: int = 24) -> dict:
-    """把生产历史聚合成「每小时完成集数」曲线，并给出吞吐与平均耗时"""
-    rows = read_history(hours=hours)
+def production_curve(hours: int = 24, buckets: int = 24, project: str = "") -> dict:
+    """把生产历史聚合成「每小时完成集数」曲线，并给出吞吐与平均耗时
+
+    传入 project 时只统计该项目的生产历史 —— 否则一个从没跑过的新项目
+    也会显示别的项目的产量，让人误以为「我的项目已经出片了」。
+    """
+    rows = read_history(project, hours=hours)
     if not rows:
         return {"hours": hours, "buckets": [], "episodes_done": 0,
                 "episodes_failed": 0, "avg_elapsed_sec": 0, "throughput_per_hour": 0.0}
@@ -870,14 +874,27 @@ def status(project: str = "") -> dict:
             exceptions.extend(pipeline_list_dead(p["project"]))
         except Exception as e:  # noqa: BLE001
             logger.warning("状态聚合失败（%s）：%s", p.get("project"), e)
+    # 传入 project 时，开关/计划数也要收敛到该项目 ——
+    # 否则前端按项目查询时，会看到别的项目开启托管而误判自己已开启。
+    if project:
+        mine = [p for p in plans if p.get("project") == project]
+        enabled_count = sum(1 for p in mine if p.get("enabled"))
+        plan_count = len(mine)
+    else:
+        enabled_count = len(enabled)
+        plan_count = len(plans)
     st.update({
-        "enabled_count": len(enabled),
-        "plan_count": len(plans),
+        # 回显作用域：调用方（含 AI 总控）必须能一眼看出这份数字属于哪个项目，
+        # 否则模型会拿历史对话里的项目名去「对号入座」，把 A 的数据说成 B 的。
+        "project": project,
+        "scoped": bool(project),
+        "enabled_count": enabled_count,
+        "plan_count": plan_count,
         "pending_review": sum(1 for d in deliveries if d.get("review") == "pending"
                               and d.get("exists")),
         "delivered_total": len(deliveries),
         "exceptions": len([e for e in exceptions if not e.get("resolved")]),
-        "curve": production_curve(24),
+        "curve": production_curve(24, project=project),
     })
     return st
 

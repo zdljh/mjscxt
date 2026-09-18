@@ -1625,10 +1625,11 @@ def api_storyboard_retry_shot():
             app.logger.warning(f"单镜重跑去水印未生效：{e}")
     shutil.copy2(files[0], scratch)
     if qc_on:
-        verdict = qc_client.check_image(scratch, _qc_shot_desc(shot), qc_cfg)
+        verdict = qc_client.check_image(scratch, _qc_shot_desc(shot), qc_cfg,
+                                        style=(shot.get("style") or _rs_style))
         gate = _qc_gate(verdict)
         _qc_record_verdict(project, "image", shot_id, "单镜重跑质检",
-                           1, seed, scratch, verdict)
+                           1, seed, scratch, verdict, style=(shot.get("style") or _rs_style))
     if qc_on and not (gate or {}).get("accept"):
         return jsonify({"success": False, "qc_blocked": True,
                         "error": f"分镜图质检阻断（{(gate or {}).get('label')}）："
@@ -2175,14 +2176,15 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                     base_ok = True
                     break
                 _set_phase(f"{name} 基础图质检中（第 {attempt + 1} 次）", "checking")
-                verdict = qc_client.check_image(scratch_base, qc_desc, qc_cfg)
+                verdict = qc_client.check_image(scratch_base, qc_desc, qc_cfg, style=gen_style)
                 app.logger.info(f"[资产质检] base {asset_type}/{name} 第{attempt + 1}次 → "
                                 f"{verdict.get('call_url')} model={verdict.get('model')} "
                                 f"ok={verdict.get('ok')} passed={verdict.get('passed')} "
-                                f"score={verdict.get('score')} latency={verdict.get('latency_ms')}ms")
+                                f"score={verdict.get('score')} style_mismatch={verdict.get('style_mismatch')} "
+                                f"latency={verdict.get('latency_ms')}ms")
                 base_attempts.append(_qc_record_verdict(project_name, "asset_image", f"{name}_base",
                                                         "资产基础图质检", attempt + 1, seed,
-                                                        scratch_base, verdict))
+                                                        scratch_base, verdict, style=gen_style))
                 base_gate = _qc_gate(verdict)
                 if base_gate["accept"]:
                     base_ok = True
@@ -2252,14 +2254,17 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                 api_error = False
                 for vk, sp in view_src.items():
                     _set_phase(f"{name} 多视角质检中（{vk} · 第 {attempt + 1} 次）", "checking")
-                    verdict = qc_client.check_image(sp, qc_desc + f"；视角：{vk}", qc_cfg)
+                    verdict = qc_client.check_image(sp, qc_desc + f"；视角：{vk}", qc_cfg,
+                                                    style=gen_style)
                     app.logger.info(f"[资产质检] view {asset_type}/{name}/{vk} 第{attempt + 1}次 → "
                                     f"{verdict.get('call_url')} model={verdict.get('model')} "
                                     f"ok={verdict.get('ok')} passed={verdict.get('passed')} "
-                                    f"score={verdict.get('score')} latency={verdict.get('latency_ms')}ms")
+                                    f"score={verdict.get('score')} style_mismatch={verdict.get('style_mismatch')} "
+                                    f"latency={verdict.get('latency_ms')}ms")
                     view_attempts.setdefault(vk, []).append(
                         _qc_record_verdict(project_name, "asset_image", f"{name}_{vk}",
-                                           f"资产多视角质检（{vk}）", attempt + 1, vseed, sp, verdict))
+                                           f"资产多视角质检（{vk}）", attempt + 1, vseed, sp, verdict,
+                                           style=gen_style))
                     gate = _qc_gate(verdict)
                     view_gate[vk] = gate
                     if not gate["accept"]:
@@ -2652,9 +2657,11 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                         with lock:
                             generation_state[task_id]["phase"] = f"图片质检中（镜头 {shot_id} · 第 {attempt + 1} 次）"
                             generation_state[task_id]["qc_phase"] = "checking"
-                        verdict = qc_client.check_image(scratch_png, _qc_shot_desc(shot), qc_cfg)
+                        verdict = qc_client.check_image(scratch_png, _qc_shot_desc(shot), qc_cfg,
+                                                        style=(shot.get("style") or _sb_style))
                         rec = _qc_record_verdict(project_name, "image", shot_id, "图片质检",
-                                                 attempt + 1, seed, scratch_png, verdict)
+                                                 attempt + 1, seed, scratch_png, verdict,
+                                                 style=(shot.get("style") or _sb_style))
                         attempts.append(rec)
                         gate = _qc_gate(verdict)
                         item["qc_gate"] = gate
@@ -3125,10 +3132,30 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                               "mode": "per_shot", "segment_count": 1,
                               "duration": seg.get("duration"),
                               "used_storyboard": bool(sb_local)}
+                orig_video_prompt = prompt     # 教训库稳定键（改写后的提示词不参与指纹）
 
                 for attempt in range(max_retries + 1):
                     if attempt > 0:
                         seed = random.randint(1, 2 ** 31 - 1)
+                        # 从教训库召回「上一轮质检哪里不对」，据此改写视频提示词再生成
+                        try:
+                            learned = prompt_memory.learned_prompt(
+                                kind="video",
+                                prompt=orig_video_prompt,
+                                project=project_name,
+                                root_dir=PROJECT_OUTPUT_DIR)
+                            if learned and learned != orig_video_prompt:
+                                prompt = learned
+                                seg["prompt"] = prompt
+                                app.logger.info("镜头 %s 第 %d 次视频重试，按质检教训改写提示词",
+                                                shot_id, attempt + 1)
+                            else:
+                                prompt = orig_video_prompt
+                                seg["prompt"] = prompt
+                                app.logger.info("镜头 %s 第 %d 次视频重试，暂无可用教训，仅换种子",
+                                                shot_id, attempt + 1)
+                        except Exception as mem_err:
+                            app.logger.warning(f"读取记忆模块失败: {mem_err}")
                         with lock:
                             generation_state[task_id]["phase"] = \
                                 f"视频质检不达标，重新生成（第 {attempt}/{max_retries} 次）"
@@ -3181,7 +3208,8 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                     frames_dir = os.path.join(QC_DIR, project_name, "frames",
                                               f"shot_{seq:02d}_try{attempt + 1}")
                     verdict = qc_client.check_video(v_scratch, _qc_shot_desc(shot), qc_cfg,
-                                                    frames_dir=frames_dir)
+                                                    frames_dir=frames_dir,
+                                                    style=(shot.get("style") or _style_res.get("style")))
                     rec = _qc_record_verdict(
                         project_name, "video", shot_id, "视频质检",
                         attempt + 1, seed, v_scratch, verdict,
@@ -3190,7 +3218,8 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                             "frames": [f"/api/qc/frames/{os.path.relpath(f, QC_DIR).replace(os.sep, '/')}"
                                        for f in (verdict.get("frames") or [])],
                             "frames_local": verdict.get("frames") or [],
-                        })
+                        },
+                        style=(shot.get("style") or _style_res.get("style")))
                     attempts.append(rec)
                     gate = _qc_gate(verdict)
                     video_item["qc_gate"] = gate
@@ -3202,6 +3231,8 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                         break
                     if not verdict.get("ok"):
                         break
+                    # ★ 立刻沉淀教训（含风格不达标强化），供下一次重试改写提示词
+                    _record_qc_lesson(project_name, "video", orig_video_prompt, rec)
                 if qc_declared or qc_on:
                     video_item["qc"] = _qc_summary(attempts, qc_declared, qc_on,
                                                    int(qc_cfg.get("max_retries", 0)))
@@ -4439,6 +4470,12 @@ def _qc_gate(verdict: dict) -> dict:
     if passed is None:
         passed = bool(accepted)
     if not (bool(accepted) and bool(passed)):
+        if verdict.get("style_mismatch"):
+            return {"accept": False, "blocked": bool(verdict.get("blocked")),
+                    "skipped": False, "style_blocked": True, "label": "风格不达标",
+                    "reason": verdict.get("reason") or "画面风格与目标风格不符",
+                    "critical_issues": [],
+                    "style_issues": verdict.get("style_issues") or []}
         return {"accept": False, "blocked": bool(verdict.get("blocked")), "skipped": False,
                 "label": "质检不达标", "reason": verdict.get("reason") or "质检未达标",
                 "critical_issues": []}
@@ -4448,8 +4485,12 @@ def _qc_gate(verdict: dict) -> dict:
 
 def _qc_record_verdict(project_name: str, kind: str, shot_key, stage: str,
                        attempt: int, seed, file_path: str, verdict: dict,
-                       extra: dict = None) -> dict:
-    """把一次质检结论整理成历史记录并落盘，返回该记录（含 history_file）"""
+                       extra: dict = None, style: str = "") -> dict:
+    """把一次质检结论整理成历史记录并落盘，返回该记录（含 history_file）
+
+    style：本次质检所用的目标风格串。连同 style_mismatch / style_issues 一并落盘，
+    供教训库识别「风格不达标」并触发改写提示词重生成。
+    """
     rec = {"attempt": attempt, "seed": seed, "file": file_path, "stage": stage,
            "ok": bool(verdict.get("ok")), "passed": bool(verdict.get("passed")),
            "accepted": bool(verdict.get("accepted") if verdict.get("accepted") is not None
@@ -4458,6 +4499,9 @@ def _qc_record_verdict(project_name: str, kind: str, shot_key, stage: str,
            "score": verdict.get("score"), "reason": verdict.get("reason"),
            "issues": verdict.get("issues") or [],
            "critical_issues": verdict.get("critical_issues") or [],
+           "style_mismatch": bool(verdict.get("style_mismatch")),
+           "style_issues": verdict.get("style_issues") or [],
+           "style": style_kit.normalize_style(style),
            "error": verdict.get("error"), "latency_ms": verdict.get("latency_ms")}
     if extra:
         rec.update(extra)
@@ -4482,6 +4526,7 @@ def _qc_lesson_from_record(rec: dict) -> dict:
         score = inner.get("score")
     issues = list(rec.get("issues") or inner.get("issues") or [])
     issues += list(rec.get("critical_issues") or inner.get("critical_issues") or [])
+    issues += list(rec.get("style_issues") or inner.get("style_issues") or [])
     issues = [str(x).strip() for x in issues if str(x).strip()]
     reason = str(rec.get("reason") or inner.get("reason") or "").strip()
     if not issues and reason:
@@ -4492,6 +4537,14 @@ def _qc_lesson_from_record(rec: dict) -> dict:
 def _record_qc_lesson(project_name: str, kind: str, prompt: str, rec: dict) -> dict:
     """把一次「质检不达标」沉淀成教训（供下次重试时改写提示词）。"""
     lesson_src = _qc_lesson_from_record(rec)
+    # 风格不达标：额外注入一条「明确的风格强化指令」，确保召回时能直接指导模型修正风格，
+    # 而不是只给一条「风格不符」的缺陷描述。
+    style_norm = style_kit.normalize_style((rec or {}).get("style") or "")
+    if (rec or {}).get("style_mismatch") and style_norm:
+        style_hint = (f"画面风格与目标风格不符，必须严格采用「{style_norm}」"
+                      f"的视觉风格、画风、渲染方式与配色，不得偏离")
+        existing = lesson_src.get("issues") or []
+        lesson_src["issues"] = [style_hint] + [i for i in existing if i != style_hint]
     if not lesson_src.get("issues") and not lesson_src.get("reason"):
         return {}
     try:
@@ -4548,7 +4601,8 @@ def _keyframe_qc_verifier(project_name: str):
                 + f"；本图是该镜的「尾帧」（动作结束瞬间），"
                   f"须与首帧保持同一人物、同一服装、同一场景与同一画风"
                 + ("，且须承接上一镜尾帧的画面" if item.get("chained") else ""))
-        verdict = qc_client.check_image(path, desc, cfg)
+        verdict = qc_client.check_image(path, desc, cfg,
+                                        style=(shot.get("style") or ""))
         gate = _qc_gate(verdict)
         return bool(gate.get("accept")), gate.get("reason") or ""
 

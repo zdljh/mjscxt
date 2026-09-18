@@ -140,8 +140,8 @@ def start_autonomous(project: str, novel_id: str, plan_overrides: dict = None) -
         "plan": plan_patch,
     })
 
-    # 6. 唤醒 autopilot
-    autopilot.wake()
+    # 6. 唤醒 autopilot（必须用 resume() 而非 wake()：wake 只设信号不创建线程）
+    autopilot.resume()
 
     # 7. 统计待生产集数（缺陷 D2：区分「已全部完成」与「目标集为空」，不谎报已启动）
     progress = autopilot.project_progress(project_key)

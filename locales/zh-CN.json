@@ -453,7 +453,11 @@
     "relation": "角色关系",
     "audio": "声音处理",
     "output": "输出与验收",
-    "script": "剧本概览"
+    "script": "剧本概览",
+    "storyboardHub": "分镜管理",
+    "subStoryboard": "分镜序列",
+    "subNinegrid": "九宫格构图",
+    "subKeyframes": "关键帧"
   },
   "settings": {
     "title": "设置",

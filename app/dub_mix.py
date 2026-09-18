@@ -235,8 +235,16 @@ def mix_video_with_entries(video_path: str, entries: List[Dict], out_path: str,
 
     filters = [f"[1:a]aformat=sample_rates={sr}:channel_layouts=mono[base]"]
     mix_inputs = ["[base]"]
-    if p.get("keep_original_audio") and vinfo.get("has_audio"):
-        filters.append(f"[0:a]aformat=sample_rates={sr}:channel_layouts=stereo[orig]")
+    # 原音轨（H3 生成的环境音/打斗音效）作为「垫底」混入，音量默认 0.3：
+    # 1.0 会盖住台词，0.3 是"听得到但不抢戏"。2026-09-17 之前这里默认直接被丢弃。
+    orig_vol = p.get("original_audio_volume")
+    orig_vol = 1.0 if orig_vol is None else float(orig_vol)
+    orig_kept = bool(p.get("keep_original_audio") and vinfo.get("has_audio"))
+    if orig_kept:
+        chain = f"[0:a]aformat=sample_rates={sr}:channel_layouts=stereo"
+        if abs(orig_vol - 1.0) > 1e-3:
+            chain += f",volume={orig_vol:.4f}"
+        filters.append(chain + "[orig]")
         mix_inputs.append("[orig]")
     for i, e in enumerate(usable, start=2):
         ms = max(0, int(round(float(e.get("start") or 0) * 1000)))
@@ -244,6 +252,10 @@ def mix_video_with_entries(video_path: str, entries: List[Dict], out_path: str,
         ratio = float(e.get("fit_ratio") or 1.0)
         if abs(ratio - 1.0) > 1e-3:
             chain += _atempo_chain(ratio)
+        # 每条也可自带音量（音效轨走这条路径时给 0.3，人声台词默认 1.0）
+        e_vol = e.get("volume")
+        if e_vol is not None and abs(float(e_vol) - 1.0) > 1e-3:
+            chain.append(f"volume={float(e_vol):.4f}")
         chain.append(f"adelay={ms}:all=1[lt{i}]")
         filters.append(",".join(chain))
         mix_inputs.append(f"[lt{i}]")
@@ -279,10 +291,17 @@ def mix_video_with_entries(video_path: str, entries: List[Dict], out_path: str,
     after = probe_media(out_path)
     if not after.get("has_audio"):
         raise DubMixError("合成结果不含音频流，判定失败")
+    warn = ""
+    if p.get("keep_original_audio") and not vinfo.get("has_audio"):
+        warn = ("成片源视频不含音轨，音效无法垫底（请检查 H3_EMIT_AUDIO / H3_STRIP_AUDIO，"
+                "或该镜本就无声）")
     return {
         "ok": True, "output_path": os.path.abspath(out_path),
         "elapsed_sec": elapsed, "entry_count": len(usable),
         "coverage_sec": round(sum(e.get("audio_dur") or 0 for e in usable), 3),
+        "original_audio_kept": orig_kept,
+        "original_audio_volume": orig_vol if orig_kept else 0.0,
+        "warning": warn,
         "video_before": vinfo, "video_after": after,
         "cmd": " ".join(cmd), "params": p,
     }

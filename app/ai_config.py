@@ -5,7 +5,7 @@
 {
   "version": 1,
   "modules": {
-    "text": {"base_url": "", "api_key": "", "model": "", "updated_at": null},
+    "text": {"base_url": "", "api_key": "", "model": "", "reasoning_effort": "", "updated_at": null},
     "qc":   {...},
     "chat": {...}
   },
@@ -18,6 +18,9 @@
   质检模块不再复用文本分析模型的配置（LLM 可能只配了纯文本模型，无法做视觉质检）。
 - api_key 明文只落盘，永不回显（对外只给 api_key_masked + has_api_key）。
 - 保存时 api_key 留空，或提交回的是脱敏值（含 *），一律视为「不改动原密钥」。
+- reasoning_effort（思考档位）只对「思考不可关闭」的模型有意义（如 GLM-5.3-Flash）：
+  留空 = 不注入该参数，由服务端取默认档；low / high / max 为合法档位。
+  它与 llm_client 的 disable_thinking 是**互斥的两套机制**：一旦设了档位，就不再尝试关思考。
 - 兼容旧 llm_config.json：首次读取时若 text 模块为空而旧配置存在，自动迁移（不丢原有配置）。
 """
 from __future__ import annotations
@@ -29,6 +32,7 @@ from datetime import datetime
 
 from llm_client import build_chat_url, mask_key
 from llm_client import load_config as _load_legacy_config
+from llm_client import REASONING_EFFORT_LEVELS
 import secret_store
 
 logger = logging.getLogger(__name__)
@@ -75,11 +79,22 @@ def _now() -> str:
 
 
 def _empty_module() -> dict:
-    return {"base_url": "", "api_key": "", "model": "", "updated_at": None}
+    return {"base_url": "", "api_key": "", "model": "",
+            "reasoning_effort": "", "updated_at": None}
 
 
 def _empty_config() -> dict:
     return {"version": 1, "modules": {m: _empty_module() for m in MODULES}, "updated_at": None}
+
+
+def normalize_reasoning_effort(value) -> str:
+    """思考档位归一化：合法值原样返回（小写），非法/空值一律返回 ""（=不注入任何档位参数）
+
+    ⚠️ 必须在这里就把非法值挡掉。GLM-5.3 这类模型会把**非法档位静默解析成最高档（最贵）**，
+    如果让用户的笔误原样发给服务端，就等于悄悄按 max 档烧 token。
+    """
+    v = str(value or "").strip().lower()
+    return v if v in REASONING_EFFORT_LEVELS else ""
 
 
 def _normalize_module(raw) -> dict:
@@ -88,6 +103,7 @@ def _normalize_module(raw) -> dict:
         for k in ("base_url", "api_key", "model", "updated_at"):
             if raw.get(k) is not None:
                 cfg[k] = str(raw[k])
+        cfg["reasoning_effort"] = normalize_reasoning_effort(raw.get("reasoning_effort"))
     return cfg
 
 
@@ -203,7 +219,8 @@ def get_module(cfg: dict, module: str) -> dict:
 
 
 def save_module(config_path: str, module: str, base_url: str = None, model: str = None,
-                api_key: str = None, legacy_path: str = None) -> dict:
+                api_key: str = None, legacy_path: str = None,
+                reasoning_effort: str = None) -> dict:
     """保存单个模块。
 
     密钥处理（P0-3 加固）：
@@ -211,6 +228,11 @@ def save_module(config_path: str, module: str, base_url: str = None, model: str 
     - 有效新密钥写入**加密库**（output/secrets.enc），json 中该字段恒为空字符串；
     - 加密不可用时（未装 cryptography），拒绝保存明文并抛 ValueError，
       提示改用环境变量 MJSCXT_API_KEY_TEXT/QC/CHAT。
+
+    reasoning_effort（思考档位，思考不可关闭的模型如 GLM-5.3-Flash 用）：
+    - None = 不改动；"" = 清空（回到「不注入档位、由服务端默认」）；low/high/max = 设定档位。
+    - 非法值**不报错但会被归一化成 ""**，避免把笔误原样发给服务端（部分模型会把非法值
+      静默解析成最高档，即最贵的那档）。
     """
     if module not in MODULES:
         raise ValueError(f"未知的 AI 模块：{module}")
@@ -220,6 +242,8 @@ def save_module(config_path: str, module: str, base_url: str = None, model: str 
         ep["base_url"] = (base_url or "").strip()
     if model is not None:
         ep["model"] = (model or "").strip()
+    if reasoning_effort is not None:
+        ep["reasoning_effort"] = normalize_reasoning_effort(reasoning_effort)
     key = "" if api_key is None else str(api_key).strip()
     if key and "*" not in key:
         if not _store().set_api_key(f"ai.{module}", key):
@@ -279,6 +303,7 @@ def module_public_view(ep: dict) -> dict:
         "has_api_key": bool(key),
         "base_url": base_url,
         "model": model,
+        "reasoning_effort": normalize_reasoning_effort((ep or {}).get("reasoning_effort")),
         "api_key_masked": mask_key(key),
         "chat_url": build_chat_url(base_url) if base_url else "",
         "updated_at": (ep or {}).get("updated_at"),
@@ -300,4 +325,6 @@ def public_view(cfg: dict) -> dict:
         "module_order": list(MODULES),
         "migrated_from": (cfg or {}).get("migrated_from"),
         "updated_at": (cfg or {}).get("updated_at"),
+        # 思考档位可选项（前端下拉）："" = 不注入（服务端默认）、其余为合法档位
+        "reasoning_effort_options": ["", *REASONING_EFFORT_LEVELS],
     }

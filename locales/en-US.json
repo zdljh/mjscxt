@@ -449,7 +449,11 @@
     "relation": "Relations",
     "audio": "Audio",
     "output": "Output & Review",
-    "script": "Script Overview"
+    "script": "Script Overview",
+    "storyboardHub": "Storyboard",
+    "subStoryboard": "Shot List",
+    "subNinegrid": "Nine-grid",
+    "subKeyframes": "Keyframes"
   },
   "settings": {
     "title": "Settings",

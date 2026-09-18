@@ -1,17 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '@/context/AppContext';
-import { projectsApi, keyframesApi, storyboardApi, ttsApi, mixApi, qcApi, exportApi, autopilotApi, upscaleApi, chatApi, agentApi, episodesApi } from '@/api/client';
+import { projectsApi, keyframesApi, storyboardApi, videoApi, ttsApi, mixApi, qcApi, exportApi, autopilotApi, upscaleApi, chatApi, agentApi, episodesApi } from '@/api/client';
 import { Button, Loading, EmptyState } from '@/components/ui';
 import { GridPage } from '@/pages/GridPage';
 import { RelationGraphTab } from '@/components/RelationGraphTab';
 import { OutputReviewTab } from '@/components/OutputReviewTab';
-import { ScriptOverviewTab } from '@/components/ScriptOverviewTab';
 import { AudioTab } from '@/components/AudioTab';
 import type { Project, Deliverable, UpscaleEnv, UpscaleSource, UpscaleTask, UpscaleArtifact, AgentStep } from '@/types';
 
 // ========== Workbench Tab Types ==========
 // 注意：'chat' 已移除 —— AI 总控改成了右侧常驻面板，不再是标签页（见 ChatPanel）
-type WorkbenchTab = 'overview' | 'keyframes' | 'ninegrid' | 'storyboard' | 'qc' | 'upscale' | 'relation' | 'audio' | 'output';
+type WorkbenchTab = 'overview' | 'storyboard' | 'qc' | 'upscale' | 'relation' | 'audio' | 'output';
 
 interface AssetItem {
   name: string;
@@ -70,9 +69,8 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
   const tabs: { id: WorkbenchTab; icon: string; label: string }[] = [
     { id: 'overview', icon: '📊', label: t('wb.overview') },
     // 自动生产已移除独立标签页 —— 改为 AI总控 内的子功能，启动前AI会先与用户沟通风格
-    { id: 'keyframes', icon: '🖼️', label: t('wb.keyframes') },
-    { id: 'ninegrid', icon: '🎯', label: t('wb.ninegrid') },
-    { id: 'storyboard', icon: '🎬', label: t('wb.storyboard') },
+    // 分镜管理：合并 九宫格构图 + 关键帧生成 + 分镜序列 三个子标签（见 StoryboardHubTab）
+    { id: 'storyboard', icon: '🎬', label: t('wb.storyboardHub') },
     { id: 'qc', icon: '✅', label: t('wb.qc') },
     // 超分：后端 upscale_client 与其 8 个端点早已可用，但前端此前零引用 ——
     // 与已删除的孤儿页面同属「建好没入口」的能力，这里补上手工入口。
@@ -160,14 +158,11 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
             onRefreshAssets={reloadAssets}
           />
         )}
-        {activeTab === 'keyframes' && (
-          <KeyframesTab projectKey={projectKey} />
-        )}
-        {activeTab === 'ninegrid' && (
-          <GridPage projectKey={projectKey} />
-        )}
         {activeTab === 'storyboard' && (
-          <StoryboardTab projectKey={projectKey} />
+          <StoryboardHubTab projectKey={projectKey} />
+        )}
+        {activeTab === 'qc' && (
+          <QcTab projectKey={projectKey} />
         )}
         {activeTab === 'audio' && (
           <AudioTab projectKey={projectKey} />
@@ -423,14 +418,8 @@ function OverviewTab({
 
   if (total === 0 && episodes.length === 0) {
     return (
-      <div className="py-12 space-y-6">
+      <div className="py-12">
         <div className="text-center text-gray-500 dark:text-gray-400">
-          <div className="text-4xl mb-3">📁</div>
-          <p>暂无资产</p>
-          <p className="text-sm mt-1">角色 / 物品 / 场景 会在生产流程中自动生成</p>
-        </div>
-
-        <div className="text-center text-gray-500 dark:text-gray-400 py-8">
           <div className="text-4xl mb-3">📁</div>
           <p className="font-medium">暂无资产</p>
           <p className="text-sm mt-2">角色 / 物品 / 场景 会在生产流程中自动生成</p>
@@ -740,6 +729,221 @@ function AssetPreviewModal({
   );
 }
 
+// ========== QC Tab（功能质检） ==========
+// 后端 /api/qc/project-summary 早已返回「引擎状态 + 统计 + 逐镜质检明细」，
+// 但前端此前只有标签没有渲染 —— 点进去是空白。这里补齐只读总览 + 单镜重测。
+function QcTab({ projectKey }: { projectKey: string }) {
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [testing, setTesting] = useState<string | null>(null);
+
+  const load = async () => {
+    if (!projectKey) return;
+    setLoading(true);
+    setError('');
+    try {
+      setData((await qcApi.history(projectKey)) as any);
+    } catch (e) {
+      setError(sanitizeError(e, '获取质检状态失败'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, [projectKey]);
+
+  const runTest = async (shotId: string) => {
+    setTesting(shotId);
+    setError('');
+    setNotice('');
+    try {
+      const r = await qcApi.test({ project: projectKey, shot_id: shotId });
+      const verdict = r.verdict === 'pass' ? '通过' : r.verdict === 'fail' ? '未通过' : String(r.verdict || '未知');
+      setNotice(`重测完成：${verdict}${typeof r.score === 'number' ? `（${Math.round(r.score * 100)} 分）` : ''}`);
+      await load();
+    } catch (e) {
+      setError(sanitizeError(e, '重测失败'));
+    } finally {
+      setTesting(null);
+    }
+  };
+
+  const verdictBadge = (v: string) => {
+    if (v === 'pass') return 'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400';
+    if (v === 'fail') return 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400';
+    return 'bg-gray-100 text-gray-700 dark:bg-gray-500/20 dark:text-gray-400';
+  };
+
+  if (loading) return <Loading />;
+
+  const cfg = data?.config || {};
+  const stats = data?.stats || { total: 0, passed: 0, failed: 0, retry_count: 0 };
+  const records: any[] = Array.isArray(data?.history) ? data.history : [];
+
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-white">功能质检</h3>
+        <Button size="sm" variant="secondary" onClick={load}>刷新</Button>
+      </div>
+
+      {notice && (
+        <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-green-600 dark:text-green-400 text-sm">
+          {notice}
+        </div>
+      )}
+      {error && (
+        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">{error}</div>
+      )}
+
+      {/* 质检引擎状态 */}
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="font-medium text-gray-900 dark:text-white">质检引擎</span>
+          <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+            cfg.enabled ? 'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400'
+                        : 'bg-gray-100 text-gray-600 dark:bg-gray-500/20 dark:text-gray-400'
+          }`}>
+            {cfg.enabled ? '已启用' : '未启用'}
+          </span>
+          <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+            cfg.ready ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-500/20 dark:text-indigo-400'
+                      : 'bg-yellow-100 text-yellow-700 dark:bg-yellow-500/20 dark:text-yellow-400'
+          }`}>
+            {cfg.ready ? '就绪' : '未就绪'}
+          </span>
+        </div>
+        <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+          <div>
+            <div className="text-gray-500 dark:text-gray-400 text-xs">模型</div>
+            <div className="text-gray-900 dark:text-gray-200 truncate">{cfg.effective_model || cfg.model || '—'}</div>
+          </div>
+          <div>
+            <div className="text-gray-500 dark:text-gray-400 text-xs">通过分数线</div>
+            <div className="text-gray-900 dark:text-gray-200">{cfg.pass_score ?? '—'}</div>
+          </div>
+          <div>
+            <div className="text-gray-500 dark:text-gray-400 text-xs">接口地址</div>
+            <div className="text-gray-900 dark:text-gray-200 truncate">{cfg.effective_base_url || cfg.base_url || '—'}</div>
+          </div>
+          <div>
+            <div className="text-gray-500 dark:text-gray-400 text-xs">API Key</div>
+            <div className="text-gray-900 dark:text-gray-200">{cfg.has_api_key ? (cfg.api_key_masked || '已配置') : '未配置'}</div>
+          </div>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2 text-xs">
+          {[
+            { label: '剧本', on: cfg.script_enabled },
+            { label: '图像', on: cfg.image_enabled },
+            { label: '视频', on: cfg.video_enabled },
+            { label: '音频', on: cfg.audio_enabled },
+          ].map((k) => (
+            <span key={k.label} className={`px-2 py-0.5 rounded ${
+              k.on ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-400'
+                   : 'bg-gray-100 text-gray-500 dark:bg-white/5 dark:text-gray-500'
+            }`}>
+              {k.label}质检 {k.on ? '开' : '关'}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* 统计 */}
+      <div className="grid grid-cols-4 gap-4">
+        {[
+          { label: '质检总数', value: stats.total, color: 'text-gray-900 dark:text-white' },
+          { label: '通过', value: stats.passed, color: 'text-green-500' },
+          { label: '未通过', value: stats.failed, color: 'text-red-500' },
+          { label: '待重试', value: stats.retry_count, color: 'text-yellow-500' },
+        ].map((s) => (
+          <div key={s.label} className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 text-center">
+            <div className={`text-2xl font-bold ${s.color}`}>{s.value ?? 0}</div>
+            <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* 逐镜明细 */}
+      {records.length === 0 ? (
+        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-8 text-center text-gray-500 dark:text-gray-400">
+          暂无质检记录。镜头在流水线跑到「质检」环节后会在此出现。
+        </div>
+      ) : (
+        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 divide-y divide-gray-200 dark:divide-gray-700">
+          {records.map((r, i) => (
+            <div key={`${r.shot_id}-${r.kind}-${i}`} className="p-3 flex items-center gap-3">
+              <span className="font-mono text-sm text-gray-900 dark:text-gray-200">{r.shot_id}</span>
+              <span className="text-xs px-2 py-0.5 rounded bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400">
+                {r.kind === 'video' ? '视频' : '图像'}
+              </span>
+              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${verdictBadge(r.verdict)}`}>
+                {r.verdict === 'pass' ? '通过' : r.verdict === 'fail' ? '未通过' : String(r.verdict || '未知')}
+              </span>
+              {typeof r.score === 'number' && (
+                <span className="text-xs text-gray-500 dark:text-gray-400">得分 {Math.round(r.score * 100)}</span>
+              )}
+              {r.timestamp && (
+                <span className="text-xs text-gray-400 dark:text-gray-500 ml-auto">{String(r.timestamp).replace('T', ' ').slice(0, 19)}</span>
+              )}
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={testing === r.shot_id}
+                onClick={() => runTest(r.shot_id)}
+              >
+                {testing === r.shot_id ? '重测中…' : '重测'}
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ========== 分镜管理（九宫格 + 关键帧 + 分镜序列 三合一） ==========
+// 三者本是同一工序的三个阶段：先出构图草案 → 再定首尾关键帧 → 最后成型分镜序列。
+// 拆成 3 个顶级标签会让用户在标签间来回跳，这里收成一个标签页 + 3 个子标签。
+function StoryboardHubTab({ projectKey }: { projectKey: string }) {
+  const { t } = useApp();
+  const [sub, setSub] = useState<'storyboard' | 'ninegrid' | 'keyframes'>('storyboard');
+
+  const subs: { id: 'storyboard' | 'ninegrid' | 'keyframes'; icon: string; label: string; hint: string }[] = [
+    { id: 'storyboard', icon: '🎬', label: t('wb.subStoryboard'), hint: '完整镜头列表' },
+    { id: 'ninegrid', icon: '🎯', label: t('wb.subNinegrid'), hint: '镜头构图草案' },
+    { id: 'keyframes', icon: '🖼️', label: t('wb.subKeyframes'), hint: '镜头首尾帧' },
+  ];
+
+  return (
+    <div className="space-y-5">
+      {/* 子标签导航 */}
+      <div className="flex flex-wrap gap-2">
+        {subs.map((s) => (
+          <button
+            key={s.id}
+            onClick={() => setSub(s.id)}
+            title={s.hint}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-all ${
+              sub === s.id
+                ? 'bg-indigo-600 text-white shadow'
+                : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-white/5 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-white'
+            }`}
+          >
+            <span>{s.icon}</span>
+            <span>{s.label}</span>
+          </button>
+        ))}
+      </div>
+
+      {sub === 'storyboard' && <StoryboardTab projectKey={projectKey} />}
+      {sub === 'ninegrid' && <GridPage projectKey={projectKey} />}
+      {sub === 'keyframes' && <KeyframesTab projectKey={projectKey} />}
+    </div>
+  );
+}
+
 // ========== Keyframes Tab ==========
 function KeyframesTab({ projectKey }: { projectKey: string }) {
   const { t } = useApp();
@@ -851,11 +1055,21 @@ function KeyframesTab({ projectKey }: { projectKey: string }) {
 }
 
 // ========== Storyboard Tab ==========
+// 单镜重做闭环：后端 /api/storyboard/retry-shot（分镜图）与 /api/video/retry-shot（视频）
+// 早已实现，但前端此前**零入口** —— 用户对某一镜不满意只能整集重跑。
+// 这里把两个入口放到每张分镜卡上，并在视频重做成功后提示「同集成片已过期」。
 function StoryboardTab({ projectKey }: { projectKey: string }) {
   const { t } = useApp();
   const [cards, setCards] = useState<any[]>([]);
+  const [summary, setSummary] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  /** 正在重做的镜头：`${shot_id}:image` / `${shot_id}:video` */
+  const [busy, setBusy] = useState<string | null>(null);
+  /** 每镜的视频重做模式（reference=分镜图驱动 / keyframe=首尾帧插值） */
+  const [videoMode, setVideoMode] = useState<Record<string, 'reference' | 'keyframe'>>({});
+  const [notice, setNotice] = useState('');
+  const [shotError, setShotError] = useState('');
 
   const fetchCanvas = async () => {
     if (!projectKey) return;
@@ -864,6 +1078,7 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
     try {
       const data = await storyboardApi.canvas(projectKey);
       setCards(data.cards || []);
+      setSummary((data as any).summary || null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : '获取失败';
       if (msg.includes('404')) {
@@ -878,12 +1093,79 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
 
   useEffect(() => { fetchCanvas(); }, [projectKey]);
 
+  const handleRetryImage = async (card: any) => {
+    const key = `${card.shot_id}:image`;
+    setBusy(key);
+    setShotError('');
+    setNotice('');
+    try {
+      await storyboardApi.retryShot({ project_name: projectKey, shot_id: String(card.shot_id) });
+      setNotice(`镜头 #${card.seq} 分镜图已重做`);
+      await fetchCanvas();
+    } catch (e) {
+      setShotError(e instanceof Error ? e.message : '分镜图重做失败');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleRetryVideo = async (card: any) => {
+    const key = `${card.shot_id}:video`;
+    const mode = videoMode[String(card.shot_id)] || 'reference';
+    if (mode === 'keyframe' && !card.keyframe?.end_exists) {
+      setShotError(`镜头 #${card.seq} 没有尾帧，无法用「首尾帧插值」重做；请先到「关键帧」子标签生成尾帧`);
+      return;
+    }
+    setBusy(key);
+    setShotError('');
+    setNotice('');
+    try {
+      const r = await videoApi.retryShot({
+        project_name: projectKey,
+        shot_id: card.shot_id,
+        mode,
+      });
+      setNotice(
+        `镜头 #${card.seq} 视频已重做（${r.mode === 'keyframe' ? '首尾帧插值' : '分镜图驱动'}，参考图 ${r.ref_count} 张，${r.duration}s）` +
+        (r.deliverable_marked_stale ? '；该集成片已过期，请到「成品验收」前先重新混音合成' : '')
+      );
+      await fetchCanvas();
+    } catch (e) {
+      setShotError(e instanceof Error ? e.message : '视频重做失败');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h3 className="text-lg font-semibold">分镜管理</h3>
         <Button size="sm" onClick={fetchCanvas} disabled={loading}>刷新</Button>
       </div>
+
+      {summary && (
+        <div className="flex flex-wrap gap-4 text-sm text-gray-600 dark:text-gray-400">
+          <span>共 {summary.shot_count} 镜</span>
+          <span>分镜图 {summary.storyboard_ready ?? 0}</span>
+          <span>视频 {summary.video_ready ?? 0}</span>
+          <span>尾帧 {summary.keyframe_end_ready ?? 0}</span>
+          {(summary.qc_blocked ?? 0) > 0 && (
+            <span className="text-amber-600 dark:text-amber-400">质检拦截 {summary.qc_blocked}</span>
+          )}
+        </div>
+      )}
+
+      {notice && (
+        <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-green-600 dark:text-green-400 text-sm">
+          {notice}
+        </div>
+      )}
+      {shotError && (
+        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
+          {shotError}
+        </div>
+      )}
 
       {error === 'no-data' && (
         <div className="py-12 text-center text-gray-500 dark:text-gray-400">
@@ -897,18 +1179,81 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {cards.map((card: any) => (
-          <div key={card.seq} className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-            <div className="flex items-center justify-between mb-2">
-              <span className="font-mono text-sm text-gray-500 dark:text-gray-400">#{card.seq}</span>
-              <span className="text-xs text-gray-500">{card.camera}</span>
+        {cards.map((card: any) => {
+          const sid = String(card.shot_id);
+          const imgBusy = busy === `${card.shot_id}:image`;
+          const vidBusy = busy === `${card.shot_id}:video`;
+          const mode = videoMode[sid] || 'reference';
+          return (
+            <div key={card.seq} className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 flex flex-col">
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-mono text-sm text-gray-500 dark:text-gray-400">#{card.seq}</span>
+                <span className="text-xs text-gray-500">{card.camera}</span>
+              </div>
+
+              <div className="flex gap-3 mb-2">
+                <div className="w-24 h-24 shrink-0 rounded bg-gray-100 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 overflow-hidden flex items-center justify-center text-xs text-gray-400">
+                  {card.storyboard?.exists && card.storyboard?.url ? (
+                    <img src={card.storyboard.url} alt={`镜头 ${card.seq} 分镜图`} className="w-full h-full object-cover" />
+                  ) : (
+                    <span>无分镜图</span>
+                  )}
+                </div>
+                <div className="min-w-0 flex-1 text-xs space-y-1">
+                  <p className="text-gray-700 dark:text-gray-300 line-clamp-3">{card.description}</p>
+                  {card.dialogue_text && (
+                    <p className="text-gray-500 italic line-clamp-2">{card.dialogue_text}</p>
+                  )}
+                  <p className={card.video?.exists ? 'text-green-600 dark:text-green-400' : 'text-amber-600 dark:text-amber-400'}>
+                    视频：{card.video?.exists ? '已生成' : '未生成'}
+                  </p>
+                  {card.consistency?.score != null && (
+                    <p className="text-gray-500">一致性：{card.consistency.score}</p>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 mt-auto pt-2">
+                {card.video?.exists && card.video?.url && (
+                  <a
+                    href={card.video.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-indigo-500 hover:text-indigo-400"
+                  >
+                    查看视频
+                  </a>
+                )}
+                <select
+                  value={mode}
+                  onChange={(e) =>
+                    setVideoMode((prev) => ({ ...prev, [sid]: e.target.value as 'reference' | 'keyframe' }))
+                  }
+                  className="text-xs rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-700 dark:text-gray-200 px-1 py-1"
+                  title="reference：用分镜图+主角锚点生成；keyframe：用首尾帧插值（需已有尾帧）"
+                >
+                  <option value="reference">分镜图驱动</option>
+                  <option value="keyframe">首尾帧插值</option>
+                </select>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => handleRetryImage(card)}
+                  disabled={!!busy}
+                >
+                  {imgBusy ? '重做中…' : '重做分镜图'}
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => handleRetryVideo(card)}
+                  disabled={!!busy}
+                >
+                  {vidBusy ? '重做中…' : '重做视频'}
+                </Button>
+              </div>
             </div>
-            <p className="text-sm text-gray-700 dark:text-gray-300 mb-2">{card.description}</p>
-            {card.dialogue_text && (
-              <p className="text-xs text-gray-500 italic">"{card.dialogue_text}"</p>
-            )}
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
