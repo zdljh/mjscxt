@@ -219,7 +219,16 @@ def _outcome_from_task(final: dict, what: str) -> dict:
     ok_cnt = sum(1 for r in results if isinstance(r, dict) and r.get("success"))
     # 质检阻断计数：资产/分镜/视频 worker 都会打 qc_blocked
     blocked = sum(1 for r in results if isinstance(r, dict) and r.get("qc_blocked"))
-    if status == "failed" or (results and not ok_cnt):
+    # 「全部被合法跳过」不是失败。
+    # 最典型的场景：物品卡里只有临时道具 —— _generate_asset_task 对
+    # importance=临时 的物体**有意不生成参考图**，results 里只留 status=skipped，
+    # 于是 ok_cnt=0。历史实现按「results 非空且无成功」直接判失败，导致整集在
+    # assets 步骤反复失败并挂起等人工介入（实测：雨夜归人 第2集只有「深色长柄伞」
+    # 一个临时道具，连续 2 次失败被标记需人工处理）。
+    skipped_cnt = sum(1 for r in results if isinstance(r, dict)
+                      and (str(r.get("status") or "") == "skipped" or r.get("skipped")))
+    all_skipped = bool(results) and skipped_cnt == len(results)
+    if status == "failed" or (results and not ok_cnt and not all_skipped):
         return {"ok": False, "blocked": bool(blocked), "count": ok_cnt,
                 "error": (final or {}).get("error") or f"{what}失败",
                 "detail": final}

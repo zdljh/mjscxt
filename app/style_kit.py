@@ -183,20 +183,75 @@ def style_suffix(style, *, with_tail: bool = True, with_aspect: bool = True,
 
 
 def with_style(prompt: str, style, *, with_tail: bool = True) -> str:
-    """幂等地把风格后缀拼到提示词末尾（已带过同一风格串则不重复追加）"""
+    """幂等地把风格后缀拼到提示词末尾（已带过同一风格则不重复追加）"""
     text = str(prompt or "").strip()
     suffix = style_suffix(style, with_tail=with_tail)
     if not suffix:
         return text
+    # 先规整历史脏数据（风格双写），让旧剧本在下次生成时自动自愈
+    text = _collapse_style(text, style)
     if suffix in text:
         return text
     # 只判「风格：」标记，避免不同风格串互相判定为已注入
     if "风格：" in text and _style_marker(style) in text:
         return text
+    # 模型常见的「漏冒号」写法：写成「…，中国古风玄幻漫剧风格。」而不是「风格：中国古风玄幻漫剧」。
+    # 历史缺陷：这里只认带冒号的标记，于是模型自己写的那半句不算数，程序又追加一遍，
+    # 实测产出「中国古风玄幻漫剧风格。风格：中国古风玄幻漫剧，画面精致…」风格出现两遍。
+    if _style_already_present(text, style):
+        return text
     if not text:
         return suffix
     sep = "" if text.endswith(("。", "，", "；", ".", "!", "！", "?", "？")) else "。"
     return f"{text}{sep}{suffix}。"
+
+
+def _style_already_present(text: str, style) -> bool:
+    """判断文本里是否已经承载了该风格（多种写法都算数）
+
+    命中任一条即认为风格已落地：
+    1. 完整风格串（``_style_marker``）已出现；
+    2. 所有长度 ≥3 的风格 token 都各自出现（模型可能换成别的措辞但语义已覆盖）。
+    """
+    if not text:
+        return False
+    marker = _style_marker(style)
+    if marker and marker in text:
+        return True
+    toks = [t for t in style_tokens(style)
+            if len(t) >= 3 and not any(a in t for a in _ASPECT_TOKENS)]
+    return bool(toks) and all(t in text for t in toks)
+
+
+#: 模型把中文概念硬音译成英文的常见错译（实测「国漫」被写成 xuanxuan）
+#: ⚠️ 必须先匹配「带上下文的整块」，再匹配裸词，否则 ``Chinese xuanxuan comic style``
+#:    会被替换成 ``Chinese Chinese animated style comic style``（实测踩过）。
+_BAD_ROMANIZATION: Sequence[Tuple[str, str]] = (
+    (r"Chinese\s+xuan\s*xuan\s+comic\s+style", "Chinese animated style"),
+    (r"\bxuan\s*xuan\s+comic\s+style\b", "Chinese animated style"),
+    (r"\bxuan\s*xuan\b", "Chinese animated style"),
+    (r"\bguo\s*man\b", "Chinese animated style"),
+    (r"\bguoman\b", "Chinese animated style"),
+    (r"\bdonghua\b", "Chinese animated style"),
+    (r"\bmanhua\b", "Chinese comic style"),
+    (r"\bxian\s*xia\b", "Chinese high-fantasy"),
+    (r"\bwu\s*xia\b", "Chinese martial arts"),
+    (r"\bgufeng\b", "ancient Chinese style"),
+    (r"\bxiuzhen\b", "Chinese cultivation fantasy"),
+)
+
+#: 英文提示词里不该由模型写、也不该重复的质量词（程序统一收尾）
+_QUALITY_WORDS_EN = (
+    "masterpiece", "best quality", "ultra detailed", "highly detailed",
+    "8k", "4k", "high resolution", "sharp focus", "award winning",
+)
+
+#: 出现这些词的英文片段一律视为「风格声明」，由程序统一收尾（避免与后缀打架）
+_STYLE_HINT_EN = re.compile(
+    r"style|comic|anime|cartoon|rendering|rendered|cinematic|realis|painting|"
+    r"\bink\b|cel\s*shad",
+    re.IGNORECASE,
+)
 
 
 def style_emphasis(style) -> str:
@@ -319,6 +374,153 @@ def apply_resolution_widgets(nodes: List[dict],
     return changed
 
 
+#: 中文风格 token → 英文（供英文提示词复用同一风格）。
+#: 支持**子串匹配**：风格串「中国古风玄幻漫剧」不是一个词表键，但含「古风」「玄幻」，
+#: 会按最长优先逐项翻译；未覆盖的部分保留中文原词（模型能理解，总比丢风格好）。
+_EN_STYLE_LEXICON = {
+    "中国古风": "ancient Chinese style",
+    "国漫": "Chinese animated style",
+    "国风": "Chinese traditional style",
+    "古风": "ancient Chinese style",
+    "玄幻": "high fantasy",
+    "武侠": "wuxia martial arts",
+    "仙侠": "xianxia cultivation fantasy",
+    "修真": "cultivation fantasy",
+    "漫剧": "comic drama",
+    "悬疑": "suspense",
+    "暗黑": "dark tone",
+    "偏写实": "semi-realistic",
+    "写实": "realistic",
+    "水墨": "ink-wash painting",
+    "日式": "Japanese anime style",
+    "赛璐璐": "cel shading",
+    "动漫": "anime",
+    "卡通": "cartoon",
+    "电影级": "cinematic",
+    "精致": "refined",
+}
+
+#: 英文风格后缀固定收尾（与中文 _QUALITY_TAIL 语义对齐）
+_QUALITY_TAIL_EN = "highly detailed, delicate lighting, stable composition, no distortion"
+
+
+def _translate_token_en(tok: str) -> List[str]:
+    """把单个中文风格 token 翻成英文短语列表（最长键优先，避免「古风」吃掉「中国古风」）"""
+    out: List[str] = []
+    remaining = str(tok or "")
+    for zh in sorted(_EN_STYLE_LEXICON, key=len, reverse=True):
+        if zh and zh in remaining:
+            en = _EN_STYLE_LEXICON[zh]
+            if en not in out:
+                out.append(en)
+            remaining = remaining.replace(zh, "")
+    rest = remaining.strip(" ，,、")
+    if rest:
+        out.append(rest)
+    return out
+
+
+def style_suffix_en(style, *, with_tail: bool = True) -> str:
+    """英文版风格后缀（同一风格串的英文表达，供 reference_prompt_en 使用）"""
+    toks = [t for t in style_tokens(style)
+            if not any(a in t for a in _ASPECT_TOKENS)]
+    if not toks:
+        return ""
+    words: List[str] = []
+    for t in toks:
+        for en in _translate_token_en(t):
+            if en and en not in words:
+                words.append(en)
+    if not words:
+        return ""
+    body = "Style: " + ", ".join(words)
+    return f"{body}, {_QUALITY_TAIL_EN}" if with_tail else body
+
+
+def sanitize_prompt_en(text: str, style=None) -> str:
+    """清理英文资产提示词：修错译、去重复风格/质量词、规范标点
+
+    实测两类问题：
+    1. 把「国漫」硬译成 ``xuanxuan`` 这类不存在的罗马字（模型看不懂）；
+    2. 自己写 ``masterpiece, best quality`` 或 ``Chinese animated style`` 之类
+       风格/质量声明，与程序统一收尾的后缀重复。
+
+    这里做确定性纠正，不依赖模型自觉。风格与质量声明一律**剥掉**，
+    由 :func:`with_style_en` 在末尾统一给，保证风格只出现一次。
+    """
+    out = str(text or "").strip()
+    if not out:
+        return ""
+    for pat, repl in _BAD_ROMANIZATION:
+        out = re.sub(pat, repl, out, flags=re.IGNORECASE)
+    out = re.sub(r"\bChinese\s+Chinese\b", "Chinese", out)   # 折叠替换产生的重复
+    parts = [p.strip() for p in re.split(r"[,，]\s*", out) if p.strip()]
+    kept: List[str] = []
+    for p in parts:
+        low = p.lower()
+        if low in _QUALITY_WORDS_EN:
+            continue
+        if _STYLE_HINT_EN.search(p):
+            continue
+        kept.append(p)
+    return ", ".join(kept).strip(" ,，")
+
+
+def with_style_en(prompt: str, style, *, with_tail: bool = True) -> str:
+    """英文提示词的幂等风格追加（已带同一风格则不重复）
+
+    ⚠️ 幂等判断必须**在清洗之前**做：:func:`sanitize_prompt_en` 会剥掉自己上一步
+    追加进去的 `Style: …` 与质量词，先清洗会让二次调用误判为「还没加过风格」，
+    于是又追加一遍，永不幂等（实测踩过）。
+    """
+    raw = str(prompt or "").strip()
+    suffix = style_suffix_en(style, with_tail=with_tail)
+    if suffix and suffix in raw:
+        return raw
+    text = sanitize_prompt_en(raw, style)
+    if not suffix:
+        return text
+    if not text:
+        return suffix
+    return f"{text}, {suffix}"
+
+
+#: 「，XX风格。」这种子句级风格声明的尾巴（要求 风格 处于子句末尾，避免误吃
+#: 「服装有中国风格的元素」这类把 风格 当普通名词的用法）
+_STYLE_TAIL_RE = re.compile(
+    r"[，,、\s]*[^，,。；;：:]{1,24}风格(?=\s*[。.]?\s*(?:$|[，,]))")
+
+
+def _collapse_style(text: str, style) -> str:
+    """把重复/过期的风格表述收敛掉，只留一份由调用方补写的规范后缀（自愈历史脏数据）
+
+    两类脏数据都会命中：
+
+    1. **同一风格写两遍**（实测最常见）::
+
+           清瘦少年三视图，…，中国古风玄幻漫剧风格。风格：中国古风玄幻漫剧，画面精致…
+
+    2. **风格换过、旧风格残留**（用户与总控反复调风格时的必然产物）::
+
+           清瘦少年三视图，…，国漫3D渲染风格。风格：国漫3D渲染，画面精致…
+           （此时项目风格已改为「中国古风玄幻漫剧」）
+
+    ⚠️ 触发条件不能只看「当前风格串出现 ≥2 次」：换风格场景下新 marker 出现 0 次、
+    `风格：` 子句也可能只有 1 处，但**风格表述有 2 处**（一处是「XX风格。」尾巴）。
+    因此按 `风格` 总出现次数判定（≥2 才动手，单份风格绝不误伤），命中后把所有
+    `风格：…` 子句与「，XX风格。」尾巴一并清掉，再由调用方补当前风格的规范后缀。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return raw
+    if raw.count("风格") <= 1:
+        return raw
+    out = re.sub(r"[。，；,;\s]*风格[：:][^。；;]*", "", raw)
+    out = _STYLE_TAIL_RE.sub("", out)
+    return out.strip(" 。，；,;")
+
+
+
 # --------------------------------------------------------------------------- #
 # 便捷组合
 # --------------------------------------------------------------------------- #
@@ -343,19 +545,33 @@ def apply_asset_style(assets: Optional[List[dict]], style,
                       *, key: str = "reference_prompt_zh") -> int:
     """把风格后缀确定性地补进资产卡参考提示词，返回被改写的条目数。
 
-    bible 提示词里虽然要求模型自带风格词，但模型经常漏（实测三个资产全部漏掉），
-    因此这里做一次**不依赖模型自觉**的兜底补写 —— 提示词生成链路的最后一道保险。
+    风格补写不再依赖模型自觉：bible 提示词已明确要求模型**不要**写风格词
+    （写了会与这里追加的重复，实测出现过风格出现两遍），统一由这里收尾。
+
+    ``key="reference_prompt_zh"``（默认）走中文后缀；``key`` 以 ``_en`` 结尾时
+    走英文后缀并先做一次 :func:`sanitize_prompt_en` 纠错。
     """
     norm = normalize_style(style)
     if not norm or not assets:
         return 0
+    is_en = str(key).endswith("_en")
     changed = 0
     for a in assets:
         if not isinstance(a, dict):
             continue
-        base = a.get(key) or a.get("appearance") or ""
-        merged = with_style(base, norm)
+        base = a.get(key) or ""
+        if is_en:
+            merged = with_style_en(base, norm)
+        else:
+            base = base or a.get("appearance") or ""
+            merged = with_style(base, norm)
         if merged and merged != str(base or "").strip():
             a[key] = merged
             changed += 1
     return changed
+
+
+def apply_asset_style_all(assets: Optional[List[dict]], style) -> int:
+    """中英双语一起补写风格（资产参考提示词的统一收尾入口）"""
+    return (apply_asset_style(assets, style, key="reference_prompt_zh")
+            + apply_asset_style(assets, style, key="reference_prompt_en"))

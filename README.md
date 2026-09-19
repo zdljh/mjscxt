@@ -57,6 +57,16 @@
 | 风格不达标→改提示词 | `app/qc_client.py` + `app/prompt_memory.py` | `_qc_gate` 返回 `style_blocked`；`_record_qc_lesson` 注入「严格采用 XX 风格」强化建议；`prompt_memory` 支持「风格/画风」种子词召回 |
 | 视频 worker 补齐反馈 | `app/app.py` `_video_generate_worker` | 重试时调 `learned_prompt(kind="video", ...)` 重写 prompt；保存 `orig_video_prompt` 作为稳定 key |
 
+### 画面细节与光影（提示词质量）
+
+| 能力 | 落地位置 | 说明 |
+|------|---------|------|
+| 画面细节独立字段 | `app/novel_to_script.py` | `visual_detail` = `description` 限长 200 字的**溢出位**。剧本 schema 让模型直接输出（描述压到 80 字），`_norm_shots` 优先取模型值、否则 `_overflow_detail` 兜底 —— 画面细节不再因截断而丢失 |
+| 分镜图光影引导 | `app/comfyui_client.py` | `_LIGHT_KEYWORDS` 27 组（黄昏/雨夜/烛光/月光…）+ 无光源词时按情绪兜底，抽成独立「光影氛围」句，避免「视频有日落、分镜图却是正午平光」；`_light_hint_covered` 按首段短语幂等去重 |
+| 细节合并去重 | `_merge_visual_detail` / `h3_prompt_kit._beats` | 两个来源（分析器写的 `storyboard_prompt_zh` + `visual_detail`）叠加时按分句/子串去重，同一句细节不会写两遍 |
+| 连贯性同步 | `app/continuity.py` | 别名归一、state 抽取、相邻集校验、局部重写四处均带上 `visual_detail`；重写描述后旧细节同步换/清空，避免「新描述 + 旧细节」自相矛盾 |
+| 动作镜时长 | `estimate_shot_duration` | `_ACTION_MARKERS` 动作词加成（约 +0.4~1.5s），打斗/追逐镜不再被压到 3 秒基准 |
+
 ### 工程底座
 
 | 能力 | 落地位置 | 说明 |
@@ -108,6 +118,8 @@
 | 嵌套明文密钥 | `qc_config.json` 的 `endpoint_override.api_key` 未被迁移，仍为明文 | `secret_store` 递归处理嵌套结构 |
 | 单独导入即失败 | 只 `import qc_client` 时 `.env` 未加载，主密钥取不到、解密失败 | 新增 `env_loader.py` 统一加载 |
 | 参考图静默丢失 | 前端传结构不完整的角色对象时，视频退化为无角色锚点 | 后端 `_collect_asset_refs` 从磁盘资产兜底 |
+| 提示词分析器看不到画面细节 | 细节只写在 `visual_detail` 时，它写出的 `prompt_h3` / `storyboard_prompt_zh` 完全没有光影与时间描述 | `script_prompt_analyzer.build_shot_prompt` 改为合并 `description + visual_detail` 后喂入模型 |
+| 重写镜头后细节错位 | 局部重写只换 `description`，旧 `visual_detail` 仍留着上一条描述的尾巴（新写正午、旧留黄昏逆光） | `rewrite_shots_for_issues` 同步刷新/清空 `visual_detail`，并把该字段纳入喂入内容与输出 schema |
 
 > ⚠️ **密钥提醒**：若 `ai_config.json` / `qc_config.json` 曾以明文形式进过 git、云盘同步或被分享，
 > 请到对应平台**轮换密钥**——加密只防未来，已暴露的无法追回。
@@ -326,4 +338,4 @@ custom_nodes/
 
 ---
 
-**版本**: 2.1.0 | **日期**: 2026-09-18
+**版本**: 2.2.0 | **日期**: 2026-09-19

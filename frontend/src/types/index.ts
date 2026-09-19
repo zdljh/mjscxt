@@ -154,6 +154,21 @@ export interface MemoryStats {
   lessons: number;
   successes: number;
   insights: number;
+  /** 质检教训库（生成链路自动学习）条数 —— 与上面的手动记忆是两套数据 */
+  promptLessons?: number;
+}
+
+/** 质检教训库条目（prompt_memory：质检不达标时自动沉淀，重试前召回改写提示词） */
+export interface PromptLesson {
+  ts?: string;
+  project?: string;
+  kind?: string;
+  phash?: string;
+  prompt?: string;
+  issues?: string[];
+  reason?: string;
+  score?: number | null;
+  terms?: string[];
 }
 
 // --- Settings ---

@@ -209,14 +209,35 @@ class PromptMemory:
         return lesson
 
     # ---------- 召回修正建议 ----------
+    #: 风格类建议里的占位符：召回时用**当前项目**的风格替换
+    #:
+    #: 为什么用占位符而不是记录时就把风格名写死：教训是跨项目复用的，
+    #: 而「严格采用 X 风格」里的 X 是**项目专属**的。若记录时就写死，
+    #: A 项目（中国古风玄幻）的风格教训被 B 项目（国漫偏写实）召回时，
+    #: 会把 A 的风格强行扣到 B 上 —— 这不是没帮助，是主动伤害。
+    STYLE_PLACEHOLDER = "{style}"
+
     def suggestions(self, kind: str, prompt: str,
-                    project: str = "",
-                    max_hints: int = 3) -> List[str]:
-        """生成提示词前调用：按 kind + 提示词相似度 + 缺陷关键词，召回修正建议。"""
+                    project: str = "", max_hints: int = 3,
+                    style: str = "") -> List[str]:
+        """生成提示词前调用：按 kind + 提示词相似度 + 项目归属，召回修正建议。
+
+        打分构成：
+        - ``sim``：提示词指纹完全命中 1.0；否则按文本相似度近似；
+        - ``kw_hit``：该教训的缺陷关键词是否出现在**当前查询提示词**里
+          （⚠️ 历史缺陷：原先拿教训自己的 prompt 去匹配自己的 terms，恒等命中，
+          贡献了一个与相关性无关的常数分，等于把召回变成了随机取样）；
+        - ``proj_bonus``：同项目教训加权，跨项目教训降权（跨项目经验仍有参考价值，
+          但同类名/同场景的教训显然更对症）。
+        """
         ph = prompt_hash(prompt)
+        qp = _norm(prompt or "")
         scored: List[tuple] = []
         for l in self._lessons:
             if l.get("kind") and l.get("kind") != kind:
+                continue
+            # 空教训（无缺陷也无结论）不参与召回 —— 历史脏数据里有整批这种记录
+            if not (l.get("issues") or l.get("reason")):
                 continue
             # 1) 提示词指纹命中（同句提示词曾经失败）——最强信号
             sim = 0.0
@@ -227,26 +248,53 @@ class PromptMemory:
                 sim = self._similar(l.get("prompt"), prompt)
             # 3) 缺陷关键词命中（当前提示词里有「曾经出问题的词」）
             kw_hit = 0.0
-            lp = _norm(l.get("prompt") or "")
             for t in (l.get("terms") or []):
-                if t and t in lp:
+                if t and qp and t in qp:
                     kw_hit += 1.0
-            total = sim + min(kw_hit, 3.0) * 0.25
+            # 4) 项目归属加权/降权
+            lp = str(l.get("project") or "").strip()
+            if lp and project:
+                proj_bonus = 0.15 if lp == project else -0.10
+            else:
+                proj_bonus = 0.0
+            total = sim + min(kw_hit, 3.0) * 0.25 + proj_bonus
             if total > 0.2:
                 scored.append((total, l))
         scored.sort(key=lambda x: x[0], reverse=True)
         hints, seen = [], set()
         for _, l in scored:
             for iss in (l.get("issues") or []):
-                key = _norm(iss)
+                text = self._render_hint(iss, style)
+                if not text:
+                    continue          # 需要风格但本次没给风格 → 丢弃这条，不要误导
+                key = _norm(text)
                 if key and key not in seen:
                     seen.add(key)
-                    hints.append(iss)
+                    hints.append(text)
                 if len(hints) >= max_hints:
                     break
             if len(hints) >= max_hints:
                 break
         return hints
+
+    @classmethod
+    def _render_hint(cls, issue, style: str = "") -> str:
+        """把一条建议渲染成可用文本：替换 ``{style}`` 占位符
+
+        - 无占位符 → 原样返回；
+        - 有占位符且本次给了 style → 替换成当前项目的风格；
+        - 有占位符但没给 style → 返回空串（丢弃该建议）。宁可少给一条，
+          也不能把别的项目的风格名安到当前项目上。
+        """
+        text = str(issue or "").strip()
+        if not text:
+            return ""
+        if cls.STYLE_PLACEHOLDER not in text:
+            return text
+        s = str(style or "").strip()
+        if not s:
+            return ""
+        return text.replace(cls.STYLE_PLACEHOLDER, s)
 
     @staticmethod
     def _similar(a: str, b: str) -> float:
@@ -268,9 +316,14 @@ class PromptMemory:
 
     # ---------- 拼装带经验的提示词 ----------
     def learned_prompt(self, kind: str, prompt: str,
-                       project: str = "", max_hints: int = 3) -> str:
-        """在原始提示词后追加历史修正建议；无建议则原样返回。"""
-        hints = self.suggestions(kind, prompt, project, max_hints)
+                       project: str = "", max_hints: int = 3,
+                       style: str = "") -> str:
+        """在原始提示词后追加历史修正建议；无建议则原样返回。
+
+        style：本次生成的目标风格。仅用于替换建议里的 ``{style}`` 占位符，
+        保证「严格采用 X 风格」里的 X 永远是**当前项目**的风格。
+        """
+        hints = self.suggestions(kind, prompt, project, max_hints, style=style)
         if not hints:
             return prompt
         safe = [(h or "").strip() for h in hints if (h or "").strip()]
@@ -308,6 +361,23 @@ class PromptMemory:
             self._flush()
             return before - len(self._lessons)
 
+    def prune_empty(self) -> int:
+        """清掉「无缺陷也无结论」的空教训，返回清理条数。
+
+        为什么需要：历史缺陷导致某段时间写入的教训全是
+        ``issues=[] / reason="" / score=0`` 的空壳（写入端曾误读 ``rec["verdict"]``）。
+        这些记录既不能提供建议，又会在 stats 里冒充"学到了 36 条经验"，
+        还会拖慢召回。写入端已加守卫不再产生新的空记录，这里负责清历史遗留。
+        """
+        with self._lock:
+            before = len(self._lessons)
+            self._lessons = [l for l in self._lessons
+                             if (l.get("issues") or l.get("reason"))]
+            removed = before - len(self._lessons)
+            if removed:
+                self._flush()
+            return removed
+
 
 # ===================== 模块级单例 =====================
 
@@ -331,14 +401,16 @@ def record(project: str, kind: str, prompt: str, issues: List[str],
     return get_memory(root_dir).record(project, kind, prompt, issues, reason, score)
 
 
-def suggest(kind: str, prompt: str, project: str = "", root_dir: str = "") -> List[str]:
+def suggest(kind: str, prompt: str, project: str = "", root_dir: str = "",
+            style: str = "") -> List[str]:
     if not root_dir:
         return []
-    return get_memory(root_dir).suggestions(kind, prompt, project)
+    return get_memory(root_dir).suggestions(kind, prompt, project, style=style)
 
 
 def learned_prompt(kind: str, prompt: str, project: str = "",
-                   root_dir: str = "", max_hints: int = 3) -> str:
+                   root_dir: str = "", max_hints: int = 3,
+                   style: str = "") -> str:
     """关键便捷入口：返回叠加了「历史质检修正建议」的提示词；无建议则原样返回。
 
     ⚠️ 必须放在模块级：生成链路是以 `prompt_memory.learned_prompt(...)` 调用的。
@@ -347,7 +419,7 @@ def learned_prompt(kind: str, prompt: str, project: str = "",
     """
     if not root_dir:
         return prompt
-    return get_memory(root_dir).learned_prompt(kind, prompt, project, max_hints)
+    return get_memory(root_dir).learned_prompt(kind, prompt, project, max_hints, style=style)
 
 
 # ===================== 增强功能：分类、优先级、上下文、衰减 =====================
@@ -525,11 +597,13 @@ class PromptMemoryEnhanced(PromptMemory):
             elif l.get("prompt"):
                 sim = self._similar(l.get("prompt"), prompt)
             
-            # 3) 缺陷关键词命中
+            # 3) 缺陷关键词命中（必须匹配**当前查询提示词**）
+            #    ⚠️ 历史缺陷：这里拿教训自己的 prompt 去匹配自己的 terms（`t in lp`），
+            #    恒等命中，给每条教训都加了一个与相关性无关的常数分 —— 召回退化成随机取样。
             kw_hit = 0.0
-            lp = _norm(l.get("prompt") or "")
+            qp = _norm(prompt or "")
             for t in (l.get("terms") or []):
-                if t and t in lp:
+                if t and qp and t in qp:
                     kw_hit += 1.0
             
             # 4) 上下文匹配

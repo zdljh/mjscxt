@@ -2,15 +2,28 @@ import React, { useEffect, useState } from 'react';
 import { useApp } from '@/context/AppContext';
 import { memoryApi } from '@/api/client';
 import { Card, Button, Loading, EmptyState, Badge } from '@/components/ui';
-import type { Memory, MemoryType } from '@/types';
+import type { Memory, MemoryType, MemoryStats, PromptLesson } from '@/types';
+
+/** 教训类型 → 人话（避免界面出现原始 kind 值） */
+const LESSON_KIND_LABEL: Record<string, string> = {
+  asset: '资产参考图',
+  storyboard: '分镜图',
+  video: '视频',
+  keyframe: '关键帧',
+};
 
 export function MemoryPage() {
   const { t } = useApp();
   const [memories, setMemories] = useState<Memory[]>([]);
-  const [stats, setStats] = useState({ total: 0, lessons: 0, successes: 0, insights: 0 });
+  const [stats, setStats] = useState<MemoryStats>({
+    total: 0, lessons: 0, successes: 0, insights: 0, promptLessons: 0,
+  });
   const [loading, setLoading] = useState(true);
   const [insights, setInsights] = useState<string[]>([]);
   const [insightsLoading, setInsightsLoading] = useState(false);
+  // 质检教训库：生成链路**自动沉淀**的学习成果（与手动登记的 memories 是两套数据）
+  const [lessons, setLessons] = useState<PromptLesson[]>([]);
+  const [lessonKind, setLessonKind] = useState('');
 
   useEffect(() => {
     Promise.all([
@@ -28,6 +41,13 @@ export function MemoryPage() {
       .catch(() => {})
       .finally(() => setInsightsLoading(false));
   }, []);
+
+  // 教训库单独拉取（切 kind 时重拉），不与手动记忆耦合
+  useEffect(() => {
+    memoryApi.lessons({ kind: lessonKind || undefined, limit: 60 })
+      .then(setLessons)
+      .catch(() => setLessons([]));
+  }, [lessonKind]);
 
   const handleClearOld = async () => {
     if (!confirm(t('memory.confirmClear'))) return;
@@ -73,8 +93,63 @@ export function MemoryPage() {
         <StatCard label={t('memory.total')} value={stats.total} color="blue" />
         <StatCard label={t('memory.lessons')} value={stats.lessons} color="yellow" />
         <StatCard label={t('memory.successes')} value={stats.successes} color="green" />
-        <StatCard label={t('memory.insights')} value={stats.insights} color="purple" />
+        <StatCard label="质检教训库" value={stats.promptLessons ?? 0} color="purple" />
       </div>
+
+      {/* 质检教训库：生成链路自动沉淀，驱动「不达标 → 改提示词重生成」 */}
+      <Card title="质检教训库（自动学习）">
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          {['', 'asset', 'storyboard', 'video'].map((k) => (
+            <button
+              key={k || 'all'}
+              onClick={() => setLessonKind(k)}
+              className={`px-3 py-1 rounded-full text-xs border transition-colors ${
+                lessonKind === k
+                  ? 'bg-indigo-600 text-white border-indigo-600'
+                  : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-700'
+              }`}
+            >
+              {k ? LESSON_KIND_LABEL[k] || k : '全部'}
+            </button>
+          ))}
+        </div>
+        {lessons.length === 0 ? (
+          <EmptyState
+            icon="📚"
+            title="暂无质检教训"
+            description="质检不达标时系统会自动沉淀教训，并在重试前召回改写提示词。可在 AI 设置中开启图片质检以让资产/分镜也产生教训。"
+          />
+        ) : (
+          <div className="space-y-3">
+            {lessons.slice(0, 20).map((l, i) => (
+              <div key={`${l.phash || ''}-${i}`} className="p-4 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
+                <div className="flex items-start justify-between mb-2 gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Badge variant="warning">{LESSON_KIND_LABEL[l.kind || ''] || l.kind || '未知'}</Badge>
+                    {l.project ? (
+                      <span className="text-xs text-gray-500 dark:text-gray-400">{l.project}</span>
+                    ) : null}
+                    {typeof l.score === 'number' ? (
+                      <span className="text-xs text-gray-400">得分 {l.score}</span>
+                    ) : null}
+                  </div>
+                  <span className="text-xs text-gray-400 whitespace-nowrap">
+                    {l.ts ? new Date(l.ts).toLocaleString() : ''}
+                  </span>
+                </div>
+                <ul className="list-disc list-inside space-y-1">
+                  {(l.issues || []).slice(0, 5).map((iss, j) => (
+                    <li key={j} className="text-sm text-gray-700 dark:text-gray-300">{iss}</li>
+                  ))}
+                  {(l.issues || []).length === 0 && l.reason ? (
+                    <li className="text-sm text-gray-700 dark:text-gray-300">{l.reason}</li>
+                  ) : null}
+                </ul>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
 
       {/* Insights */}
       {!insightsLoading && insights.length > 0 && (

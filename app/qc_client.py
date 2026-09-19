@@ -46,6 +46,20 @@ WATERMARK_EXEMPT_NOTE = (
     "请只针对画面本身的崩坏 / 畸变 / 糊化 / 闪烁 / 撕裂 / 一致性问题做判定。"
 )
 
+# 景别（镜头类型）判定容差：图像生成模型对取景范围的控制力有限，实测 43% 的分镜图
+# 因「景别不符」被判不通过 —— 其中绝大多数只差一档（如目标中景、实际给了近景或全景），
+# 反复重试仍难命中，白白烧 GPU。这里明确容差口径，避免把「差一档」当成硬缺陷。
+# 与 SHOT_CAMERA_SPECS（comfyui_client）配套：判定标准由镜头信息里的「判定标准：…」给出。
+FRAMING_TOLERANCE_NOTE = (
+    "\n【景别判定口径·重要】判定景别时**必须以上方「镜头信息」里给出的「判定标准」为准**，"
+    "不要用你自己的习惯理解。容差口径：\n"
+    "  · 与判定标准相符，或仅相差一档（如目标中景，实际偏近景、或略偏全景）→ "
+    "至多在 issues 里记一条轻微偏差，**不得据此判不通过**，score 只做小幅扣分（不超过 8 分）；\n"
+    "  · 相差两档及以上（如目标特写却给全景/中景，或目标全景却给特写）→ 才算景别不符，"
+    "写明「景别不符」并在 score 上明显扣分；\n"
+    "  · 取景范围本身不影响主体与动作的清晰表达时，宁可放过也不要误杀。"
+)
+
 # 关键缺陷硬规则（P0：收紧放行）：模型偶尔给有明显崩坏的图打高分/放行，
 # 因此在提示词里下达硬性规则，并在代码侧再加一道不可绕过的闸门（见 _finalize_verdict）。
 CRITICAL_RULE_NOTE = (
@@ -81,6 +95,19 @@ CRITICAL_ISSUE_KEYWORDS = (
 )
 
 
+#: 否定语境词（出现在关键词前若干字符内，说明该条是在**说明不存在缺陷**）
+_NEGATION_WORDS = ("无", "没有", "未", "不存在", "非", "不", "缺少", "未发现", "已消除")
+
+
+def _has_negative_context(text: str, idx: int, window: int = 6) -> bool:
+    """判断 ``text[idx]`` 处的关键词是否处于否定语境（如「无明显畸变」）
+
+    只看关键词**前面** window 个字符，避免把「风格不符」这类真缺陷误当否定。
+    """
+    ctx = str(text or "")[max(0, idx - window):idx]
+    return any(neg in ctx for neg in _NEGATION_WORDS)
+
+
 def find_critical_issues(issues) -> list:
     """从 issues 文本中筛出命中关键缺陷词的条目
 
@@ -97,8 +124,7 @@ def find_critical_issues(issues) -> list:
                 idx = s.find(k, start)
                 if idx == -1:
                     break
-                ctx = s[max(0, idx - 6):idx]
-                if not any(neg in ctx for neg in ("无", "没有", "未", "不存在", "非")):
+                if not _has_negative_context(s, idx):
                     found = True
                     break
                 start = idx + len(k)
@@ -130,10 +156,11 @@ def find_style_issues(issues, style=None) -> list:
 
     匹配两路（任一命中即判定风格缺陷）：
     1) 独立风格错误词（如「写实照片」「3D写实」，说明目标风格被替换）；
-    2) 「风格/画风」+ 否定词的组合（覆盖「画风与目标不符」「风格不一致」等变体；
-       「风格一致」「画风统一」这类肯定表述不含否定词，不会被误伤）。
+    2) 「风格/画风」+ 否定词的组合（覆盖「画风与目标不符」「风格不一致」等变体）。
 
-    style 参数暂仅用于未来按目标风格做更精细匹配，当前以词表为主。
+    ⚠️ 第 2 路必须带**否定语境过滤**：否则「风格统一，无缺失」「画风稳定，没有偏差」
+    这类**肯定表述**会因为命中 _STYLE_NEG_WORDS 里的「缺失 / 偏离」而被误判成风格缺陷，
+    进而强制 passed=False 触发无意义的重生成（实测踩过）。
     """
     hits: list = []
     for it in (issues or []):
@@ -141,8 +168,22 @@ def find_style_issues(issues, style=None) -> list:
         if any(k in s for k in STYLE_ISSUE_KEYWORDS):
             hits.append(s[:200])
             continue
-        if ("风格" in s or "画风" in s) and any(n in s for n in _STYLE_NEG_WORDS):
-            hits.append(s[:200])
+        if "风格" in s or "画风" in s:
+            bad = False
+            for neg in _STYLE_NEG_WORDS:
+                start = 0
+                while True:
+                    idx = s.find(neg, start)
+                    if idx == -1:
+                        break
+                    if not _has_negative_context(s, idx):
+                        bad = True
+                        break
+                    start = idx + len(neg)
+                if bad:
+                    break
+            if bad:
+                hits.append(s[:200])
     return hits
 
 
@@ -202,8 +243,10 @@ DEFAULT_IMAGE_PROMPT = (
     "1) 人物：脸型/发型/服装/配饰与设定一致，无五官畸变、多手多脚、肢体错位；\n"
     "2) 画面：无严重糊化、噪点、色块、扭曲；\n"
     "3) 构图：主体完整清晰，场景与镜头描述相符；\n"
-    "4) 风格：画面整体画风/渲染方式/笔触/配色必须与目标风格一致，不得偏离；\n"
-    "5) 水印/角标/logo/字幕即使存在，也不计入缺陷、不扣分。\n"
+    "4) 景别：取景范围是否落在「镜头信息」给出的判定标准内（判定口径见下方容差说明，"
+    "差一档不算缺陷）；\n"
+    "5) 风格：画面整体画风/渲染方式/笔触/配色必须与目标风格一致，不得偏离；\n"
+    "6) 水印/角标/logo/字幕即使存在，也不计入缺陷、不扣分。\n"
     "目标风格：{style}\n"
     "镜头信息：{shot_desc}\n"
     "请只输出一个 JSON 对象，不要任何解释文字，格式：\n"
@@ -241,25 +284,49 @@ DEFAULT_VIDEO_PROMPT = (
 )
 
 # ===================== 剧本质检提示词 =====================
+# ⚠️ 字段名必须与 novel_to_script 的真实产物一致，否则模型会报「字段缺失」假问题。
+# 历史缺陷：本提示词检查 `visual_description`（镜头级）与角色级 `description` ——
+# **这两个字段都不存在**（真实字段是 shot.description / character.appearance），
+# 且完全没有检查 items / scenes 的结构，模型据此报出一堆不存在的缺陷。
+# 真实 schema（见 output/scripts/<项目>/第N集.json）：
+#   script   : title / episode_no / episode_title / theme / style / characters /
+#              items / scenes / shots / production_notes / metadata
+#   shot     : shot_id / duration / camera / location / description / narration /
+#              dialogue[{speaker,text}] / emotion / audio_cues / characters_in_shot /
+#              items_in_shot / prompt_h3 / style
+#   character: name / age / identity / appearance / current_outfit / personality /
+#              voice_style / reference_prompt_zh / reference_prompt_en
+#   item     : name / category / appearance / owner / importance /
+#              reference_prompt_zh / reference_prompt_en
+#   scene    : name / location / appearance / reference_prompt_zh / reference_prompt_en
 DEFAULT_SCRIPT_PROMPT = (
-    "你是漫剧剧本质检员。请检查这个JSON剧本是否达到可直接使用的标准：\n\n"
+    "你是漫剧剧本质检员。请检查这个 JSON 剧本是否达到可直接进入生产的标准。\n"
+    "**只按下面列出的真实字段名判定，不要凭空要求其它字段名**（例如本剧本文档里"
+    "镜头画面描述就叫 description，不叫 visual_description）。\n\n"
     "【结构完整性】\n"
-    "1. 必须包含：title, characters, items, scenes, shots\n"
-    "2. 每个角色必须有：name, description, personality\n"
-    "3. 每个镜头必须有：shot_id, duration, camera, visual_description, characters_in_shot, items_in_shot\n\n"
+    "1. 顶层必须包含：title, style, characters, items, scenes, shots\n"
+    "2. 每个角色必须有：name, appearance, personality"
+    "（current_outfit / voice_style / identity / age 为可选增强项）\n"
+    "3. 每个物品必须有：name, category, appearance（owner / importance 可选）\n"
+    "4. 每个场景必须有：name, location, appearance\n"
+    "5. 每个镜头必须有：shot_id, duration, camera, location, description, "
+    "characters_in_shot, items_in_shot\n\n"
     "【逻辑一致性】\n"
-    "4. characters_in_shot中的角色必须在characters列表中定义\n"
-    "5. items_in_shot中的物品必须在items列表中定义\n"
-    "6. 镜头顺序应有清晰的叙事逻辑\n\n"
+    "6. characters_in_shot 中的角色必须在 characters 列表中有定义\n"
+    "7. items_in_shot 中的物品必须在 items 列表中有定义\n"
+    "8. 镜头的 location 应能在 scenes 列表中找到对应场景\n"
+    "9. 镜头顺序应有清晰的叙事逻辑，shot_id 连续\n\n"
     "【风格一致性】\n"
-    "7. 所有描述必须符合指定的创作风格（{style}）\n"
-    "8. 角色外观描述应与风格匹配\n\n"
+    "10. 画面描述与整体气质必须符合指定创作风格（{style}）\n"
+    "11. 角色外观描述应与该风格匹配\n\n"
     "【提示词质量】\n"
-    "9. visual_description应足够详细（50字以上）\n"
-    "10. 应包含：人物动作、镜头运动、环境氛围\n\n"
+    "12. description 应足够具体（建议 50 字以上），包含人物动作、环境光线与构图要素；\n"
+    "13. camera 应为「景别+运镜」写法（如 中景跟拍 / 特写推入）\n\n"
     "【可执行性评估】\n"
-    "11. 总时长应接近目标时长（{target_duration}秒）\n"
-    "12. 每个镜头时长应在3-10秒范围内\n\n"
+    "14. 总时长应接近目标时长（{target_duration} 秒）\n"
+    "15. 每个镜头时长应在 3-12 秒范围内\n"
+    "16. 不得出现台词与旁白同时为空的「静默镜」（成片会整段无声；"
+    "dialogue 与 narration 至少一个要有实质内容）\n\n"
     "剧本数据：\n{script_data}\n\n"
     "请只输出一个JSON对象，格式：\n"
     '{\"score\": 0-100, \"pass\": true/false, \"reason\": \"一句话结论\", '
@@ -490,7 +557,14 @@ def save_config(config_path: str, patch: dict, keep_key_if_blank: bool = True) -
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
     os.replace(tmp, config_path)
-    return cfg
+    # ⚠️ 必须重新 load_config 再返回，**不能返回上面那个已清空 api_key 的 cfg**：
+    # 明文密钥只存加密库，上面刚把 cfg["api_key"] 置空是为了防明文落盘；
+    # 若直接返回它，调用方拿到的就是「无密钥」的配置 → public_view 算出
+    # ready=False / image_qc_active=False → 前端每次保存都会弹
+    # 「质检开关已开启，但质检接口信息不完整，生成流程将跳过质检」的**误导性警告**
+    # （实测：仅提交 {"image_enabled": true} 后 video_qc_active 从 true 掉成 false）。
+    # 重新读取一次即可拿到 load_config 注入的密钥，且返回的正是应用真正会用的配置。
+    return load_config(config_path)
 
 
 def load_config_dict(raw: dict) -> dict:
@@ -1216,7 +1290,7 @@ def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
         "{shot_desc}", shot_desc or "（无）").replace(
         "{pass_score}", str(cfg.get("pass_score", 70))).replace(
         "{style}", style_norm or "（未指定）")
-    prompt = prompt + WATERMARK_EXEMPT_NOTE + CRITICAL_RULE_NOTE   # P0：收紧放行（关键缺陷必须不通过）
+    prompt = prompt + WATERMARK_EXEMPT_NOTE + CRITICAL_RULE_NOTE + FRAMING_TOLERANCE_NOTE
     if style_norm:
         prompt = prompt + STYLE_CHECK_NOTE.replace("{style}", style_norm)
     try:
@@ -1472,7 +1546,7 @@ def check_video(video_path: str, shot_desc: str = "", cfg: dict = None,
     ts_brief = "、".join(f"第{i + 1}帧 {fm['actual_ts']}s"
                         for i, fm in enumerate(fr.get("frame_meta") or []))
     prompt = f"共 {len(fr['frames'])} 张抽帧图片（按时间顺序；实际时间戳：{ts_brief}）。\n" + prompt
-    prompt = prompt + WATERMARK_EXEMPT_NOTE + CRITICAL_RULE_NOTE   # P0：收紧放行（关键缺陷必须不通过）
+    prompt = prompt + WATERMARK_EXEMPT_NOTE + CRITICAL_RULE_NOTE + FRAMING_TOLERANCE_NOTE
     if style_norm:
         prompt = prompt + STYLE_CHECK_NOTE.replace("{style}", style_norm)
     try:
@@ -1556,82 +1630,105 @@ def read_history(qc_root: str, project: str, kind: str, shot_key) -> dict:
 # ===================== 剧本质检 =====================
 
 def _validate_script_structure(script: dict) -> list:
-    """验证剧本JSON结构完整性"""
+    """验证剧本JSON结构完整性
+
+    ⚠️ 字段名必须与 novel_to_script 的真实产物一致：
+    历史缺陷：这里要求角色/物品有 ``description``、镜头有 ``visual_description``
+    —— 这三个字段**都不存在**（真实字段是 character.appearance / item.appearance /
+    shot.description）。于是每一份剧本都会被报出一堆「缺少字段」，而 check_script
+    把 structure_issues 当关键问题**直接判失败并跳过 AI 质检**，
+    导致剧本质检 100% 假失败、AI 层从未真正运行过。
+    """
     issues = []
-    
+
     # 检查顶层字段
     required_top = ["title", "characters", "items", "scenes", "shots"]
     for field in required_top:
         if field not in script:
             issues.append(f"缺少必要字段: {field}")
-    
-    # 检查角色结构
+
+    # 检查角色结构（真实字段：name / appearance / personality）
     if "characters" in script:
         for i, char in enumerate(script["characters"]):
             if not isinstance(char, dict):
                 issues.append(f"角色 {i} 不是有效对象")
                 continue
-            for field in ["name", "description", "personality"]:
+            for field in ["name", "appearance", "personality"]:
                 if field not in char:
                     issues.append(f"角色 {char.get('name', f'[{i}]')} 缺少字段: {field}")
-    
-    # 检查物品结构
+
+    # 检查物品结构（真实字段：name / category / appearance）
     if "items" in script:
         for i, item in enumerate(script["items"]):
             if not isinstance(item, dict):
                 issues.append(f"物品 {i} 不是有效对象")
                 continue
-            for field in ["name", "category", "description"]:
+            for field in ["name", "category", "appearance"]:
                 if field not in item:
                     issues.append(f"物品 {item.get('name', f'[{i}]')} 缺少字段: {field}")
-    
-    # 检查场景结构
+
+    # 检查场景结构（真实字段：name / location / appearance）
     if "scenes" in script:
         for i, scene in enumerate(script["scenes"]):
             if not isinstance(scene, dict):
                 issues.append(f"场景 {i} 不是有效对象")
                 continue
-            # 场景可能没有shot_id，但需要有基本描述
-            if "name" not in scene and "visual_description" not in scene:
-                issues.append(f"场景 {i} 缺少名称或描述")
-    
-    # 检查镜头结构
+            if not scene.get("name"):
+                issues.append(f"场景 {i} 缺少名称")
+
+    # 检查镜头结构（真实字段：description，不是 visual_description）
     if "shots" in script:
         for i, shot in enumerate(script["shots"]):
             if not isinstance(shot, dict):
                 issues.append(f"镜头 {i} 不是有效对象")
                 continue
-            required_shot = ["shot_id", "duration", "camera", "visual_description"]
+            required_shot = ["shot_id", "duration", "camera", "location", "description"]
             for field in required_shot:
                 if field not in shot:
                     issues.append(f"镜头 {shot.get('shot_id', f'[{i}]')} 缺少字段: {field}")
-    
+
     return issues
 
 
+def _matches_defined(name, defined: set) -> bool:
+    """引用名是否指向某个已定义名字（支持别名的包含匹配）
+
+    项目其它环节（``dialogue_utils.match_prefix_speaker``、``novel_to_script._norm_shots``）
+    对角色/物品名都用「相等或互相包含」的宽松匹配。剧本里常出现全名/简称混用
+    （实测：角色表登记「方源」，镜头里写「古月方源」），若按精确相等判定，
+    会刷出一堆「引用了未定义的角色」假错误，把真正的缺陷埋掉。
+    """
+    s = str(name or "").strip()
+    if not s:
+        return False
+    if s in defined:
+        return True
+    return any(s in d or d in s for d in defined if d)
+
+
 def _validate_script_logic(script: dict) -> list:
-    """验证剧本逻辑一致性"""
+    """验证剧本逻辑一致性（角色/物品引用用宽松别名匹配，见 _matches_defined）"""
     issues = []
-    
+
     # 提取定义的角色名和物品名
     defined_chars = {c.get("name") for c in script.get("characters", []) if isinstance(c, dict)}
     defined_items = {i.get("name") for i in script.get("items", []) if isinstance(i, dict)}
-    
+
     # 检查镜头中的引用
     for i, shot in enumerate(script.get("shots", [])):
         if not isinstance(shot, dict):
             continue
-        
+
         shot_id = shot.get("shot_id", f"[{i}]")
-        
-        # 检查角色引用
+
+        # 检查角色引用（宽松匹配：别名/全名简称不报错）
         for char in shot.get("characters_in_shot", []):
-            if char not in defined_chars:
+            if not _matches_defined(char, defined_chars):
                 issues.append(f"镜头 {shot_id} 引用了未定义的角色: {char}")
-        
-        # 检查物品引用
+
+        # 检查物品引用（宽松匹配）
         for item in shot.get("items_in_shot", []):
-            if item not in defined_items:
+            if not _matches_defined(item, defined_items):
                 issues.append(f"镜头 {shot_id} 引用了未定义的物品: {item}")
     
     # 检查镜头顺序逻辑（简单检查shot_id是否连续）
@@ -1657,77 +1754,96 @@ def _validate_script_logic(script: dict) -> list:
     return issues
 
 
+def _style_tokens(text: str) -> set:
+    """把风格串拆成可比较的词元
+
+    风格串常常是一整串没有分隔符的中文（如「中国古风玄幻漫剧」），按分隔符切只得一个词元，
+    与「国漫古风」完全无法比较 → 同义风格被误判为冲突。因此同时加入**字符二元组**：
+    「中国古风玄幻漫剧」与「国漫古风」共享二元组「古风」，即视为一致。
+    """
+    s = str(text or "").strip()
+    if not s:
+        return set()
+    toks = {t.strip() for t in re.split(r"[,，、;；/|\s]+", s) if len(t.strip()) >= 2}
+    compact = re.sub(r"[,，、;；/|\s]+", "", s)
+    toks |= {compact[i:i + 2] for i in range(len(compact) - 1)}
+    return toks
+
+
 def _validate_script_style(script: dict, style: str) -> list:
-    """验证风格一致性"""
+    """验证风格一致性
+
+    ⚠️ 原实现用「整串互相包含」判定（``script_style.lower() not in style.lower()``），
+    只要用户风格与剧本风格措辞不同就报不一致 —— 例如剧本写「中国古风玄幻漫剧」、
+    指定风格「国漫古风」，两者明明同义却被判冲突。
+    改为**词元重叠**判定：有任一共同词元即视为一致，完全不重叠才提示。
+    """
     issues = []
-    
-    # 检查剧本是否有style字段
-    script_style = script.get("style", "")
-    if script_style and style and script_style.lower() not in style.lower():
-        issues.append(f"剧本风格 '{script_style}' 与指定风格 '{style}' 不一致")
-    
-    # 检查角色描述是否包含风格关键词
-    style_keywords = {
-        "国漫古风": ["古风", "仙侠", "道袍", "剑修", "修士"],
-        "现代都市": ["现代", "都市", "时尚", "潮流"],
-        "科幻未来": ["科幻", "未来", "机甲", "太空"],
-    }
-    
-    if style in style_keywords:
-        keywords = style_keywords[style]
-        char_descriptions = " ".join(
-            c.get("description", "") for c in script.get("characters", [])
-            if isinstance(c, dict)
-        )
-        # 这是警告，不是错误
-        # if not any(kw in char_descriptions for kw in keywords):
-        #     issues.append(f"角色描述中缺少风格关键词: {', '.join(keywords[:3])}")
-    
+
+    script_style = str(script.get("style") or "").strip()
+    if script_style and style:
+        a, b = _style_tokens(script_style), _style_tokens(style)
+        # 词元有交集，或一方是另一方的子串，都算一致
+        if not (a & b) and script_style not in style and style not in script_style:
+            issues.append(f"剧本风格 '{script_style}' 与指定风格 '{style}' 可能不一致（无共同风格词）")
+
     return issues
 
 
 def _validate_script_prompts(script: dict) -> list:
-    """验证提示词质量"""
+    """验证提示词质量
+
+    ⚠️ 真实字段是 shot.description / character.appearance。
+    历史缺陷：这里读的是 ``shot.visual_description``（不存在）→ 每个镜头都被报
+    「缺少视觉描述」，把提示词质量校验变成了纯噪声。
+    """
     issues = []
-    
-    # 检查镜头视觉描述质量
+
+    # 检查镜头画面描述质量（真实字段：description）
     for i, shot in enumerate(script.get("shots", [])):
         if not isinstance(shot, dict):
             continue
-        
+
         shot_id = shot.get("shot_id", f"[{i}]")
-        visual_desc = shot.get("visual_description", "")
-        
+        visual_desc = str(shot.get("description") or "")
+
         if not visual_desc:
-            issues.append(f"镜头 {shot_id} 缺少视觉描述")
+            issues.append(f"镜头 {shot_id} 缺少画面描述")
         elif len(visual_desc) < 30:
-            issues.append(f"镜头 {shot_id} 视觉描述过短（{len(visual_desc)}字），建议50字以上")
-    
-    # 检查角色外貌描述
+            issues.append(f"镜头 {shot_id} 画面描述过短（{len(visual_desc)}字），建议50字以上")
+
+    # 检查角色外貌描述（真实字段：appearance）
     for i, char in enumerate(script.get("characters", [])):
         if not isinstance(char, dict):
             continue
-        
+
         char_name = char.get("name", f"[{i}]")
-        description = char.get("description", "")
-        
-        if not description:
+        appearance = str(char.get("appearance") or "")
+        if not appearance:
             issues.append(f"角色 {char_name} 缺少外貌描述")
-        elif len(description) < 20:
-            issues.append(f"角色 {char_name} 外貌描述过短（{len(description)}字）")
-    
+        elif len(appearance) < 20:
+            issues.append(f"角色 {char_name} 外貌描述过短（{len(appearance)}字）")
+
     return issues
 
 
+#: 单镜时长下限/上限，与 novel_to_script.SHOT_DURATION_MIN/MAX 对齐（3~12 秒）。
+#: 历史缺陷：这里写 1~15 秒且「镜头数 > 30 就告警」，而剧本生成端的约束是 3~12 秒、
+#: 真实剧集单集可达 56 镜 —— 约束互相打架，正常剧本反被判不可执行。
+SHOT_DURATION_MIN_OK = 3.0
+SHOT_DURATION_MAX_OK = 12.0
+SHOT_DURATION_TOLERANCE = 2.0     # 超出边界的容差（模型四舍五入 / 台词长度微调）
+
+
 def _validate_script_feasibility(script: dict, target_duration: int = 60) -> list:
-    """验证可执行性"""
+    """验证可执行性（阈值与剧本生成端保持一致，见上方常量说明）"""
     issues = []
-    
+
     shots = script.get("shots", [])
     if not shots:
         issues.append("剧本没有镜头，无法执行")
         return issues
-    
+
     # 计算总时长
     total_duration = 0
     shot_durations = []
@@ -1738,28 +1854,30 @@ def _validate_script_feasibility(script: dict, target_duration: int = 60) -> lis
         if not isinstance(duration, (int, float)):
             issues.append(f"镜头 {shot.get('shot_id', f'[{i}]')} 时长无效: {duration}")
             continue
-        
+
         shot_durations.append(duration)
         total_duration += duration
-        
-        # 检查单个镜头时长
-        if duration < 1:
-            issues.append(f"镜头 {shot.get('shot_id', f'[{i}]')} 时长过短: {duration}秒")
-        elif duration > 15:
-            issues.append(f"镜头 {shot.get('shot_id', f'[{i}]')} 时长过长: {duration}秒")
-    
+
+        # 检查单个镜头时长（留 2 秒容差，避免浮点/取整误报）
+        if duration < SHOT_DURATION_MIN_OK - SHOT_DURATION_TOLERANCE:
+            issues.append(f"镜头 {shot.get('shot_id', f'[{i}]')} 时长过短: {duration}秒"
+                          f"（建议 {SHOT_DURATION_MIN_OK:g}~{SHOT_DURATION_MAX_OK:g} 秒）")
+        elif duration > SHOT_DURATION_MAX_OK + SHOT_DURATION_TOLERANCE:
+            issues.append(f"镜头 {shot.get('shot_id', f'[{i}]')} 时长过长: {duration}秒"
+                          f"（建议 {SHOT_DURATION_MIN_OK:g}~{SHOT_DURATION_MAX_OK:g} 秒）")
+
     # 检查总时长偏差
     if target_duration > 0 and shot_durations:
         duration_diff = abs(total_duration - target_duration) / target_duration
         if duration_diff > 0.3:  # 偏差超过30%
-            issues.append(f"总时长 {total_duration}秒 与目标 {target_duration}秒 偏差过大（{duration_diff*100:.0f}%）")
-    
-    # 检查镜头数量
+            issues.append(f"总时长 {total_duration}秒 与目标 {target_duration}秒 偏差过大"
+                          f"（{duration_diff*100:.0f}%）")
+
+    # 镜头数量：只卡「少到无法叙事」的下限。不设上限 —— 原文越长镜头越多是设计目标
+    #（novel_to_script 按约 120 字/镜承载原文，实测单集可达 56 镜）。
     if len(shots) < 3:
-        issues.append(f"镜头数量过少（{len(shots)}个），建议至少5个镜头")
-    elif len(shots) > 30:
-        issues.append(f"镜头数量过多（{len(shots)}个），建议控制在20个以内")
-    
+        issues.append(f"镜头数量过少（{len(shots)}个），建议至少 5 个镜头")
+
     return issues
 
 

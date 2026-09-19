@@ -25,7 +25,11 @@ import shutil
 import logging
 import threading
 import requests
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Sequence
+# ⚠️ Sequence 曾被漏导入：类级注解 `_LIGHT_KEYWORDS: Sequence[...]` 在类创建时**不求值**，
+# 所以模块照常导入、py_compile 也通过，但一旦有工具读取
+# `ComfyUIClient.__annotations__` 或调用 `typing.get_type_hints()` 就会抛
+# NameError: name 'Sequence' is not defined（实测）。别删这个导入。
 
 from config import (
     COMFYUI_URL, COMFYUI_WORKFLOWS_DIR, COMFYUI_OUTPUT_DIR,
@@ -37,6 +41,7 @@ from dialogue_utils import (dialogue_text as _dlg_text, format_line as _dlg_line
                             dialogue_speaker as _dlg_speaker)
 from h3_episode_builder import H3EpisodeBuilder
 import style_kit
+import h3_prompt_kit
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -115,8 +120,44 @@ SHOT_CAMERA_SPECS = {
     "全景": "全景镜头（wide shot）：完整呈现人物全身及其所处环境，人物占画面高度的大半",
     "远景": "远景镜头（long shot）：人物在画面中较小、环境为主体，强调空间感与氛围",
 }
+#: 景别关键字的解析顺序（**具体优先**）：剧本里 camera 字段常是「景别+运镜」的复合写法
+#: （如「特写推入」「全景升降」「中景跟拍」），必须按关键字解析，不能只做精确匹配。
+_CAMERA_KEY_ORDER = ("特写", "远景", "全景", "近景", "中景")
+
+
+def camera_key(camera) -> str:
+    """从复合写法里解析出景别关键字（``特写推入`` → ``特写``；``全景升降`` → ``全景``）
+
+    ⚠️ 这修的是一个**双向错位**的根因：
+    剧本的 camera 字段是「景别+运镜」（特写推入 / 中景跟拍 / 全景升降），而
+    ``SHOT_CAMERA_SPECS`` 只有精确键。原实现 ``SPECS.get(camera) or SPECS["中景"]``
+    对任何复合写法都回落到**中景规格** —— 于是生成端给「特写推入」的镜头写的是
+    「中景：腰部以上至头顶」，而质检端读的是字面「特写」，两端同时错位，
+    实测分镜图质检通过率仅 57%、失败原因几乎全是「景别不符」。
+    """
+    s = str(camera or "").strip()
+    if not s:
+        return "中景"
+    if s in SHOT_CAMERA_SPECS:
+        return s
+    for k in _CAMERA_KEY_ORDER:
+        if k in s:
+            return k
+    # 只有运镜词（如「拉远」「推入」）没有景别时，按中景处理
+    return "中景"
+
+
+def camera_spec(camera) -> str:
+    """取景别（镜头类型）的**权威判定标准**（生成端与质检端共用同一份）
+
+    见 :func:`camera_key` 说明：必须能解析复合写法，否则两端标准会错位。
+    """
+    return SHOT_CAMERA_SPECS[camera_key(camera)]
+
+
 SHOT_ACTION_SUFFIX = ("；上述动作必须完整、明确地表现出来（动作结果一眼可辨，如道具已收起、已离开手部），"
                       "不得省略、弱化或只做出起始姿态")
+
 # 提示词所在字段（CLIPTextEncode.text / TextEncodeQwenImageEditPlus.prompt）
 PROMPT_TEXT_FIELDS = ("text", "prompt")
 # 需要剥离的 LoadImage* 前端显示后缀
@@ -1049,6 +1090,114 @@ class ComfyUIClient:
             result.append((key, load_id))
         return result
 
+    # 画面光源/时间要素 → 分镜图光影引导（从镜头描述/风格里抽取）
+    # 历史缺陷：描述里的「黄昏/阴雨/烛光/月光」等光影要素没有独立成句，模型容易忽略，
+    # 导致分镜图与视频在光源上不一致（视频有日落、分镜图却是正午平光）。
+    _LIGHT_KEYWORDS: Sequence[Tuple[str, str]] = (
+        ("黄昏", "黄昏暖调逆光，长影拉长，天空带橙色到紫色的渐变"),
+        ("傍晚", "傍晚蓝调过渡光，暖色点光源，整体氛围静谧"),
+        ("清晨", "清晨低角度柔光，冷色空气透视，露珠微光"),
+        ("黎明", "黎明前冷蓝色调，地平线微光，薄雾弥漫"),
+        ("正午", "正午顶光，高对比度，阴影短而清晰"),
+        ("午夜", "午夜深蓝冷调，月光为主光源，高反差明暗"),
+        ("夜晚", "夜晚冷蓝月光，点光源（灯笼/烛火/灯光）与大面积暗部对比"),
+        ("深夜", "深夜冷色调，微弱月光，暗部深沉"),
+        ("雨夜", "雨夜冷蓝调，湿润反光，光源被雨幕柔化"),
+        ("雨天", "阴雨天漫射光，低对比度，天空阴沉，地面反光"),
+        ("阴天", "阴天漫射柔光，低对比度，色调偏冷"),
+        ("雪天", "雪天高亮漫射光，蓝白冷调，雪地反光强烈"),
+        ("雪夜", "雪夜冷蓝调，雪面反光与暗部高反差"),
+        ("雾天", "雾天漫射光，空间透视感强，远景模糊"),
+        ("云雾", "云雾缭绕的漫射光，空气透视，光柱穿透"),
+        ("烛光", "烛火暖光为主光源，暖黄光晕，暗部偏冷形成对比"),
+        ("烛火", "烛火暖光为主光源，暖黄光晕，暗部偏冷形成对比"),
+        ("火光", "火光照明的暖橙色调，明暗对比强烈，火苗跳动"),
+        ("灯笼", "灯笼暖光点缀，暖红与冷夜蓝形成色彩对比"),
+        ("月光", "清冷月光为主光源，银蓝色调，轮廓光清晰"),
+        ("油灯", "油灯暖光，低照度，柔和暖黄与深褐暗部"),
+        ("晨光", "晨光低角度暖调，长影与空气透视"),
+        ("夕照", "夕照暖红金调，逆光剪影，天空燃烧感"),
+        ("窗光", "窗户透入的定向侧光，光斑与明暗分割线清晰"),
+        ("闪电", "闪电冷白瞬间光，高反差，明暗交替"),
+    )
+    # 镜头描述里没出现光源词时，按情绪给一个中性光影基线（避免模型自由发挥）
+    _LIGHT_EMOTION_FALLBACK: Sequence[Tuple[str, str]] = (
+        ("阴郁", "冷调低饱和光，阴影浓重"),
+        ("悲伤", "冷灰漫射光，低反差，情绪压抑"),
+        ("恐惧", "冷蓝硬光，明暗撕裂，光源方向明确"),
+        ("紧张", "高对比硬光，光源方向清晰"),
+        ("温暖", "暖色柔光，低反差，光线柔和"),
+        ("平静", "自然柔光，明暗过渡自然，光线均匀"),
+    )
+
+    @staticmethod
+    def _merge_visual_detail(desc: str, detail: str) -> str:
+        """把 visual_detail 并入画面主体，**已出现在 desc 里的分句不再重复追加**。
+
+        不能简单 `f"{desc}。{detail}"`：提示词分析器写 storyboard_prompt_zh 时也会消费
+        visual_detail（见 script_prompt_analyzer.build_shot_prompt），两条来源叠加会把同一句
+        细节写两遍 —— 分镜图提示词里重复描述会放大该要素、干扰构图。
+        """
+        desc = str(desc or "").strip()
+        detail = str(detail or "").strip()
+        if not detail:
+            return desc
+        if not desc:
+            return detail
+        if detail in desc:
+            return desc
+        segs = [s.strip() for s in detail.replace("。", "，").split("，")]
+        add = [s for s in segs if s and s not in desc]
+        if not add:
+            return desc
+        # desc 已以句末标点收尾时不再补「。」，否则会出现「。。」
+        sep = "" if desc.endswith(("。", "！", "？", "…")) else "。"
+        return f"{desc}{sep}{'，'.join(add)}"
+
+    @staticmethod
+    def _light_hint_covered(hint: str, text: str) -> bool:
+        """判断光影提示语是否已被文本覆盖（幂等，避免同一束光写两遍）。
+
+        只比对**完整提示语是不是子串**是不够的：剧本阶段写进 visual_detail 的往往是
+        「黄昏暖调逆光」这种**首段短语**，而不是整条「黄昏暖调逆光，长影拉长，天空带
+        橙色到紫色的渐变」。此时整条比对不命中 → 又追加一次 → 分镜图提示词里同一束光
+        出现两遍（实测 shot2：黄昏暖调逆光 出现 2 次）。
+        因此这里同时比对首段（第一个「，」之前），任一命中即视为已覆盖。
+        """
+        if not hint or not text:
+            return False
+        if hint in text:
+            return True
+        head = hint.split("，", 1)[0].strip()
+        return bool(head) and head in text
+
+    @staticmethod
+    def _extract_light_hint(shot: dict) -> str:
+        """从镜头描述/情绪里抽取光影引导；无命中返回空串（不强行加光影）。
+
+        幂等：若命中的光影提示语（或它的首段短语）已经出现在文本里，说明画面细节
+        已承载光源，不再重复追加。
+        """
+        text = " ".join([
+            str(shot.get("description") or ""),
+            # storyboard_prompt_zh 会顶替 description 成为画面主体（见 build_storyboard_prompt），
+            # 必须一起扫描：否则分析器已写明「黄昏逆光」时识别不到 → 再叠一条光影氛围句。
+            str(shot.get("storyboard_prompt_zh") or ""),
+            str(shot.get("visual_detail") or ""),
+            str(shot.get("audio_cues") or ""),
+            str(shot.get("emotion") or ""),
+        ])
+        if not text.strip():
+            return ""
+        for kw, hint in ComfyUIClient._LIGHT_KEYWORDS:
+            if kw in text:
+                return "" if ComfyUIClient._light_hint_covered(hint, text) else hint
+        emotion = str(shot.get("emotion") or "").strip()
+        for kw, hint in ComfyUIClient._LIGHT_EMOTION_FALLBACK:
+            if kw in emotion:
+                return "" if ComfyUIClient._light_hint_covered(hint, text) else hint
+        return ""
+
     @staticmethod
     def build_storyboard_prompt(shot: dict, ref_labels: List[str] = None) -> str:
         """按镜头剧情描述构建分镜图（Qwen Edit 多参考图）中文提示词"""
@@ -1057,8 +1206,23 @@ class ComfyUIClient:
             parts.append("参考图用途：" + "；".join(ref_labels) + "。")
         location = shot.get("location", "")
         camera = str(shot.get("camera") or "中景").strip()
-        cam_spec = SHOT_CAMERA_SPECS.get(camera) or SHOT_CAMERA_SPECS["中景"]
-        desc = (shot.get("description") or "").strip()
+        cam_spec = camera_spec(camera)   # 复合写法（特写推入等）必须解析，不能精确匹配回落中景
+        # 画面内容优先级：
+        # 1) storyboard_prompt_zh —— 提示词分析器**专门为该镜分镜图**写的中文提示词。
+        #    历史缺陷：这个字段只写不读，用户花了 token 生成却从未生效（白花钱）。
+        #    这里真正接上，但只替换「画面内容」主体，景别/参考图一致/无文字/风格
+        #    等硬约束仍由本函数的确定性脚手架保证，避免模型漏掉关键约束。
+        # 2) description —— 剧本自带的画面描述（默认路径）
+        # 3) visual_detail —— 剧本阶段保留的扩展画面细节（时间/天气/光源方向/动作过程补全）
+        #    历史缺陷：description 限长 200 字会把画面细节截断，这些信息不会进入分镜图提示词，
+        #    导致「动作完整、光影明确」的要求只能靠模型猜。这里把 visual_detail 作为补充并进画面主体。
+        desc = str(shot.get("storyboard_prompt_zh") or "").strip() \
+            or (shot.get("description") or "").strip()
+        detail = str(shot.get("visual_detail") or "").strip()
+        if detail and detail != desc:
+            # visual_detail 是描述被截断后的剩余细节，合并成完整画面主体。
+            # ⚠️ 用类名调用本类 staticmethod（裸名会去模块作用域找 → NameError）。
+            desc = ComfyUIClient._merge_visual_detail(desc, detail)
         parts.append(
             f"镜头{shot.get('shot_id', 1)}。**景别（必须严格遵守）：{camera}**——{cam_spec}。"
             + (f"场景：{location}。" if location else "")
@@ -1072,15 +1236,28 @@ class ComfyUIClient:
             )
         if shot.get("emotion"):
             parts.append(f"情绪氛围：{shot['emotion']}。")
-        # 风格与画幅：优先用镜头自带 style（由剧本阶段注入，来自用户与总控敲定的设定）；
-        # 历史缺陷：这里写死「国漫3D渲染风格，竖屏 9:16 构图」，用户换任何风格都不生效。
+        # 时间/天气/光源引导：从镜头描述里抽取「画面光线」要素，让分镜图光影符合镜头设定。
+        # 历史缺陷：画面描述里的「黄昏/阴雨/烛光」等光影要素没有独立成句，模型容易忽略，
+        # 导致分镜图与视频在光源上不一致（视频有日落、分镜图却是正午平光）。
+        # ⚠️ `_extract_light_hint` 是本类的 @staticmethod，在另一个 staticmethod 里
+        # **必须用类名调用**；写成裸名 `_extract_light_hint(shot)` 会去模块作用域找，
+        # 直接 NameError → 整集分镜图 100% 生成失败（实测雨夜归人 ep2 连续失败 2 次）。
+        light_hint = ComfyUIClient._extract_light_hint(shot)
+        if light_hint:
+            parts.append(f"光影氛围：{light_hint}。")
+        # 风格与画幅：一律以镜头自带 style（由剧本阶段注入，来自用户与总控敲定的设定）为准。
+        # 历史缺陷：这里写死「国漫3D渲染风格，竖屏 9:16 构图」，用户换任何风格都不生效；
+        # 现在无风格时**不再硬编码**，改为不声明风格并显式提示（让上游补风格，而不是悄悄
+        # 把用户设定替换成国漫）。style_clause 的拼接仍由 style_kit 负责，保证幂等不重复。
         style_clause = ""
         shot_style = style_kit.normalize_style(shot.get("style"))
         if shot_style:
             clause = style_kit.style_suffix(shot_style, head="画面风格", with_tail=False)
             style_clause = f"{clause}；" if clause else ""
         else:
-            style_clause = "国漫3D渲染风格；"
+            style_clause = "画面风格以参考图为准，不得自行改变画风；"
+            logger.warning("镜头 %s 缺少 style（分镜图提示词将不声明风格，建议补齐剧本 style）",
+                           shot.get("shot_id"))
         parts.append(
             "要求：画面中人物的脸型、发型、服装、配饰与角色参考图完全一致，"
             "物品的形状、材质、颜色与物品参考图一致，环境氛围与场景参考图一致；"
@@ -1632,77 +1809,90 @@ class ComfyUIClient:
                 "timeout": timeout, "template": tpl_name,
                 "validate_report": report}
 
-    def _build_h3_prompt(self, shot: dict, char_refs: List[dict], scene_refs: List[dict],
-                         storyboard_ref: dict = None) -> str:
-        """构建 H3 Ref2VA 提示词（参考用户已验证的提示词结构）
+    @staticmethod
+    def _h3_picture_defs(char_refs: List[dict], scene_refs: List[dict],
+                         storyboard_ref: dict = None):
+        """把参考图列表映射成 H3 的 ``(<Picture N>, 用途说明)`` 与 ``<Subject N>`` 定义
 
-        storyboard_ref 不为空时，参考图语义切换为：
-            <Picture 1> = 该镜头的分镜图（画面构图 / 场景 / 人物姿态基准）
-            <Picture 2> = 主角外观锚点
+        语义约定：
+            storyboard_ref 非空 → <Picture 1> = 分镜图（构图/景别/机位/人物姿态基准）
+                                  <Picture 2> = 主角外观锚点
+            否则                 → <Picture 1..n> = 角色外观锚点，其后为场景环境参考
         """
-        lines = ["subject_definitions:"]
+        picture_defs: List[tuple] = []
+        subjects: List[Dict[str, str]] = []
+
+        def _appearance(ref: dict) -> str:
+            return str(ref.get("appearance") or ref.get("description")
+                       or ref.get("reference_prompt_zh") or "").strip()[:120]
+
         if storyboard_ref:
             sb_name = storyboard_ref.get("name") or "本镜头分镜图"
-            lines.append(
-                f"<Picture 1> is the storyboard keyframe of this shot, defining the "
-                f"composition, framing, camera angle, environment and character pose."
-            )
+            picture_defs.append((
+                "<Picture 1>",
+                f"该镜头的分镜图（{sb_name}），定义本镜的构图、景别、机位、环境与人物姿态"))
             main = (char_refs or [{}])[0]
-            lines.append(
-                f"<Picture 2> is the reference image defining the appearance, costume "
-                f"and style of {main.get('name', '主角')}, and must stay consistent with <Picture 1>."
-            )
-            for i, ref in enumerate(char_refs[:1]):
-                lines.append(f"<Subject {i + 1}> is {ref.get('name', '主角')} — {ref.get('appearance', '')}")
-            lines.append("")
-            lines.append("detailed_description:")
-            lines.append(
-                f"[镜头{shot.get('shot_id', 1)}, 0-{shot.get('duration', 5)}秒] "
-                f"{shot.get('camera', '中景')}。以 <Picture 1> 分镜画面为构图基准，"
-                f"保持场景、人物位置与动作一致，生成连贯动态镜头。"
-                f"{(shot.get('description') or '').strip()}"
-            )
-            if _dlg_text(shot.get("dialogue")):
-                # 只给说话状态提示，严禁把台词原文写进提示词（H3 会把它渲染成画面内字幕）
-                lines.append(
-                    f"说话状态：{_dlg_speaker(shot.get('dialogue')) or '人物'}正在低声说一句短句，"
-                    f"仅表现为自然的口型开合与细微表情（情绪：{shot.get('emotion') or '平静'}）；"
-                    f"画面中严禁出现任何文字、字幕、台词文本、水印或标识。"
-                )
-            lines.append(f"风格：{shot.get('style', '3D动漫渲染')}，画面流畅稳定，无畸形。")
-            return "\n".join(lines)
+            if main.get("name"):
+                picture_defs.append((
+                    "<Picture 2>",
+                    f"{main.get('name')} 的外观参考，定义其五官、发型、服装与画风，"
+                    f"必须与 <Picture 1> 保持同一人物"))
+            for ref in (char_refs or [])[:1]:
+                subjects.append({"name": ref.get("name", "主角"),
+                                 "appearance": _appearance(ref)})
+            return picture_defs, subjects
 
-        for i, ref in enumerate(char_refs[:2]):
-            name = ref.get("name", f"角色{i + 1}")
-            lines.append(
-                f"<Picture {i + 1}> is the reference image defining the appearance, "
-                f"costume and style of {name}, and serves as the composition anchor "
-                f"for their on-screen shots."
-            )
-        scene_count = len(char_refs[:2])
-        for i, ref in enumerate(scene_refs[:1]):
-            name = ref.get("name", f"场景{i + 1}")
-            lines.append(
-                f"<Picture {scene_count + i + 1}> is the reference image defining "
-                f"the environment and atmosphere of {name}."
-            )
-        for i, ref in enumerate(char_refs[:2]):
-            name = ref.get("name", f"角色{i + 1}")
-            appearance = ref.get("appearance", "")
-            lines.append(f"<Subject {i + 1}> is {name} — {appearance}")
+        for ref in (char_refs or [])[:2]:
+            name = ref.get("name", f"角色{len(picture_defs) + 1}")
+            picture_defs.append((
+                f"<Picture {len(picture_defs) + 1}>",
+                f"{name} 的外观参考，定义其五官、发型、服装与画风，"
+                f"并作为其出场镜头的构图锚点"))
+            subjects.append({"name": name, "appearance": _appearance(ref)})
+        for ref in (scene_refs or [])[:1]:
+            name = ref.get("name", f"场景{len(picture_defs) + 1}")
+            picture_defs.append((
+                f"<Picture {len(picture_defs) + 1}>",
+                f"{name} 的环境参考，定义场景结构、材质氛围与光照基调"))
+        return picture_defs, subjects
 
-        lines.append("")
-        lines.append("detailed_description:")
-        lines.append(
-            f"[镜头{shot.get('shot_id', 1)}, 0-{shot.get('duration', 5)}秒] "
-            f"{shot.get('camera', '中景')}。{shot.get('description', '')}"
-        )
-        if _dlg_text(shot.get("dialogue")):
-            # 只给说话状态提示，严禁把台词原文写进提示词（H3 会把它渲染成画面内字幕）
-            lines.append(
-                f"说话状态：{_dlg_speaker(shot.get('dialogue')) or '人物'}正在低声说一句短句，"
-                f"仅表现为自然的口型开合与细微表情（情绪：{shot.get('emotion') or '平静'}）；"
-                f"画面中严禁出现任何文字、字幕、台词文本、水印或标识。"
-            )
-        lines.append(f"风格：{shot.get('style', '3D动漫渲染')}，画面流畅稳定，无畸形。")
-        return "\n".join(lines)
+    def resolve_h3_prompt(self, shot: dict, char_refs: List[dict],
+                          scene_refs: List[dict], storyboard_ref: dict = None) -> str:
+        """生成期**权威**的 H3 提示词入口（修「薄英文顶掉结构化构建器」）
+
+        择优规则：
+        - 剧本里已有 ``prompt_h3`` 且通过 :func:`h3_prompt_kit.validate`
+          （六段/三段齐全）→ 直接采用（LLM 写的散文通常更生动）
+        - 不合规（历史裸英文句、缺段）→ 用规范构建器重建，并把旧文本并入
+          ``detailed_description`` 作补充细节，信息不丢
+
+        为什么不能让旧的 ``prompt_h3`` 直接生效：H3 走 Ref2VA，提示词必须带
+        ``<Picture N>`` 标签告诉模型每张参考图的用途；而剧本阶段的 LLM 根本
+        不知道最终配了几张图，只能写出一句无标签的裸英文 —— 实测全项目 200+
+        镜头的结构化提示词数量为 0，出片与设定严重不符。
+        """
+        shot = shot or {}
+        picture_defs, subjects = self._h3_picture_defs(char_refs, scene_refs, storyboard_ref)
+        style = h3_prompt_kit.style_of(shot)
+        if not picture_defs:
+            built = h3_prompt_kit.build_base(shot, "T2VA", style=style)
+            existing = str(shot.get("prompt_h3") or "").strip()
+            if not existing:
+                return built
+            verdict = h3_prompt_kit.validate(existing)
+            return existing if verdict["valid"] else h3_prompt_kit.merge_detail(built, existing)
+        return h3_prompt_kit.resolve(shot, picture_defs, subjects, style=style)
+
+    def _build_h3_prompt(self, shot: dict, char_refs: List[dict], scene_refs: List[dict],
+                         storyboard_ref: dict = None) -> str:
+        """构建规范 H3 Ref2VA 提示词（无条件重建，忽略剧本里的既有 prompt_h3）
+
+        需要一个「干净重建」的调用点时用它（例如风格纠偏重试）；日常生成请用
+        :meth:`resolve_h3_prompt`，后者会优先尊重已合规的既有提示词。
+        """
+        shot = shot or {}
+        picture_defs, subjects = self._h3_picture_defs(char_refs, scene_refs, storyboard_ref)
+        style = h3_prompt_kit.style_of(shot)
+        if not picture_defs:
+            return h3_prompt_kit.build_base(shot, "T2VA", style=style)
+        return h3_prompt_kit.build_ref2va(shot, picture_defs, subjects, style=style)

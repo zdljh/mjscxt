@@ -24,6 +24,7 @@ from datetime import datetime
 from llm_client import LLMError, LLMTruncatedError, LLMGatewayUnavailable
 from dialogue_utils import dialogue_text as _dlg_text, normalize_lines as _dlg_lines
 import style_kit
+import h3_prompt_kit
 
 logger = logging.getLogger(__name__)
 
@@ -422,13 +423,13 @@ def build_bible(client, outlines: list, novel_title: str, style: str, episodes: 
   "title": "剧名（4-12 字）",
   "theme": "一句话主题/卖点（30 字以内）",
   "style": "{style}",
-  "characters": [{{"name": "姓名", "age": "年龄", "identity": "身份/阵营（15 字以内）", "appearance": "外貌（含发色/瞳色/标志特征，60 字以内；若上方设定库已锁定则该字段必须与锁定值逐字一致）", "outfit": "本集服装状态（20 字以内，与上集结尾一致；若本集确有换装必须体现原因）", "personality": "性格（30 字以内）", "voice_style": "配音风格（15 字以内）", "reference_prompt_zh": "中文参考图提示词：角色三视图设定图描述，60 字以内，**必须在末尾原样带上【风格要求】里的风格词**", "reference_prompt_en": "English prompt for character reference sheet, under 40 words, ending with the style keywords"}}],
-  "items": [{{"name": "物品名", "category": "武器/法宝/道具/服饰", "appearance": "外观（50 字以内）", "owner": "持有人", "importance": "重要/临时（重要=后续章节会重复出现或推动剧情，临时=仅本集使用），只输出重要道具", "reference_prompt_zh": "中文参考图提示词，50 字以内，**必须在末尾原样带上【风格要求】里的风格词**", "reference_prompt_en": "English prompt, under 35 words, ending with the style keywords"}}],
-  "scenes": [{{"name": "场景名", "location": "地点类型", "appearance": "环境与氛围（60 字以内）", "reference_prompt_zh": "中文参考图提示词，50 字以内，**必须在末尾原样带上【风格要求】里的风格词**", "reference_prompt_en": "English prompt, under 35 words, ending with the style keywords"}}],
+  "characters": [{{"name": "姓名", "age": "年龄", "identity": "身份/阵营（15 字以内）", "appearance": "外貌（含发色/瞳色/标志特征，60 字以内；若上方设定库已锁定则该字段必须与锁定值逐字一致）", "outfit": "本集服装状态（20 字以内，与上集结尾一致；若本集确有换装必须体现原因）", "personality": "性格（30 字以内）", "voice_style": "配音风格（15 字以内）", "reference_prompt_zh": "中文参考图提示词：角色三视图设定图，60 字以内，只写画面可见的具体特征——发色发型、瞳色、脸型、服装款式与材质配色、标志配饰、三视图版式；**严禁写任何风格词/画风词/质量词**（如「国漫」「3D渲染」「电影级」「高清」「精致」）", "reference_prompt_en": "English prompt for a character reference sheet with three views, under 45 words, comma-separated CONCRETE visual keywords (hair color and style, eye color, face shape, outfit material and colors, signature accessories, view layout). It MUST be an accurate translation of reference_prompt_zh. Never romanize Chinese concepts into invented pinyin (「国漫」 must become 'Chinese animated style', NOT 'xuanxuan'); never write style or quality words — the program appends them"}}],
+  "items": [{{"name": "物品名", "category": "武器/法宝/道具/服饰", "appearance": "外观（50 字以内）", "owner": "持有人", "importance": "重要/临时（重要=后续章节会重复出现或推动剧情，临时=仅本集使用），只输出重要道具", "reference_prompt_zh": "中文参考图提示词，50 字以内，只写形制、材质、颜色、纹样与磨损状态；**严禁写风格词/画风词/质量词**", "reference_prompt_en": "English prompt for an item prop sheet, under 40 words, comma-separated concrete visual keywords (shape, material, color, pattern, wear). Accurate translation of reference_prompt_zh; no invented pinyin, no style or quality words"}}],
+  "scenes": [{{"name": "场景名", "location": "地点类型", "appearance": "环境与氛围（60 字以内）", "reference_prompt_zh": "中文参考图提示词，50 字以内，只写空间结构、建筑形制、时间天气、光源方向与色调；**严禁写风格词/画风词/质量词**（且不要出现人物）", "reference_prompt_en": "English prompt for an environment concept art sheet, under 40 words, comma-separated concrete visual keywords (spatial layout, architecture, time of day and weather, light direction, color palette, no people). Accurate translation of reference_prompt_zh; no invented pinyin, no style or quality words"}}],
   "production_notes": {{"style_guide": "画面与叙事风格说明（60 字以内）"}}
 }}
 【硬性约束】characters 最多 6 个（只保留主要角色，按戏份排序）；items 最多 5 个；scenes 最多 6 个；不要输出示例里的占位文字。若上方提供了「项目级设定库」，则已登记角色的 name / appearance / personality 必须与该库完全一致（禁止改名、禁止改外观），只允许更新 outfit（当前服装状态）。
-【风格红线】characters / items / scenes 三个数组里**每一条** reference_prompt_zh 的结尾都必须逐字包含【风格要求】的完整风格描述；缺了风格词的条目视为不合格输出。
+【风格红线·重要变更】风格词由**程序在生成前统一追加**（幂等，不会重复），不再由你写。因此 characters / items / scenes 三个数组里每一条 reference_prompt_zh 与 reference_prompt_en **都不得自行写风格词、画风词或质量词**——自己写了会导致风格在提示词里出现两遍（实测就是「中国古风玄幻漫剧风格。风格：中国古风玄幻漫剧，画面精致…」这种重复），属于不合格输出。你只需专注描述画面里看得见的具体特征，把风格判断交给程序。
 【格式红线】直接以 {{ 作为输出的第一个字符；严禁输出任何推理过程、思考草稿、英文说明、markdown 代码块标记或前后缀解释文字；整个 JSON 输出控制在 1200 字以内（字段描述能短则短）。"""
     bible_retry_kw = {"max_attempts": 4, "token_ladder": (6000, 8192, 16384, 24576)}
     data = {}
@@ -491,7 +492,7 @@ def _fallback_bible(outlines: list, novel_title: str, style: str) -> dict:
     eff = style_kit.normalize_style(style)
     if eff:
         for group in (out_chars, out_items, out_scenes):
-            style_kit.apply_asset_style(group, eff)
+            style_kit.apply_asset_style_all(group, eff)
     return {
         "title": (novel_title or "")[:20],
         "theme": "",
@@ -532,7 +533,8 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
 【本段剧情摘要】{outline.get('summary', '')}
 【本段情节要点】{json.dumps(outline.get('key_beats') or [], ensure_ascii=False)}
 【输出要求】严格只输出一个 JSON 对象，不要 markdown 代码块、不要解释文字，结构如下：
-{{"shots": [{{"camera": "景别+运镜（必须取自上方运镜术语表，如 中景跟拍/特写推入，10 字以内）", "location": "所属场景名（必须来自可用场景）", "description": "画面内容描述（80 字以内，写清人物动作、外貌衣着、环境光线与画面构图，尽量沿用原文措辞）", "narration": "旁白文本（承载原文的心理活动/背景补叙/环境描写，尽量照原文措辞，60 字以内；会被合成进成片，无台词的镜头必须填。确实无需旁白时写空字符串，但不得与 dialogue 同时为空）", "dialogue": [{{"speaker": "说话角色名（必须与可用角色完全一致）", "text": "该角色台词（≤60 字，原文对话尽量原样保留）"}}], "emotion": "情绪（8 字以内）", "audio_cues": "音效/配乐提示（60 字以内；旁白请以「旁白:」开头）", "characters_in_shot": ["出场角色名"], "items_in_shot": ["出场物品名"], "prompt_h3": "英文画面描述（60 词以内，描述主体、动作、环境、光线、运镜）"}}]}}
+{{"shots": [{{"camera": "景别+运镜（必须取自上方运镜术语表，如 中景跟拍/特写推入，10 字以内）", "location": "所属场景名（必须来自可用场景）", "description": "画面内容描述（80 字以内，写清人物动作、表情与关键构图；四个要素缺一不可：①人物动作过程（谁做了什么、怎么做的）②外貌衣着细节（发型/瞳色/服装材质/配饰）③环境与光线（时间、天气、光源方向、色调）④构图与景别（人物在画面中的位置、前中后景关系）；尽量沿用原文措辞）", "visual_detail": "画面补充细节（可选；当 description 之外还有更细的时间/天气/光源方向/动作过程/环境细节时写在这里，80 字以内；没有多余细节时写空字符串）", "narration": "旁白文本（承载原文的心理活动/背景补叙/环境描写，尽量照原文措辞，60 字以内；会被合成进成片，无台词的镜头必须填。确实无需旁白时写空字符串，但不得与 dialogue 同时为空）", "dialogue": [{{"speaker": "说话角色名（必须与可用角色完全一致）", "text": "该角色台词（≤60 字，原文对话尽量原样保留）"}}], "emotion": "情绪（8 字以内）", "audio_cues": "音效/配乐提示（60 字以内；旁白请以「旁白:」开头）", "characters_in_shot": ["出场角色名"], "items_in_shot": ["出场物品名"]}}]}}
+【禁止输出 prompt_h3 字段】视频提示词由程序在生成阶段按 H3 规范自动构建（它会结合当次实际传入的参考图，生成 subject_definitions / summary / retention_analysis / detailed_description / overall_soundscape / non_diegetic_music 六段）。你在剧本阶段并不知道最终配几张参考图，写出来的英文提示词缺少 <Picture N> 标签，反而会覆盖规范提示词导致出片偏离设定。因此**不要写 prompt_h3、不要写英文提示词**；把画面信息全部写进 description 即可。
 【台词要求】dialogue 必须是数组，数组元素为 {{"speaker": 角色名, "text": 台词}}；speaker 必须精确等于「可用角色」中的名字，禁止写“旁白/众人”等未登记角色；无台词的镜头 dialogue 写 []（空数组），禁止写成字符串或 null。
 【音轨不空约束（每镜必须有人声）】成片配音链路只读 dialogue 与 narration；audio_cues 里写「雨声」「风声」这类音效**不会产生任何人声**。因此每个镜头必须满足其中之一：① dialogue 至少 1 条台词；② narration 有实质文字（**不少于 8 个字**，承载该镜的心理/背景/环境旁白，会被合成进成片）。**严禁 narration 与 dialogue 同时为空**——那会形成「静默镜」，成片到该镜头完全无声（实测曾出现 24 镜里 18 镜无声）。纯画面/纯动作镜头（无台词）必须补写 narration，把该镜发生了什么讲出来。
 【硬性约束】shots 数组元素个数必须在 {shots_target} ~ {shots_cap} 之间：上方原文的全部情节都要落到镜头里，不得删减情节、不得跳过段落、不得合并概括（内容多时用更多镜头承载，而不是少写镜头）；name 字段必须与上面「可用角色/物品/场景」中的名字完全一致，不要新造名字。若上方给出「本集必须出现的原文金句」，必须把每句**原样**写进对应角色的 dialogue.text（不得改写、不得拆分、不得省略）。上一集已发生的事件禁止在本集重演。
@@ -645,11 +647,23 @@ SHOT_DURATION_MAX = 12.0         # 单镜头最长秒数
 SHOT_DURATION_SILENT = 3.0       # 无台词的纯画面镜头基准秒数
 CHARS_PER_SECOND = 4.5           # 中文配音语速基准（字/秒），用于按台词长度推算镜头时长
 
+# 动作镜识别词：description 命中任意一个即给画面停留时间加成（动作戏观感不仓促）
+_ACTION_MARKERS = (
+    "冲", "扑", "挥", "劈", "斩", "刺", "砍", "击", "踢", "打", "斗", "抓", "抛", "掷",
+    "跳", "跃", "翻", "滚", "追", "逃", "跑", "奔", "飞", "坠", "落", "闪", "避", "挡",
+    "拔", "抽", "掷", "掐", "捏", "撕", "扯", "推", "撞", "擒", "锁", "绞", "轰", "炸",
+    "施法", "结印", "御剑", "掐诀", "催动", "爆发", "猛冲", "疾驰",
+)
+
 
 def estimate_shot_duration(shot: dict) -> float:
     """按画面 + 台词长度自动推算单镜头时长（秒），保证同一剧本多次运行结果稳定。
 
     台词兼容两种写法：结构化 [{"speaker","text"}] / 旧字符串（含 "角色名：台词" 前缀）。
+
+    2026-09-19 优化：纯动作/无台词镜头不再一律给 3 秒 ——
+    - description 里动作要素越多（动词/动作过程词），画面停留越久（动作镜需要呈现完整过程）；
+    - 动作描写长的镜头（描述超 60 字）给更高基准，避免「动作才做一半就切走」。
     """
     dialogue = _dlg_text(shot.get("dialogue"))
     dialogue = re.sub(r"^[^：:]{1,12}[：:]", "", dialogue)          # 去掉“角色名：”前缀
@@ -659,8 +673,21 @@ def estimate_shot_duration(shot: dict) -> float:
         # 一句 60 字旁白（≈13 秒）会硬贴在 3 秒画面上 → 音画错位、旁白被截断。
         dialogue = str(shot.get("narration") or "").strip()
     speak_sec = len(dialogue) / CHARS_PER_SECOND if dialogue else 0.0
-    desc_sec = min(2.0, len(str(shot.get("description") or "")) / 60.0)
-    raw = SHOT_DURATION_SILENT + speak_sec + desc_sec
+
+    desc = " ".join(x for x in (
+        str(shot.get("description") or ""),
+        str(shot.get("visual_detail") or ""),
+    ) if x).strip()
+    desc_sec = min(2.0, len(desc) / 60.0)
+    # 动作复杂度加成：description 里动作过程词/动词越多，画面越需要停留时间。
+    # 历史缺陷：动作镜与静景镜一律 3 秒基准，动作戏（打斗/追逐/施法）观感仓促。
+    action_sec = 0.0
+    if desc:
+        action_hits = sum(1 for kw in _ACTION_MARKERS if kw in desc)
+        if action_hits:
+            action_sec = min(1.5, 0.4 + action_hits * 0.15)
+
+    raw = SHOT_DURATION_SILENT + speak_sec + desc_sec + action_sec
     value = max(SHOT_DURATION_MIN, min(SHOT_DURATION_MAX, raw))
     return round(value * 2) / 2.0                                    # 取整到 0.5 秒
 
@@ -745,6 +772,35 @@ def build_chapter_coverage_meta(shots: list, chars_per_shot: int = CHARS_PER_SHO
             "capacity_chars": capacity, "verified": False}
 
 
+def _keep_valid_h3(raw) -> str:
+    """只保留结构合规的 H3 提示词，其余丢弃
+
+    合规 = 六段式（Ref2VA）或三段式（base）齐全，见 :mod:`h3_prompt_kit`。
+    剧本阶段模型写的裸英文描述必然不合规，会被丢弃；提示词分析器产出的
+    规范文本会被保留，用户的「重新生成提示词」成果不会被下一次 script
+    归一化抹掉。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    try:
+        return text if h3_prompt_kit.validate(text)["valid"] else ""
+    except Exception:  # noqa: BLE001 —— 校验失败不应影响剧本生成主流程
+        return ""
+
+
+def _overflow_detail(raw, limit: int) -> str:
+    """把超长描述的「超出部分」拆出来（不丢画面细节，供 visual_detail 使用）。
+
+    - 空串 / 未超长 → 返回空串（visual_detail 不重复 description）；
+    - 超长 → 从第 limit 个字符开始截取，去头尾空白，限 400 字。
+    """
+    s = str(raw or "").strip()
+    if len(s) <= int(limit):
+        return ""
+    return s[int(limit):].strip()[:400]
+
+
 def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) -> list:
     scenes = [s.get("name") for s in (bible.get("scenes") or []) if isinstance(s, dict)]
     chars = [c.get("name") for c in (bible.get("characters") or []) if isinstance(c, dict)]
@@ -768,14 +824,31 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
             "duration": 5,
             "camera": str(s.get("camera") or "中景").strip()[:20] or "中景",
             "location": loc,
+            # description：限长 200 字（前端展示与 prompt 体量控制用）。
+            # 但画面细节不丢：原始描述若超长，把超出的部分拆进 visual_detail（分镜图/视频
+            # 提示词会把它并回画面主体）。历史缺陷：description 截断 200 字后剩余细节
+            # 直接丢失，导致「动作完整、光影明确」的要求只能靠模型猜。
             "description": str(s.get("description") or "").strip()[:200],
+            # visual_detail：优先用模型直接输出的字段（分镜 schema 已要求模型把超出
+            # description 的更细画面细节写这里）；模型没给时用 _overflow_detail 兜底
+            #（description 截断 200 字后的剩余部分）。供 build_storyboard_prompt /
+            # h3_prompt_kit 等下游取用。
+            "visual_detail": (str(s.get("visual_detail") or "").strip()[:400]
+                              or _overflow_detail(s.get("description"), 200)),
             # 旁白：承载原文心理/背景补叙/环境描写的原句措辞（只做体裁改写，不删减）
             "narration": str(s.get("narration") or "").strip()[:200],
             # 台词：结构化 [{"speaker","text"}]（分镜阶段直接写明说话人，配音链路直接读取）
             "dialogue": _dlg_lines(s.get("dialogue"), chars, chars),
             "emotion": str(s.get("emotion") or "平静").strip()[:20],
             "audio_cues": str(s.get("audio_cues") or "").strip()[:60],
-            "prompt_h3": str(s.get("prompt_h3") or "").strip(),
+            # 视频提示词：**剧本阶段不再信任模型自写的文本**。
+            # 历史缺陷：这里原样保留模型写的「英文画面描述（60 词以内）」，一句无
+            # <Picture N> 标签的裸英文，会在生成期把结构化 H3 构建器整个顶掉
+            #（app.py 原写法 `shot.get('prompt_h3') or _build_h3_prompt(...)`），
+            # 实测全项目 200+ 镜头的结构化提示词数量为 0。
+            # 现在只保留「本身已合规」的提示词（例如提示词分析器产出的六段式），
+            # 其余一律丢弃，交由生成期 h3_prompt_kit 按当次参考图规范重建。
+            "prompt_h3": _keep_valid_h3(s.get("prompt_h3")),
             "style": shot_style,          # ← 风格注入：分镜图/视频提示词的风格来源
             "characters_in_shot": [c for c in (s.get("characters_in_shot") or []) if c in chars] or chars[:1],
             "items_in_shot": [i for i in (s.get("items_in_shot") or []) if i in items],
@@ -914,11 +987,11 @@ def convert_novel_to_script(client, novel_meta: dict, novel_text: str, style: st
                         ["name", "location", "appearance", "reference_prompt_zh", "reference_prompt_en"])
     if not characters:
         raise LLMError("模型未返回有效角色设定，转换中止")
-    # 风格：以调用方传入的 style 为准 + 确定性补写（模型经常漏风格词）
+    # 风格：以调用方传入的 style 为准 + 确定性补写（模型不得自写风格，统一由此收尾）
     eff_style = style_kit.normalize_style(style) or style_kit.normalize_style(bible.get("style"))
-    style_filled = style_kit.apply_asset_style(characters, eff_style) \
-        + style_kit.apply_asset_style(items, eff_style) \
-        + style_kit.apply_asset_style(scenes, eff_style)
+    style_filled = style_kit.apply_asset_style_all(characters, eff_style) \
+        + style_kit.apply_asset_style_all(items, eff_style) \
+        + style_kit.apply_asset_style_all(scenes, eff_style)
     if eff_style and style_filled:
         logger.info("全剧设定：已为 %d 条资产参考提示词补写风格「%s」", style_filled, eff_style)
     bible = {"title": str(bible.get("title") or novel_title)[:40],
@@ -1228,10 +1301,10 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
         raise LLMError("模型未返回有效角色设定，转换中止")
     # 风格：以调用方传入的 style 为准（模型的返回值可能是自我发挥，用户意图优先）
     eff_style = style_kit.normalize_style(style) or style_kit.normalize_style(bible.get("style"))
-    # 确定性补写：模型经常漏风格词（实测角色/物品/场景三条全漏），这里兜底补一次
-    style_filled = style_kit.apply_asset_style(characters, eff_style) \
-        + style_kit.apply_asset_style(items, eff_style) \
-        + style_kit.apply_asset_style(scenes, eff_style)
+    # 确定性补写：模型不得自写风格词（写了会重复），统一在这里收尾，中英双语都补
+    style_filled = style_kit.apply_asset_style_all(characters, eff_style) \
+        + style_kit.apply_asset_style_all(items, eff_style) \
+        + style_kit.apply_asset_style_all(scenes, eff_style)
     if eff_style and style_filled:
         logger.info("第%s集：已为 %d 条资产参考提示词补写风格「%s」", episode_no, style_filled, eff_style)
     bible = {"title": str(bible.get("title") or novel_title)[:40],

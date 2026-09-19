@@ -31,7 +31,12 @@ from config import (
     KEYFRAME_CHAIN_MODE,
 )
 from script_generator import ScriptGenerator
-from comfyui_client import ComfyUIClient
+from comfyui_client import ComfyUIClient, camera_spec as _camera_spec
+# ⚠️ 注意：本文件里 `comfyui_client` 这个名字是**实例**（见下方 `comfyui_client = ComfyUIClient()`），
+# 不是模块。因此**模块级函数**（camera_spec / camera_key / get_call_stats 等）必须像上面这样
+# 直接 import 后用别名调用 —— 写成 `comfyui_client.camera_spec(...)` 会在运行时抛
+# AttributeError（实例上没有该属性）。类方法（_build_h3_prompt / generate_storyboard 等）
+# 通过实例调用没问题，已有的那种写法不用改。
 from video_postprocess import VideoPostProcessor, ensure_no_audio, ensure_audio_track
 from novel_parser import (
     SUPPORTED_EXTS, NovelParseError, ingest_novel, list_novels,
@@ -68,6 +73,7 @@ import upscale_client
 import tts_client
 import dub_mix
 import dialogue_utils
+import h3_prompt_kit
 import autonomous
 import ai_memory
 import prompt_memory
@@ -226,6 +232,18 @@ except Exception as _e:  # noqa: BLE001
 def _safe_project(name: str) -> str:
     """项目名安全化（与项目注册表的项目键规则保持一致）"""
     return project_store.safe_key(name)
+
+
+def _body() -> dict:
+    """统一取请求 body，**永不抛异常**（返回 ``{}`` 兜底）
+
+    为什么不用裸 ``request.json``：Flask 在 Content-Type 不是 application/json 时抛
+    ``UnsupportedMediaType``（415），body 非法 JSON 时抛 ``BadRequest``（400）。
+    这类错误会让接口以 4xx 结束，而不是「按缺参数处理并给出可读错误」——
+    用 ``curl -d '{}'``（默认表单 Content-Type）调就会直接 415，排查成本很高。
+    项目约定：所有取 body 的地方统一走这里。
+    """
+    return request.get_json(silent=True) or {}
 
 
 # ==========================================================================
@@ -593,7 +611,14 @@ def api_project_asset_detail(pid):
             "views": views, "exists": bool(views),
             "meta": {"shot": shot_meta, "manifest": manifest,
                      "description": shot_meta.get("description") or manifest.get("prompt") or "",
-                     "prompt": shot_meta.get("prompt_h3") or manifest.get("prompt") or "",
+                     # 分镜图提示词：优先给**实际用于分镜图生成**的那条
+                     # （build_storyboard_prompt 会优先采用 storyboard_prompt_zh / description，
+                     #   manifest.prompt 就是当时真正提交给 ComfyUI 的提示词）
+                     "prompt": (manifest.get("prompt")
+                                or shot_meta.get("storyboard_prompt_zh")
+                                or shot_meta.get("description") or ""),
+                     # 视频提示词单列，避免与分镜图提示词混在一个字段里
+                     "video_prompt": shot_meta.get("prompt_h3") or "",
                      "shot_id": shot_meta.get("shot_id") or (int(sid) if sid.isdigit() else sid),
                      "duration_sec": shot_meta.get("duration"),
                      "location": shot_meta.get("location"),
@@ -1765,8 +1790,10 @@ def api_video_retry_shot():
                 shot, char_refs, scene_refs, storyboard_ref={"name": f"shot_{seq}"})
         else:
             refs = ref_imgs
-            prompt = shot.get('prompt_h3') or comfyui_client._build_h3_prompt(
-                shot, char_refs, scene_refs)
+            # 择优：既有 prompt_h3 结构合规才采用，否则用规范构建器重建
+            # （历史缺陷：`shot.get('prompt_h3') or _build_h3_prompt(...)` 让
+            #  剧本里那句无参考图标签的裸英文把结构化提示词整个顶掉）
+            prompt = comfyui_client.resolve_h3_prompt(shot, char_refs, scene_refs)
         try:
             dur = float(shot.get('duration') or 5)
         except (TypeError, ValueError):
@@ -2002,7 +2029,7 @@ def api_i18n(lang):
 
 @app.route('/api/script/generate', methods=['POST'])
 def api_generate_script():
-    data = request.json
+    data = _body()
     theme = data.get('theme', '')
     episodes = data.get('episodes', 1)
     duration = data.get('duration', 60)
@@ -2137,7 +2164,8 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                             kind="asset",
                             prompt=orig_asset_prompt,
                             project=project_name,
-                            root_dir=PROJECT_OUTPUT_DIR
+                            root_dir=PROJECT_OUTPUT_DIR,
+                            style=_qc_style_of(project_name),
                         )
                         if learned and learned != orig_asset_prompt:
                             prompt_zh = learned
@@ -2332,7 +2360,7 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
 @app.route('/api/assets/generate', methods=['POST'])
 def api_generate_assets():
     """生成资产（角色/物品/场景，含多视角）"""
-    data = request.json
+    data = _body()
     asset_type = data.get('asset_type', '')  # character / item / scene
     project_name = _safe_project(data.get('project_name', 'project'))
     assets = data.get('assets', [])
@@ -2600,7 +2628,8 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                                     kind="storyboard",
                                     prompt=orig_prompt,
                                     project=project_name,
-                                    root_dir=PROJECT_OUTPUT_DIR
+                                    root_dir=PROJECT_OUTPUT_DIR,
+                                    style=_qc_style_of(project_name),
                                 )
                                 if learned and learned != orig_prompt:
                                     prompt = learned
@@ -2877,7 +2906,7 @@ def _norm_shot_key(key) -> str:
 
 @app.route('/api/videos/generate', methods=['POST'])
 def api_generate_videos():
-    data = request.json
+    data = _body()
     project_name = _safe_project(data.get('project_name', 'project'))
     shots = data.get('shots', [])
     character_refs = data.get('character_refs', [])
@@ -3026,7 +3055,8 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                     storyboard_ref={"name": f"shot_{sid}"})
             else:
                 refs = ref_imgs
-                prompt = shot.get('prompt_h3') or comfyui_client._build_h3_prompt(
+                # 择优：合规的既有 prompt_h3 直接用，否则规范重建（见 resolve_h3_prompt 说明）
+                prompt = comfyui_client.resolve_h3_prompt(
                     shot, character_refs, scene_refs)
             try:
                 dur = float(shot.get('duration') or 5)
@@ -3054,15 +3084,38 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
             eff_style = (shot.get("style") if shot else None) or _style_res.get("style") or ""
 
             # 整片 QC 门控回调：对 N 段一次生成出的单个连续整集视频抽帧质检
+            _ep_qc_attempt = {"n": 0}
+
             def _seg_qc_fn(video_path, shot_desc, cfg, style):
-                """QC 门控：对整片抽帧 → 多模态判定 → 返回 {"passed": bool, "verdict": {...}, "gate": {...}}"""
+                """QC 门控：对整片抽帧 → 多模态判定 → 返回 {"passed": bool, "verdict": {...}, "gate": {...}}
+
+                ⚠️ 两点与「单镜模式」必须对齐，否则整集模式（默认）会缺半边能力：
+                1) **镜头信息**：comfyui_client 传进来的是所有段 H3 提示词全文拼接
+                   （每段六段式，几十段叠一起）——又长又难判读。改用本集镜头摘要。
+                2) **教训沉淀**：此前整集模式只做 QC+门控、**从不写教训库**，
+                   于是「质检不达标 → 改提示词重生成」的闭环在最常用模式下完全断裂，
+                   重试只会换随机种子瞎撞。这里补齐 `_record_qc_lesson`。
+                """
+                _ep_qc_attempt["n"] += 1
                 fr_dir = os.path.join(QC_DIR, project_name, "frames",
                                       f"episode_full_{os.path.basename(video_path)}")
-                verdict = qc_client.check_video(video_path, shot_desc, cfg,
+                verdict = qc_client.check_video(video_path, _episode_qc_desc(shots), cfg,
                                                frames_dir=fr_dir,
                                                style=style)
                 gate = _qc_gate(verdict)
-                return {"passed": gate.get("accept", False), "verdict": verdict, "gate": gate}
+                passed = bool(gate.get("accept", False))
+                if not passed and verdict.get("ok"):
+                    try:
+                        rec = _qc_record_verdict(
+                            project_name, "video", episode_tag or "episode", "整片质检",
+                            _ep_qc_attempt["n"], None, video_path, verdict, style=style)
+                        # 挂上本集的段提示词集合，供下次重试时按相似度召回
+                        _record_qc_lesson(project_name, "video",
+                                          "\n".join((sg.get("prompt") or "") for sg in segs),
+                                          rec)
+                    except Exception as le:  # noqa: BLE001
+                        app.logger.warning("整片质检教训沉淀失败：%s", le)
+                return {"passed": passed, "verdict": verdict, "gate": gate}
 
             with lock:
                 generation_state[task_id].update({
@@ -3176,7 +3229,9 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                                 kind="video",
                                 prompt=orig_video_prompt,
                                 project=project_name,
-                                root_dir=PROJECT_OUTPUT_DIR)
+                                root_dir=PROJECT_OUTPUT_DIR,
+                                style=_qc_style_of(project_name),
+                            )
                             if learned and learned != orig_video_prompt:
                                 prompt = learned
                                 seg["prompt"] = prompt
@@ -3334,7 +3389,7 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
 
 @app.route('/api/final/video', methods=['POST'])
 def api_generate_final():
-    data = request.json
+    data = _body()
     project_name = _safe_project(data.get('project_name', 'project'))
     script_path = data.get('script_path', '')
 
@@ -4572,10 +4627,13 @@ def _record_qc_lesson(project_name: str, kind: str, prompt: str, rec: dict) -> d
     lesson_src = _qc_lesson_from_record(rec)
     # 风格不达标：额外注入一条「明确的风格强化指令」，确保召回时能直接指导模型修正风格，
     # 而不是只给一条「风格不符」的缺陷描述。
-    style_norm = style_kit.normalize_style((rec or {}).get("style") or "")
-    if (rec or {}).get("style_mismatch") and style_norm:
-        style_hint = (f"画面风格与目标风格不符，必须严格采用「{style_norm}」"
-                      f"的视觉风格、画风、渲染方式与配色，不得偏离")
+    # ⚠️ 风格名必须写成占位符 {style}，**不能在记录时把项目风格写死**：
+    #    教训库是跨项目复用的，写死会让 A 项目（中国古风玄幻）的教训被 B 项目
+    #    （国漫偏写实）召回时强行要求 B 采用 A 的风格 —— 那是主动伤害。
+    #    实际替换发生在 prompt_memory.suggestions(..., style=当前项目风格)。
+    if (rec or {}).get("style_mismatch"):
+        style_hint = ("画面风格与目标风格不符，必须严格采用「{style}」"
+                      "的视觉风格、画风、渲染方式与配色，不得偏离")
         existing = lesson_src.get("issues") or []
         lesson_src["issues"] = [style_hint] + [i for i in existing if i != style_hint]
     if not lesson_src.get("issues") and not lesson_src.get("reason"):
@@ -4595,19 +4653,78 @@ def _record_qc_lesson(project_name: str, kind: str, prompt: str, rec: dict) -> d
         return {}
 
 
+def _qc_style_of(project_name: str) -> str:
+    """取项目**当前**风格，供教训召回替换建议里的 ``{style}`` 占位符。
+
+    数据源优先用 autopilot 计划（用户与总控敲定的创作设定，最权威），
+    其次退回项目级创作设定的 style；都取不到就返回空串
+    （此时 ``prompt_memory`` 会主动丢弃带 ``{style}`` 的建议，而不是把别的项目的风格安上来）。
+    """
+    try:
+        plan = autopilot.get_plan(project_name) or {}
+        s = style_kit.normalize_style(plan.get("style"))
+        if s:
+            return s
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        for ep in (novel_to_script.list_episodes(SCRIPT_DIR, project_name, project_name) or []):
+            path = ep.get("path") or ""
+            if path and os.path.isfile(path):
+                data = project_store._read_json(path, {}) or {}
+                s = style_kit.normalize_style(data.get("style"))
+                if s:
+                    return s
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _episode_qc_desc(shots: list, limit: int = 12) -> str:
+    """构造整集质检用的「镜头信息」摘要（逐镜一行，控制长度）
+
+    为什么不用 comfyui_client 传进来的 ``shot_desc``：整集模式下它传的是
+    **所有段的 H3 提示词全文拼接**（每段都是六段式结构，几十段叠在一起），
+    又长又难判读，还挤占上下文。整片质检真正需要的是「这一集有哪些镜头、
+    各自什么景别和内容」，这里按镜头生成紧凑摘要。
+    """
+    rows = []
+    for i, s in enumerate(shots or []):
+        if not isinstance(s, dict):
+            continue
+        if i >= limit:
+            rows.append(f"…（其余 {len(shots) - limit} 镜略）")
+            break
+        cam = str(s.get("camera") or "").strip()
+        desc = str(s.get("description") or "").strip()[:60]
+        rows.append(f"镜{s.get('shot_id', i + 1)}[{cam}] {desc}")
+    return "本集共 %d 镜：" % len(shots or []) + "；".join(rows) if rows else "（无镜头信息）"
+
+
 def _qc_shot_desc(shot: dict) -> str:
+    """构造交给质检模型的「镜头信息」。
+
+    ⚠️ 景别必须带上**判定标准**，不能只给裸词。
+    生成端用 ``SHOT_CAMERA_SPECS[camera]`` 的精确定义写提示词，而质检端此前只传
+    「机位：中景跟拍」——模型只能凭自己的理解判「中景」，与生成端标准不一致，
+    实测分镜图通过率仅 57%、失败原因几乎全是「景别不符」（把腰部以上的中景判成不合规）。
+    这里改为引用 :func:`comfyui_client.camera_spec`（经模块顶部的 ``_camera_spec`` 别名调用，
+    因为本文件里 ``comfyui_client`` 是实例而非模块），保证两端**同一份标准**。
+    """
     parts = []
+    # 景别放在最前：描述较长时 [:900] 截断会吃掉尾部，判定标准必须优先保住
+    if shot.get("camera"):
+        cam = str(shot["camera"]).strip()
+        parts.append(f"景别：{cam}（判定标准：{_camera_spec(cam)}）")
     if shot.get("location"):
         parts.append(f"场景：{shot['location']}")
-    if shot.get("camera"):
-        parts.append(f"机位：{shot['camera']}")
     if shot.get("description"):
         parts.append(str(shot["description"]).strip())
     if shot.get("emotion"):
         parts.append(f"情绪：{shot['emotion']}")
     if shot.get("dialogue"):
         parts.append(f"台词：{str(shot['dialogue']).strip()[:80]}")
-    return "；".join(parts)[:600] or "（无镜头描述）"
+    return "；".join(parts)[:900] or "（无镜头描述）"
 
 
 def _keyframe_qc_verifier(project_name: str):
@@ -7115,9 +7232,23 @@ def api_autopilot_disable():
 @app.route('/api/autopilot/pause', methods=['POST'])
 @_autopilot_guard
 def api_autopilot_pause():
-    """暂停托管（在当前步骤边界生效，不产生半成品）"""
+    """暂停托管（在当前步骤边界生效，不产生半成品）
+
+    ⚠️ 这是**全局**开关：``autopilot.pause()`` 置的是全局 ``_STATE["paused"]``，
+    **不区分项目**。此前接口既不读 ``project`` 也不提示，调用方（尤其是总控 AI）
+    很容易以为「只暂停了某个项目」，实际把所有项目都停了 —— 静默越权。
+    这里保留 reason 语义，并在收到 project 时**显式告知**它被忽略、给出替代做法。
+    """
     data = request.json or {}
-    return jsonify({"success": True, **autopilot.pause(str(data.get('reason') or '手动暂停'))})
+    result = autopilot.pause(str(data.get('reason') or '手动暂停'))
+    ignored_project = str(data.get('project') or data.get('project_name') or '').strip()
+    payload = {"success": True, **result}
+    if ignored_project:
+        payload["warning"] = (f"暂停托管是**全局**开关，已忽略 project='{ignored_project}'"
+                              "（所有项目都会暂停）。若只想停某个项目，"
+                              "请调用 /api/autopilot/disable 并带 project。")
+        payload["scope"] = "global"
+    return jsonify(payload)
 
 
 @app.route('/api/autopilot/resume', methods=['POST'])
@@ -7837,19 +7968,94 @@ def api_export_relation_svg():
 
 # ==================== AI Memory API ====================
 
+#: 质检教训库（prompt_memory）与 AI 记忆（ai_memory）是**两套数据**：
+#:   - ai_memory：手动登记的经验/模式，供记忆页展示（本轮之前只有 3 条 test，是死壳）
+#:   - prompt_memory：生成链路**自动沉淀**的质检教训（真正在驱动「不达标→改提示词」）
+#: 记忆页此前只读前者，因此「看不到任何自动化学习成果」。下面这组接口把两者都暴露出来。
+
+
+def _prompt_memory_view(kind: str = "", limit: int = 50) -> dict:
+    """真实质检教训库的只读视图（供记忆页展示）"""
+    try:
+        m = prompt_memory.get_memory(PROJECT_OUTPUT_DIR)
+        st = m.stats()
+        return {
+            "total": st.get("total", 0),
+            "by_kind": st.get("by_kind") or {},
+            "path": st.get("path", ""),
+            "lessons": m.list(kind=kind, limit=limit),
+        }
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning("读取质检教训库失败：%s", e)
+        return {"total": 0, "by_kind": {}, "path": "", "lessons": [], "error": str(e)}
+
+
+@app.route('/api/memory/lessons', methods=['GET'])
+@_autopilot_guard
+def api_memory_lessons():
+    """质检教训库（generation 链路自动学习成果）
+
+    query: kind（可空）/ limit（默认 50）/ prune_empty=1（顺手清理历史空记录）
+    """
+    kind = str(request.args.get('kind') or '')
+    try:
+        limit = max(1, min(500, int(request.args.get('limit', 50))))
+    except (TypeError, ValueError):
+        limit = 50
+    removed = 0
+    if str(request.args.get('prune_empty') or '') in ('1', 'true', 'yes'):
+        try:
+            removed = prompt_memory.get_memory(PROJECT_OUTPUT_DIR).prune_empty()
+        except Exception as e:  # noqa: BLE001
+            app.logger.warning("清理空教训失败：%s", e)
+    view = _prompt_memory_view(kind=kind, limit=limit)
+    return jsonify({"success": True, "pruned": removed, **view})
+
+
+@app.route('/api/memory/lessons/search', methods=['GET'])
+@_autopilot_guard
+def api_memory_lessons_search():
+    """按提示词召回教训建议（可视化「如果现在生成，会带上哪些历史修正」）
+
+    query: kind（默认 storyboard）/ prompt（必填）/ project / style
+    """
+    kind = str(request.args.get('kind') or 'storyboard')
+    prompt = str(request.args.get('prompt') or '').strip()
+    project = str(request.args.get('project') or '').strip()
+    style = str(request.args.get('style') or '').strip()
+    if not prompt:
+        return jsonify({"success": False, "error": "缺少 prompt 参数"}), 400
+    try:
+        hints = prompt_memory.suggest(kind=kind, prompt=prompt, project=project,
+                                      root_dir=PROJECT_OUTPUT_DIR, style=style)
+        learned = prompt_memory.learned_prompt(kind=kind, prompt=prompt, project=project,
+                                               root_dir=PROJECT_OUTPUT_DIR, style=style)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"success": False, "error": f"召回失败：{e}"}), 500
+    return jsonify({"success": True, "kind": kind, "project": project, "style": style,
+                    "hints": hints, "learned_prompt": learned,
+                    "changed": learned != prompt})
+
+
 @app.route('/api/memory/stats', methods=['GET'])
 @_autopilot_guard
 def api_memory_stats():
-    """获取 AI 记忆统计"""
+    """获取 AI 记忆统计（含**真实质检教训库**的条数，不再只报手动登记的几条）"""
     mem = get_memory_system()
     stats = mem.get_stats()
     trends = mem.evolution.analyze_trends()
     insights = mem.evolution.generate_insights(limit=5)
+    lessons = _prompt_memory_view(limit=0)
+    # 让前端「经验条数」反映真实学习成果，而不是 3 条测试数据
+    stats = dict(stats or {})
+    stats["prompt_lessons"] = lessons["total"]
+    stats["prompt_lessons_by_kind"] = lessons["by_kind"]
     return jsonify({
         "success": True,
         "stats": stats,
         "trends": trends,
         "insights": insights,
+        "lessons": {"total": lessons["total"], "by_kind": lessons["by_kind"]},
     })
 
 

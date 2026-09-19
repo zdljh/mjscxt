@@ -17,6 +17,8 @@ from datetime import datetime
 
 from llm_client import LLMError
 from dialogue_utils import format_line as _dlg_line
+import h3_prompt_kit
+import style_kit
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +27,8 @@ SYSTEM_PROMPT = (
     "并严格输出合法 JSON。"
 )
 
-REQUIRED_MARKERS = ("subject_definitions", "detailed_description", "<Picture 1>")
+#: 六段式（Ref2VA）—— 任一缺失即为不合格输出
+REQUIRED_MARKERS = h3_prompt_kit.REF_SECTIONS + ("<Picture 1>",)
 
 
 def detect_ref_mode(storyboards_dir: str, project_name: str) -> str:
@@ -103,6 +106,15 @@ def build_shot_prompt(script: dict, shot: dict, ref_mode: str = "character_scene
                     "<Picture 2> = 场景环境参考（定义环境与氛围）\n"
                     "若镜头出现第二位主要角色，可继续写 <Picture 3>；最多 3 张参考图。\n")
 
+    # 画面细节：description 限长后的扩展位（时间/天气/光源方向/动作过程）。分析器是提示词的
+    # **最终作者**，看不到这些细节就只能靠猜 —— 实测「黄昏逆光」这类光要素若只存在于
+    # visual_detail，则写出的 prompt_h3 / storyboard_prompt_zh 完全没有光影描述，
+    # 生成端 _extract_light_hint 又会被 storyboard_prompt_zh 顶掉优先级，最终分镜图光影丢失。
+    desc_text = str(shot.get("description") or "").strip()
+    detail_text = str(shot.get("visual_detail") or "").strip()
+    visual_text = (f"{desc_text}。{detail_text}" if desc_text else detail_text) \
+        if (detail_text and detail_text != desc_text) else desc_text
+
     return f"""【任务】为漫剧《{script.get('title') or ''}》的镜头 {shot.get('shot_id')} 生成/优化 H3 Ref2VA 提示词。
 【画面风格】{style}
 {pic_defs}
@@ -110,22 +122,45 @@ def build_shot_prompt(script: dict, shot: dict, ref_mode: str = "character_scene
 镜号：{shot.get('shot_id')}　时长：{duration} 秒
 景别与运镜：{shot.get('camera') or '中景'}
 场景：{scene.get('name')}（{scene.get('appearance')}）
-画面内容：{shot.get('description') or ''}
+画面内容：{visual_text}
 对白：{_dlg_line(shot.get('dialogue')) or '（无）'}
 情绪：{shot.get('emotion') or ''}　音效：{shot.get('audio_cues') or ''}
 出场角色：{json.dumps(chars, ensure_ascii=False)}
 出场物品：{json.dumps(items, ensure_ascii=False)}
-【prompt_h3 结构要求】必须严格按下面三段式排版，缺一不可：
+【prompt_h3 结构要求】必须严格按下面**六段**排版，段名逐字一致、顺序不可调换，缺一不可：
 subject_definitions:
-<Picture 1> is the reference image defining ... （英文一行，说明该图作用）
-<Picture 2> is the reference image defining ... （英文一行，说明该图作用）
-<Subject 1> is 角色名 — 该角色在本镜头中的外观与服装（英文短语）
-（空行）
+<Picture 1> - 说明该参考图在本镜中的作用（构图/场景/人物姿态基准）
+<Picture 2> - 说明该参考图在本镜中的作用（人物外观锚点）
+<Subject 1> - 角色名：该角色在本镜头中的外观与服装（与参考图一致，不得改服装）
+
+summary:
+2~4 句话概述这段约 {duration} 秒的视频内容、主体与情绪基调。
+
+retention_analysis:
+- 必须保留 <Picture 1> 中的哪些元素（构图、景别、机位、环境）
+- 必须保留 <Picture 2> 中角色的哪些元素（五官、发型、服装、配饰）
+- 哪些改造**不允许**发生（不得换人、不得改服装、不得加文字水印）
+
 detailed_description:
-[镜头{shot.get('shot_id')}, 0-{duration}秒] 景别与运镜。用中文写清：主体动作与表情、环境与光线、镜头运动方式、情绪节奏、对白（如有）、音效氛围；并明确要求「保持与参考图一致、画面连贯稳定、无畸形、无文字水印」。
-风格：{style}，电影级打光，画面流畅稳定。
+[Shot 1] 00:00.000 {shot.get('camera') or '中景'}：写清主体动作与表情、环境与光线、镜头运动方式与节奏。台词必须带语言标记写成「(S1) 说：[Chinese] 台词原文」（语言按原文，中文写 Chinese）。时间码格式固定为 MM:SS.mmm；时长超过 6 秒时拆成 2~3 个时间码节拍，总时长必须等于 {duration} 秒。
+
+overall_soundscape:
+一段连贯散文，描述全程环境音、动作音与非语言人声（角色听得到的声音）。
+
+non_diegetic_music:
+一段连贯散文，描述画面外配乐（配器、速度、情绪走向），始终保持在画面之外、无人声演唱。
+
 【输出要求】严格只输出一个 JSON 对象，不要 markdown 代码块、不要解释文字：
-{{"prompt_h3": "完整的 H3 Ref2VA 提示词（包含 subject_definitions / <Picture 1> / <Picture 2> / <Subject 1> / detailed_description 各部分，用 \\n 换行）", "storyboard_prompt_zh": "该镜头分镜图的中文提示词（60 字以内，描述构图、景别、人物姿态、环境与光线，可直接用于分镜图生成）"}}"""
+{{"prompt_h3": "完整六段式 H3 Ref2VA 提示词（六段段名齐全、按上述顺序，用 \\n 换行）", "storyboard_prompt_zh": "该镜头分镜图的中文提示词（80 字以内，写构图、景别、人物姿态、环境与光线，可直接用于分镜图生成）"}}
+【硬性约束】六段段名必须原样出现在输出中；画面里严禁出现任何文字、字幕、水印、logo；不要写与画面无关的抽象词（cinematic / beautiful 之类），改成具体视觉与听觉细节。"""
+
+
+def _missing_sections(text: str) -> list:
+    """按 H3 规范列出缺失的段（含 <Picture 1> 标签）"""
+    missing = list(h3_prompt_kit.validate(text).get("missing") or [])
+    if text and "<picture 1>" not in text.lower():
+        missing.append("<Picture 1>")
+    return missing
 
 
 def generate_shot_prompt(client, script: dict, shot: dict, ref_mode: str = "character_scene",
@@ -133,18 +168,23 @@ def generate_shot_prompt(client, script: dict, shot: dict, ref_mode: str = "char
     prompt = build_shot_prompt(script, shot, ref_mode)
     if extra_instruction:
         prompt += f"\n【额外要求】{extra_instruction}"
-    data = client.chat_json(prompt, system=SYSTEM_PROMPT, temperature=0.5, max_tokens=2200)
+    data = client.chat_json(prompt, system=SYSTEM_PROMPT, temperature=0.5, max_tokens=3200)
     text = str(data.get("prompt_h3") or "").strip()
-    if not text or any(m.lower() not in text.lower() for m in REQUIRED_MARKERS):
-        # 结构不合规，按规范强修一次
-        fix = (prompt + "\n【上一次输出结构不合规】上一次输出缺少 subject_definitions / <Picture 1> / "
-                        "detailed_description 中的部分内容。请严格按规定结构重新输出 JSON。")
-        data = client.chat_json(fix, system=SYSTEM_PROMPT, temperature=0.3, max_tokens=2200)
+    missing = _missing_sections(text)
+    if missing:
+        # 结构不合规：按规范强修一次，并把**具体缺了哪几段**回灌给模型（比笼统说「不合规」有效）
+        fix = (prompt + "\n【上一次输出结构不合规】上一次输出的 prompt_h3 缺少这些段："
+                       + "、".join(missing)
+                       + "。请严格按上面「六段式」结构补齐全部段落后重新输出 JSON，"
+                         "段名必须逐字出现且顺序不可调换。")
+        data = client.chat_json(fix, system=SYSTEM_PROMPT, temperature=0.3, max_tokens=3200)
         text = str(data.get("prompt_h3") or "").strip()
+        missing = _missing_sections(text)
     return {
         "prompt_h3": text,
         "storyboard_prompt_zh": str(data.get("storyboard_prompt_zh") or "").strip(),
-        "valid": bool(text) and all(m.lower() in text.lower() for m in REQUIRED_MARKERS),
+        "valid": bool(text) and not missing,
+        "missing": missing,
     }
 
 
@@ -167,7 +207,8 @@ def analyze_shots(client, script: dict, ref_mode: str = "character_scene", shot_
                 shot["storyboard_prompt_zh"] = res["storyboard_prompt_zh"]
             if not res["valid"]:
                 invalid += 1
-                errors.append(f"镜头 {shot.get('shot_id')}：结构校验未完全通过")
+                miss = "、".join(res.get("missing") or []) or "未知"
+                errors.append(f"镜头 {shot.get('shot_id')}：结构校验未通过，缺 {miss}")
         except LLMError as e:
             errors.append(f"镜头 {shot.get('shot_id')} 失败：{e}")
             logger.warning(f"镜头 {shot.get('shot_id')} 提示词生成失败：{e}")
@@ -209,7 +250,9 @@ def analyze_asset_prompts(client, script: dict, kinds=("characters", "items", "s
 {json.dumps(brief, ensure_ascii=False)}
 【参考图要求】{spec['hint']}
 【输出要求】严格只输出一个 JSON 对象，不要 markdown 代码块、不要解释文字：
-{{"items": [{{"name": "名称（必须与清单完全一致）", "reference_prompt_zh": "中文参考图提示词（含主体外观、材质、构图、光线、风格关键词，60 字以内）", "reference_prompt_en": "English prompt for image generation, under 40 words, comma separated keywords"}}]}}
+{{"items": [{{"name": "名称（必须与清单完全一致）", "reference_prompt_zh": "中文参考图提示词（60 字以内，只写画面可见的具体特征：外观、材质、配色、构图、光线）", "reference_prompt_en": "English prompt, under 45 words, comma-separated concrete visual keywords; an accurate translation of reference_prompt_zh"}}]}}
+【风格红线·重要】风格词由**程序统一在末尾追加**（幂等，不会重复），你不要写。因此每一条 reference_prompt_zh / reference_prompt_en 都**不得包含风格词、画风词或质量词**（如「国漫」「3D渲染」「电影级」「精致」「masterpiece」「best quality」「8k」）；自己写了会导致风格重复两遍，视为不合格输出。
+【英文红线】reference_prompt_en 必须是 reference_prompt_zh 的**准确英文翻译**，严禁把中文概念硬音译成自造罗马字（例如「国漫」必须写成 'Chinese animated style'，绝不能写成 'xuanxuan'）。
 【硬性约束】items 数组必须覆盖清单中的每一个名称，顺序一致，不要新增名称。"""
         if progress_cb:
             progress_cb("assets", k, len(kinds), f"生成{spec['label']}参考图提示词…",
@@ -217,6 +260,7 @@ def analyze_asset_prompts(client, script: dict, kinds=("characters", "items", "s
         try:
             data = client.chat_json(prompt, system=SYSTEM_PROMPT, temperature=0.45, max_tokens=3000)
             got = {str(x.get("name")): x for x in (data.get("items") or []) if isinstance(x, dict)}
+            touched = []
             for row in rows:
                 hit = got.get(str(row.get("name")))
                 if not hit:
@@ -229,6 +273,9 @@ def analyze_asset_prompts(client, script: dict, kinds=("characters", "items", "s
                     row["reference_prompt_en"] = en
                 if zh or en:
                     updated += 1
+                    touched.append(row)
+            # 确定性补风格（中英双语）：模型被要求不写风格，这里统一收尾，不再有重复
+            style_kit.apply_asset_style_all(touched, style)
         except LLMError as e:
             errors.append(f"{spec['label']}参考图提示词失败：{e}")
             logger.warning(f"{spec['label']}参考图提示词失败：{e}")

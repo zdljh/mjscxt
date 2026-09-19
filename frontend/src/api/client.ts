@@ -6,7 +6,7 @@ import type {
   Novel, NovelsResponse,
   Task, TasksResponse,
   Character, Relation,
-  Memory, MemoryStats,
+  Memory, MemoryStats, PromptLesson,
   AppSettings, I18nData,
   AnalyticsData,
   KeyframePlanResponse,
@@ -287,7 +287,26 @@ export const memoryApi = {
       lessons: Number(by.lesson ?? 0),
       successes: Number(by.success ?? 0),
       insights: Number(by.insight ?? 0),
+      promptLessons: Number(s.prompt_lessons ?? 0),
     };
+  },
+  /** 质检教训库（生成链路自动学习成果；与手动记忆是两套数据） */
+  lessons: async (params?: { kind?: string; limit?: number }): Promise<PromptLesson[]> => {
+    const qs = new URLSearchParams();
+    if (params?.kind) qs.set('kind', params.kind);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const q = qs.toString() ? `?${qs.toString()}` : '';
+    const d = await request<{ lessons?: PromptLesson[] }>(`/memory/lessons${q}`);
+    return d?.lessons || [];
+  },
+  /** 试算：给定提示词会召回哪些历史修正建议（把「自动学习」变得可见可验证） */
+  recall: async (params: { kind: string; prompt: string; project?: string; style?: string }) => {
+    const qs = new URLSearchParams({ kind: params.kind, prompt: params.prompt });
+    if (params.project) qs.set('project', params.project);
+    if (params.style) qs.set('style', params.style);
+    return request<{
+      success?: boolean; hints?: string[]; learned_prompt?: string; changed?: boolean;
+    }>(`/memory/lessons/search?${qs.toString()}`);
   },
   list: async (params?: { query?: string; type?: string }): Promise<Memory[]> => {
     const qs = new URLSearchParams();

@@ -424,7 +424,9 @@ def align_script_assets(script: dict, bible: dict, episode_no: int) -> dict:
             cast = s.get("characters_in_shot")
             if isinstance(cast, list):
                 s["characters_in_shot"] = [rename_map.get(_norm_name(x), x) for x in cast]
-            for field in ("description", "dialogue_text", "dialogue", "prompt_h3"):
+            # ⚠️ visual_detail 必须一起改名：它是画面细节的载体（常写「林风袖口的血」），
+            # 漏掉会导致同一角色在描述里叫规范名、在细节里叫别名，分镜图/视频提示词自相矛盾。
+            for field in ("description", "visual_detail", "dialogue_text", "dialogue", "prompt_h3"):
                 txt = s.get(field)
                 if not isinstance(txt, str) or not txt:
                     continue
@@ -1219,6 +1221,9 @@ def extract_episode_state(client, script: dict, prev_state: dict = None, episode
         "camera": s.get("camera"),
         "location": s.get("location"),
         "description": str(s.get("description") or "")[:80],
+        # 画面细节：时间/天气/光源方向常被写在 visual_detail（description 限长后的扩展位），
+        # 不带上会让 state 的「时间」项丢失依据（例如「黄昏」只存在于 visual_detail）。
+        "visual_detail": str(s.get("visual_detail") or "")[:60],
         "dialogue": str(s.get("dialogue_text") or "")[:80],
         "characters": s.get("characters_in_shot") or [],
         "items": s.get("items_in_shot") or [],
@@ -1351,11 +1356,13 @@ def validate_continuity(client, cur_script: dict, prev_script: dict, prev_state:
     cur_shots = [{"shot_id": s.get("shot_id"), "camera": s.get("camera"),
                   "location": s.get("location"),
                   "description": str(s.get("description") or "")[:90],
+                  "visual_detail": str(s.get("visual_detail") or "")[:60],
                   "dialogue": str(s.get("dialogue_text") or "")[:90],
                   "characters": s.get("characters_in_shot") or []}
                  for s in (cur_script.get("shots") or []) if isinstance(s, dict)][:40]
     prev_shots = [{"shot_id": s.get("shot_id"), "location": s.get("location"),
                    "description": str(s.get("description") or "")[:90],
+                   "visual_detail": str(s.get("visual_detail") or "")[:60],
                    "dialogue": str(s.get("dialogue_text") or "")[:90],
                    "characters": s.get("characters_in_shot") or []}
                   for s in ((prev_script or {}).get("shots") or []) if isinstance(s, dict)][:40]
@@ -1518,13 +1525,17 @@ def rewrite_shots_for_issues(client, script: dict, issues: list, episode_no: int
 {ctx.get('style_block') or ''}
 {ctx.get('camera_block') or ''}
 【待重写镜头（原内容）】{json.dumps([{k: s.get(k) for k in
-    ('shot_id', 'camera', 'location', 'description', 'dialogue', 'emotion', 'audio_cues',
-     'characters_in_shot', 'items_in_shot', 'prompt_h3')} for s in target], ensure_ascii=False)}
+    ('shot_id', 'camera', 'location', 'description', 'visual_detail', 'dialogue', 'emotion',
+     'audio_cues', 'characters_in_shot', 'items_in_shot', 'prompt_h3')} for s in target], ensure_ascii=False)}
 【输出要求】严格只输出一个 JSON 对象：
 {{"shots": [{{"shot_id": 镜头号（必须与输入一致）, "camera": "景别与运镜（取自运镜术语表）", "location": "场景名",
-  "description": "修正后的画面描述（40 字以内）", "dialogue": [{{"speaker": "角色名", "text": "台词"}}],
+  "description": "修正后的画面描述（80 字以内，写清人物动作过程、外貌衣着、环境与光线、构图与景别）",
+  "visual_detail": "画面补充细节（可选；光源方向/时间天气/动作过程等更细的描写写这里，80 字以内；没有就写空字符串）",
+  "dialogue": [{{"speaker": "角色名", "text": "台词"}}],
   "emotion": "情绪", "audio_cues": "音效", "characters_in_shot": ["角色名"], "items_in_shot": ["物品名"],
-  "prompt_h3": "英文画面描述（60 词以内）", "fix_note": "本次修正点（15 字以内）"}}]}}
+  "fix_note": "本次修正点（15 字以内）"}}]}}
+【不要输出 prompt_h3】视频提示词由程序在生成期按 H3 规范自动构建（结合当次实际参考图生成六段式），
+你在这里写的英文描述缺少 <Picture N> 标签，反而会覆盖规范提示词导致出片偏离设定。画面信息写进 description 即可。
 【硬性约束】只输出输入镜头号对应的镜头；修正后必须消除问题清单中的冲突（外观统一、不重演、不重复台词、承接上集结尾）。"""
     data = _json_call(client, prompt, f"rewrite#{episode_no}", temperature=0.5,
                       max_tokens=3600, events=events)
@@ -1546,9 +1557,17 @@ def rewrite_shots_for_issues(client, script: dict, issues: list, episode_no: int
         old = by_id.get(sid)
         if not old:
             continue
-        for k in ("camera", "location", "description", "emotion", "audio_cues", "prompt_h3"):
+        # 注意：**不回写 prompt_h3**。视频提示词由生成期 h3_prompt_kit 按当次参考图规范构建，
+        # 这里若是把模型现写的英文描述写回去，会再次出现「薄英文顶掉结构化构建器」的老问题。
+        for k in ("camera", "location", "description", "emotion", "audio_cues"):
             if str(r.get(k) or "").strip():
                 old[k] = str(r.get(k)).strip()[:400]
+        # ⚠️ description 一旦被重写，旧的 visual_detail 就是**上一条描述的尾巴**，必须同步处理，
+        # 否则 build_storyboard_prompt 会把「新描述 + 旧细节」拼成画面主体，自相矛盾
+        #（实测场景：重写后新描述写「正午平光」，旧尾巴仍留着「黄昏暖调逆光」）。
+        # 规则：模型给了新细节就用新的；没给就清空（新描述本身已承载画面信息）。
+        if str(r.get("description") or "").strip():
+            old["visual_detail"] = str(r.get("visual_detail") or "").strip()[:400]
         if r.get("dialogue") is not None:
             old["dialogue"] = _dlg_lines(r.get("dialogue"), chars, chars)
             old["dialogue_text"] = " ".join(

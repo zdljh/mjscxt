@@ -327,11 +327,16 @@ TOOLS = [
     },
     {
         "name": "pause_autopilot",
-        "description": "暂停托管（保留进度，可 resume）。",
-        "parameters": _schema({"project": _proj_prop()}),
+        "description": "暂停**全局**托管（保留进度，可 resume）。⚠️ 这是全局开关，会影响所有项目；"
+                       "若只想停某一个项目，请用 disable_autopilot(project=…)。",
+        # ⚠️ 这里**不暴露 project**：/api/autopilot/pause 走的是 autopilot.pause()，
+        # 它是全局开关（_STATE["paused"]），根本不看 project。
+        # 之前 schema 里带了 project，会让模型以为能「只暂停某个项目」，
+        # 实际却把全部项目一起停掉 —— 静默的越权，属于契约与语义不符。
+        "parameters": _schema({}),
         "risk": "write", "expensive": False,
         "call": lambda a, c: ("POST", "/api/autopilot/pause",
-                              {"project": a.get("project") or c.get("project")}),
+                              {"reason": "总控 AI 暂停托管"}),
     },
 
     # ---------- 昂贵动作（烧 GPU / 耗时） ----------
