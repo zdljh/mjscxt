@@ -18,6 +18,8 @@ from urllib.parse import urlparse
 
 import requests
 
+import cancellation
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 240
@@ -427,8 +429,12 @@ class LLMClient:
         last_err = None
         idx = 0
         while idx < attempts:
+            # ⚠️ 退避休眠前先看一眼中止信号（托管暂停 / 用户停止）。
+            # 这里还没发出任何请求、没产出任何文件，中止是安全的；
+            # 少了这一句，「暂停」要等退避跑满 + 整个重试链结束才有反应。
+            cancellation.check("LLM 请求重试前收到中止信号")
             if idx:
-                time.sleep(HTTP_RETRY_BACKOFF[min(idx - 1, len(HTTP_RETRY_BACKOFF) - 1)])
+                cancellation.sleep(HTTP_RETRY_BACKOFF[min(idx - 1, len(HTTP_RETRY_BACKOFF) - 1)])
             idx += 1
             try:
                 resp = session.post(url, headers=headers, json=payload,
@@ -763,6 +769,9 @@ class LLMClient:
 
         repaired_fallback = None
         for _ in range(max(1, int(max_attempts))):
+            # 提额重试是最外层循环（每次都会重新发一次完整请求），收益最大：
+            # 托管暂停时立刻停下，不再为「模型只吐思考」反复加码重试。
+            cancellation.check("LLM 提额重试前收到中止信号")
             attempts += 1
             try:
                 r = self.chat_ex(messages, temperature=temperature, max_tokens=cur)

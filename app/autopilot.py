@@ -30,8 +30,11 @@
    实时状态（当前项目 / 集号 / 步骤 / 进度 / 已跑时长 / 累计重试数 / 异常清单）
    全部暴露给前端；另有 24 小时生产曲线（每集完成时间与耗时）。
 
-6. **可暂停**
-   pause 只会在**步骤边界**生效（不会打断正在跑的 GPU 任务），保证不产生半成品。
+6. **可暂停（且秒级生效）**
+   中止检查点分两类：① 步骤边界；② 步骤内部的「发起 LLM 调用前 / 重试退避前」
+   （见 `cancellation.py`）。两类都落在**尚未产出文件**的位置 —— 因此既不会打断
+   正在跑的 GPU 渲染、不留半成品，又不会出现「点了暂停却要等十几分钟才停」。
+   实测病根：单步内嵌套着两层重试（步骤级 × 提额级 × HTTP 级）却从不检查中止信号。
 """
 from __future__ import annotations
 
@@ -534,6 +537,15 @@ def is_paused() -> bool:
         return bool(_STATE["paused"])
 
 
+def _halt_requested() -> bool:
+    """是否应立即停止**当前这一集**：托管暂停，或进程正在退出。
+
+    作为中止判定器传给 `pipeline.run_episode`，会被注册进执行上下文，
+    使集内所有 LLM 调用与重试退避都能秒级感知（见 `cancellation.py`）。
+    """
+    return _STOP.is_set() or is_paused()
+
+
 def wake() -> None:
     """唤醒守护线程立即扫一轮（新任务入队 / 配置变更时调用）"""
     _WAKE.set()
@@ -792,7 +804,7 @@ def _produce(project: str, plan: dict, pick: dict) -> None:
                                            default_project_key=project)
         result = pipeline.run_episode(
             config, project, episode_no, meta, chapter,
-            progress_cb=_cb, should_stop=is_paused)
+            progress_cb=_cb, should_stop=_halt_requested)
     except Exception as e:  # noqa: BLE001
         result = {"ok": False, "status": "failed", "episode_no": episode_no,
                   "project": project, "error": f"{type(e).__name__}: {e}",

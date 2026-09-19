@@ -44,6 +44,8 @@ import shutil
 import time
 import traceback
 
+import cancellation
+
 logger = logging.getLogger(__name__)
 
 # ===================== 步骤定义 =====================
@@ -997,7 +999,11 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
     novel_meta    : novel_parser.get_novel() 的元信息
     chapter       : 该集对应章节 {"index","title","text"...}
     progress_cb   : fn(message, percent, phase=None)
-    should_stop   : fn() -> bool，返回 True 时在步骤边界安全中止（用于暂停托管）
+    should_stop   : fn() -> bool，返回 True 时中止本集（用于暂停 / 停止托管）。
+                    检查点有两类：① 步骤边界；② 步骤内部「发起 LLM 调用前 /
+                    重试退避前」—— 后者让暂停**秒级生效**，不必等重试链跑完。
+                    两类检查点都落在**尚未产出文件**的位置，因此不会留下半成品；
+                    已完成的步骤全部保留，续跑时会被逐步骤探测跳过。
     """
     A = _A()
     started = time.time()
@@ -1041,6 +1047,10 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
         "started_at": _now(), "deliverable": "", "steps": {}, "error": "",
     }
 
+    # 把「是否该停」注册进当前执行上下文（contextvars）：本集内部所有 LLM 调用与
+    # 重试退避都能感知到它，从而实现「暂停秒级生效」。作用域仅限本调用链 ——
+    # 用户手动触发的生产（should_stop=None）不受任何影响。
+    _cancel_token = cancellation.push(should_stop)
     try:
         for step in STEP_SEQUENCE:
             if should_stop and should_stop():
@@ -1087,9 +1097,17 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
     except NeedsHumanError as e:
         result["status"] = "needs_human"
         result["error"] = str(e)
+    except cancellation.Cancelled as e:
+        # 协作式中止（托管暂停 / 用户停止）：停在**尚未产出文件**的安全点，
+        # 已完成步骤全部保留，续跑时会被逐步骤探测跳过。
+        result["status"] = "cancelled"
+        result["error"] = f"收到中止信号，已在安全点停下（已完成步骤保留，可续跑）：{e}"
+        logger.info("第%s集因中止信号停止：%s", episode_no, e)
     except Exception as e:  # noqa: BLE001
         result["error"] = f"{type(e).__name__}: {e}"
         logger.error("第%s集流水线失败：%s\n%s", episode_no, result["error"], traceback.format_exc())
+    finally:
+        cancellation.reset(_cancel_token)
 
     result["elapsed_sec"] = round(time.time() - started, 1)
     result["finished_at"] = _now()
@@ -1123,16 +1141,22 @@ def _run_step_with_retry(step: str, ctx: dict) -> tuple:
     max_tries = max(cfg_max, 1 if step in GATED_STEPS else cfg_max) + 1
     last = {}
     for attempt in range(1, max_tries + 1):
+        # ⚠️ 中止信号优先于重试：托管暂停时立刻停，不再空转剩余重试次数。
+        # 这个检查点在「还没产出任何文件」的位置，因此不会留下半成品。
+        cancellation.check(f"{STEP_LABELS[step]} 重试前收到中止信号")
         if attempt > 1:
             ctx["progress"](f"{STEP_LABELS[step]} 第 {attempt}/{max_tries} 次重试…",
                             result_pct(ctx_step_ctx(ctx), step), phase=f"{step}:retry")
             logger.warning("第%s集 %s 第 %d 次重试（上次：%s）",
                            ctx["episode_no"], step, attempt, last.get("error"))
-            time.sleep(min(3 * attempt, 10))     # 退避，避免把失败服务打爆
+            # 可被打断的退避：避免长退避期间「暂停」长时间无响应
+            cancellation.sleep(min(3 * attempt, 10))
         try:
             out = STEP_RUNNERS[step](ctx)
         except NeedsHumanError:
             raise
+        except cancellation.Cancelled:
+            raise                      # 中止信号必须穿透，不能被当成一次「步骤失败」
         except Exception as e:  # noqa: BLE001
             out = {"ok": False, "error": f"{type(e).__name__}: {e}"}
             logger.error("第%s集 %s 异常：%s\n%s", ctx["episode_no"], step,
