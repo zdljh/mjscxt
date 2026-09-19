@@ -433,7 +433,6 @@ def build_bible(client, outlines: list, novel_title: str, style: str, episodes: 
 【格式红线】直接以 {{ 作为输出的第一个字符；严禁输出任何推理过程、思考草稿、英文说明、markdown 代码块标记或前后缀解释文字；整个 JSON 输出控制在 1200 字以内（字段描述能短则短）。"""
     bible_retry_kw = {"max_attempts": 4, "token_ladder": (6000, 8192, 16384, 24576)}
     data = {}
-    last_raw = None
     for tag, p in (("bible", prompt),
                    ("bible-repair", prompt + "\n\n【重要·格式修复】上一次调用未产出完整合规 JSON。"
                     "请重新输出**一个完整、紧凑的 JSON 对象**，必须同时包含 characters、items、scenes、"
@@ -448,7 +447,6 @@ def build_bible(client, outlines: list, novel_title: str, style: str, episodes: 
         except LLMError as e:
             logger.warning(f"bible 阶段 {tag} 调用失败：{e}")
             continue
-        last_raw = raw
         data = _normalize_bible(raw)
         if data.get("characters"):
             return data

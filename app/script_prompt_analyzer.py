@@ -286,7 +286,6 @@ def analyze_script(client, script: dict, mode: str = "all", shot_ids=None,
                    storyboards_dir: str = "", project_name: str = "",
                    extra_instruction: str = "", progress_cb=None) -> dict:
     """mode: shots（仅镜头 prompt_h3）/ assets（仅参考图提示词）/ all"""
-    t0 = time.time
     ref_mode = detect_ref_mode(storyboards_dir, project_name)
     result = {"mode": mode, "ref_mode": ref_mode,
               "shots": {"updated": 0, "total": 0, "errors": [], "invalid": 0},

@@ -112,7 +112,6 @@ def _safe_run():
 
 def main() -> int:
     restart_count = 0
-    last_restart_time = time.time()
 
     logger.info("漫剧生成系统启动器开始运行（含自动重启保护）")
 

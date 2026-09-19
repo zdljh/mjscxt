@@ -865,7 +865,6 @@ def status(project: str = "") -> dict:
     enabled = [p for p in plans if p.get("enabled")]
     deliveries = []
     exceptions = []
-    target_projects = [project] if project else [p["project"] for p in plans]
     for p in plans:
         if project and p["project"] != project:
             continue

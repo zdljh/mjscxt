@@ -292,7 +292,6 @@ def interpret_chat_command(message: str, project: str = "") -> dict:
     # 指定集数
     match = re.search(r"第\s*(\d+)\s*集", msg)
     if match:
-        episode_no = int(match.group(1))
         return {"success": False, "error": "单集生产请使用专用接口，指令暂不支持"}
 
     # 默认：返回状态

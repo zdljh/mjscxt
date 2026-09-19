@@ -1606,7 +1606,6 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"进度回调异常：{e}")
 
-    chapter_title = (chapter.get("title") or f"第{chapter.get('index')}章").strip()
     seg = (novel_text or "")[int(chapter.get("start") or 0):int(chapter.get("end") or 0)]
 
     # ---- 1) 项目级资产：bible / style_guide / quotes / voice_dict / camera_terms

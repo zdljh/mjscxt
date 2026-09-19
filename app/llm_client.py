@@ -533,9 +533,7 @@ class LLMClient:
 
         两种情况下都抬高一档 max_tokens 下限：思考要吃 token，给太少必然只剩 reasoning_content。
         """
-        thinking_on = False
         if self.reasoning_effort:
-            thinking_on = True
             try:
                 mt = int(max_tokens or 0)
             except (TypeError, ValueError):
@@ -545,7 +543,6 @@ class LLMClient:
                             f"抬到 {MIN_TOKENS_WHEN_REASONING_EFFORT}")
                 max_tokens = MIN_TOKENS_WHEN_REASONING_EFFORT
         elif not getattr(self, "disable_thinking", DISABLE_THINKING_DEFAULT):
-            thinking_on = True
             try:
                 mt = int(max_tokens or 0)
             except (TypeError, ValueError):

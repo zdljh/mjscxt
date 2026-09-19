@@ -172,14 +172,18 @@ export interface PromptLesson {
 }
 
 // --- Settings ---
+/** ⚠️ 形状按 `/api/ai/settings` 的真实返回校正（项目级「创作设定」，不是系统参数）。
+ *  旧版本声明的是 llm_provider / llm_api_key / comfyui_url / tts_provider /
+ *  tts_api_key / watermark_enabled / watermark_text —— 这些字段后端**一个都不返回**
+ *  （系统参数在 `/api/ai/config`，接口形态完全不同），纯属过时残留。
+ *  真实的创作设定键（title/genre/style/...)都在 `settings` 里，随项目变化。 */
 export interface AppSettings {
-  llm_provider: string;
-  llm_api_key: string;
-  comfyui_url: string;
-  tts_provider: string;
-  tts_api_key: string;
-  watermark_enabled: boolean;
-  watermark_text: string;
+  success?: boolean;
+  project_name?: string;
+  active?: boolean;
+  settings?: Record<string, unknown>;
+  settings_file?: string;
+  style_brief?: string;
 }
 
 // --- i18n ---
@@ -191,12 +195,24 @@ export interface I18nData {
 }
 
 // --- Analytics ---
+/** ⚠️ 形状按 `/api/analytics/summary` 的真实返回校正。
+ *  旧版本声明的是 total_projects / total_tasks / total_cost / tasks_by_kind /
+ *  projects_by_status —— 这些字段后端**一个都不返回**，纯属过时残留。 */
 export interface AnalyticsData {
-  total_projects: number;
-  total_tasks: number;
-  total_cost: number;
-  tasks_by_kind: Record<string, number>;
-  projects_by_status: Record<string, number>;
+  success?: boolean;
+  generated_at?: string;
+  project?: string;
+  total_seconds?: number;
+  total_hours?: number;
+  total_units?: number;
+  event_count?: number;
+  failed_count?: number;
+  by_kind?: Record<string, number>;
+  cost?: Record<string, unknown>;
+  projects?: unknown[];
+  recent?: unknown[];
+  comfyui?: Record<string, unknown>;
+  deploy_profile?: unknown;
 }
 
 // --- Keyframes ---
@@ -274,7 +290,6 @@ export interface TTSEnv {
   reasons?: string[];
   voices?: string[];
   comfyui_online?: boolean;
-  qwen_tts_available?: boolean;
   dub_dir?: string;
 }
 
@@ -413,16 +428,25 @@ export interface EpisodeListResponse {
 }
 
 // --- Autopilot ---
+/** ⚠️ 形状按 `/api/autopilot/status` 的真实返回校正。
+ *  旧版本声明的 `current_project` / `current_episode` / `totals{episodes_done,
+ *  episodes_failed,retries}` 后端**均不返回**（真实是 `current` 对象 + `project`
+ *  + `curve/cycle/delivered_total/enabled_count/exceptions/...`）。 */
 export interface AutopilotStatus {
   running: boolean;
   paused: boolean;
-  current_project?: string;
-  current_episode?: number;
-  totals: {
-    episodes_done: number;
-    episodes_failed: number;
-    retries: number;
-  };
+  pause_reason?: string;
+  project?: string;
+  current?: Record<string, unknown> | null;
+  curve?: unknown;
+  cycle?: unknown;
+  delivered_total?: number;
+  enabled_count?: number;
+  plan_count?: number;
+  pending_review?: number;
+  exceptions?: unknown;
+  last_error?: string;
+  checked_at?: string;
 }
 
 export interface AutopilotProgress {
@@ -499,17 +523,22 @@ export interface DeliverablesResponse {
 }
 
 // --- Providers ---
+/** ⚠️ 形状按 `/api/providers` 的真实返回校正。
+ *  旧版本声明的 `providers: Provider[]` 与 `is_default` 后端**都不返回**
+ *  —— 真实是 `kinds` / `env_keys`（按 image / tts / video 分组的可用性视图）。 */
 export interface Provider {
   id: string;
   name: string;
   model: string;
   base_url: string;
-  is_default: boolean;
 }
 
 export interface ProvidersResponse {
   success: boolean;
-  providers: Provider[];
+  /** 各能力是否已有可用 provider（key 为 image / tts / video） */
+  kinds?: Record<string, unknown>;
+  /** 各能力依赖的环境变量名（key 为 image / tts / video） */
+  env_keys?: Record<string, string[]>;
 }
 
 // --- AI Config (Unified: text / qc / chat) ---
@@ -584,8 +613,6 @@ export interface AITestResult {
   /** 结束原因（length 表示被截断） */
   finish_reason?: string;
   truncated?: boolean;
-  /** 正文为空（把额度全用在思考上） */
-  thinking_only?: boolean;
   /** 该次探测实际使用的 max_tokens */
   max_tokens?: number;
   disable_thinking?: boolean;

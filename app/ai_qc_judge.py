@@ -15,11 +15,10 @@ ai_qc_judge.py — 主AI质检判断模块
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import List
 
 logger = logging.getLogger(__name__)
 
@@ -319,39 +318,3 @@ def judge_qc_result(verdict: dict, context: dict = None) -> dict:
         "requires_human": execution_plan["requires_human"],
         "judgment": judgment,
     }
-
-
-def format_judgment_for_user(judgment_result: dict) -> str:
-    """格式化判断结果供用户查看"""
-    severity = judgment_result.get("severity", "unknown")
-    strategy = judgment_result.get("strategy", "")
-    suggestions = judgment_result.get("suggestions", [])
-    
-    severity_emoji = {
-        "critical": "🔴",
-        "high": "🟠",
-        "medium": "🟡",
-        "low": "🟢",
-    }.get(severity, "⚪")
-    
-    lines = [
-        f"{severity_emoji} 质检判断结果",
-        f"严重程度: {severity.upper()}",
-        f"处理策略: {strategy}",
-        "",
-    ]
-    
-    if suggestions:
-        lines.append("修复建议:")
-        for i, s in enumerate(suggestions[:5], 1):
-            lines.append(f"  {i}. {s}")
-        lines.append("")
-    
-    if judgment_result.get("requires_human"):
-        lines.append("⚠️ 需要人工处理")
-    elif judgment_result.get("should_continue"):
-        lines.append("✅ 可以继续流程")
-    else:
-        lines.append("🔄 将自动重试")
-    
-    return "\n".join(lines)

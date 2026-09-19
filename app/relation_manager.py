@@ -199,7 +199,7 @@ class RelationManager:
             return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {} {}"><text x="400" y="300" text-anchor="middle" fill="#94a3b8">暂无角色关系</text></svg>'.format(width, height)
 
         # 简单力导向布局 (迭代)
-        positions = self._force_layout(nodes, edges, width, height, iterations=150)
+        self._force_layout(nodes, edges, width, height, iterations=150)
 
         # 生成SVG
         svg_parts = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}">']

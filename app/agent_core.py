@@ -793,7 +793,6 @@ def run_job(job: dict, ep: dict, history: list, timeout: int):
             return
 
         # ---- 让模型决策 ----
-        _decision_started = time.time()
         try:
             if text_mode:
                 content = client.chat(messages, temperature=0.4, max_tokens=2048,
