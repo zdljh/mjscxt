@@ -505,6 +505,46 @@ export const mixApi = {
 };
 
 // --- QC ---
+/** 音频质检结结论（两层：客观层 ffmpeg 指标 + AI 层频谱/波形送检） */
+export interface QCAudioResult {
+  success: boolean;
+  project_name?: string;
+  /** 检验对象来源：mix=带配音成片 / merged=整集音轨 / line=单句 / path=显式路径 */
+  source?: string;
+  path?: string;
+  passed: boolean | null;
+  blocked: boolean;
+  score: number | null;
+  reason?: string;
+  issues: string[];
+  critical_issues: string[];
+  metrics: {
+    duration?: number;
+    mean_db?: number | null;
+    max_db?: number | null;
+    silence_sec?: number;
+    speech_ratio?: number | null;
+    codec?: string;
+    sample_rate?: number;
+    channels?: number;
+    size_bytes?: number;
+  };
+  /** AI 层是否真的参与了判定 */
+  ai_used?: boolean;
+  ai_skipped?: boolean;
+  ai_skip_reason?: string;
+  objective_only?: boolean;
+  /** 频谱图 / 波形图（顺序固定：先频谱后波形），可直接作为 img src */
+  visuals?: string[];
+  expect_sec?: number | null;
+  check_speech_ratio?: boolean;
+  audio_qc_active?: boolean;
+  audio_ai_active?: boolean;
+  /** 原文件的可播放地址（成品可直接试听） */
+  file_url?: string;
+  error?: string;
+}
+
 export const qcApi = {
   config: () => request<QCResponse>('/qc/config'),
   updateConfig: (config: QCConfig) =>
@@ -526,6 +566,30 @@ export const qcApi = {
     request<{ success: boolean; frames: any[] }>(
       `/qc/frames/${encodeURIComponent(project)}`
     ),
+  /** 音频成品质检：客观层（ffmpeg 指标）始终执行；AI 层需配置质检接口 */
+  checkAudio: (data: {
+    project_name?: string;
+    /** 显式指定产物文件（必须在 output/ 内） */
+    path?: string;
+    /** 未给 path 时按此推导：mix > merged > line */
+    source?: 'mix' | 'merged' | 'line';
+    expect_sec?: number;
+    line_text?: string;
+    /** 有声占比下限判定。单句传 true；整集/成片必须 false（天然有留白） */
+    check_speech_ratio?: boolean;
+    /** false=只跑客观层（毫秒级、零模型调用） */
+    with_ai?: boolean;
+  }) => request<QCAudioResult>('/qc/audio', { method: 'POST', body: JSON.stringify(data) }),
+  /** 提示词预检（生成前质检）：确定性检查 + 自愈。kind 支持 storyboard/h3/asset/keyframe/audio */
+  promptCheck: (data: {
+    kind: string;
+    prompt: string;
+    style?: string;
+    context?: Record<string, unknown>;
+    ref_count?: number;
+    expect_refs?: boolean;
+    repair?: boolean;
+  }) => request<any>('/qc/prompt', { method: 'POST', body: JSON.stringify(data) }),
 };
 
 // --- Episodes ---

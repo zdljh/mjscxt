@@ -105,12 +105,18 @@ def split_source_units(text) -> tuple:
 
 
 def build_shot_corpus(shots) -> str:
-    """把整集镜头拼成一段「已承载文本」（画面 / 台词 / 旁白 / 提示词 / 情绪）"""
+    """把整集镜头拼成一段「已承载文本」（画面 / 细节 / 台词 / 提示词 / 情绪）
+
+    ⚠️ ``visual_detail`` 必须计入：剧本阶段 description 限 200 字，超长的原文承载会被拆到
+    ``visual_detail``（见 novel_to_script._norm_shots）。漏掉它会让「正文其实写进镜头了、
+    覆盖率却判未承载」的假失败出现 —— 旁白取消后更多原文走这条路，风险显著上升。
+    ⚠️ ``narration`` 是**旧剧本遗留字段**，保留读取只为兼容改造前生成的项目。
+    """
     parts = []
     for s in shots or []:
         if not isinstance(s, dict):
             continue
-        for key in ("description", "narration", "picture", "dialogue_text",
+        for key in ("description", "visual_detail", "narration", "picture", "dialogue_text",
                     "audio_cues", "emotion", "camera", "location", "shot_type", "prompt_h3"):
             v = s.get(key)
             if isinstance(v, str) and v.strip():
@@ -208,9 +214,12 @@ def _shot_lines(shots, desc_limit: int = 40) -> list:
             continue
         sid = s.get("shot_id")
         desc = str(s.get("description") or "").replace("\n", " ").strip()[:desc_limit]
+        # visual_detail：description 截断后溢出的画面细节（承载原文的那部分要能被判官看到，
+        # 否则会把「已承载」误判成「未承载」）
+        detail = str(s.get("visual_detail") or "").replace("\n", " ").strip()[:desc_limit]
         dlg = str(s.get("dialogue_text") or "").replace("\n", " ").strip()[:desc_limit]
         cues = str(s.get("audio_cues") or "").replace("\n", " ").strip()[:desc_limit]
-        ctx = " | ".join(x for x in (desc, dlg, cues) if x)
+        ctx = " | ".join(x for x in (desc, detail, dlg, cues) if x)
         lines.append(f"#{sid} {ctx}")
     return lines
 
@@ -232,14 +241,17 @@ def _judge_units(client, shots, units, ids, events=None, label: str = "coverage"
         unit_block = "\n".join(f"{uid}｜{str(units[uid - 1])[:200]}" for uid in batch)
         prompt = (
             "【任务】逐条核对下列【原文片段】是否已被【本集剧本镜头】承载。\n"
-            "【判定口径】允许体裁形式改写：心理描写→旁白/自语台词、叙述→画面动作描述、"
+            "【判定口径】允许体裁形式改写：心理描写→角色自语台词或画面神态、叙述→画面动作描述、"
             "环境描写→画面与音效、对话→台词；只要该片段的情节、信息、人物、情绪在镜头中被表达出来，"
             "即算「已承载」；只有当该片段内容在镜头里完全找不到对应（被删除、被跳过、被概括压缩掉）"
             "时才判「未承载」。\n"
             "【细节零删减口径】若该片段的关键修饰细节（外貌/衣着、动作过程、心理活动、环境光线与器物"
-            "声响）在镜头（description / narration / dialogue / audio_cues）中完全没有体现，"
-            "仅保留了主干情节，也应判「未承载」。\n\n"
-            "【本集剧本镜头】（格式：#镜头号 画面描述｜台词｜旁白）\n" + shot_block + "\n\n"
+            "声响）在镜头（description / visual_detail / dialogue / audio_cues）中完全没有体现，"
+            "仅保留了主干情节，也应判「未承载」。\n"
+            "【注意】本系统不产出旁白：原文里的背景补叙与环境描写应当靠画面（description / "
+            "visual_detail）承载，心理活动靠角色自语台词或神态动作承载。因此**不要**因为"
+            "「没有旁白」而判未承载，只看画面与台词里有没有对应表达。\n\n"
+            "【本集剧本镜头】（格式：#镜头号 画面描述｜画面细节｜台词｜音效）\n" + shot_block + "\n\n"
             "【原文片段】（格式：编号｜片段）\n" + unit_block + "\n\n"
             "【输出要求】严格只输出一个 JSON 对象，不要解释文字：\n"
             '{"results": [{"id": 1, "covered": true, "shot_id": 3, "reason": "≤15字"}]}\n'

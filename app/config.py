@@ -123,6 +123,7 @@ NOVEL_CHUNK_CHARS = 3000        # 长篇小说分块字符数
 NOVEL_MAX_CHUNKS = 8            # 单次转换最多送入模型的块数（抽样上限，避免超出上下文）
 NOVEL_DEFAULT_SHOTS = 12        # 默认目标镜头数
 NOVEL_PREVIEW_CHARS = 4000      # 前端预览单页字符数
+NOVEL_BRIEF_CHARS = 800         # 「原著简报」正文取样字符数（喂给 AI 总控做风格判断，≤ agent 结果窗口）
 LLM_REQUEST_TIMEOUT = 240       # 单次 LLM 请求超时（秒）
 
 # ===================== 项目级隔离（每部小说 = 一个独立项目） =====================
@@ -271,7 +272,13 @@ MIX_DEFAULT_PARAMS = {
     "mode": "timeline",         # timeline = 按镜头时间轴对齐；concat = 顺次拼接（整轨）
     "lead_in_sec": 0.0,         # 逐句整体提前/延后（秒，可正可负）
     "gap_sec": 0.0,             # 每句之间额外间隔（秒）
-    "max_line_sec": 0.0,        # 单句最长占用（0 = 不限制；超出部分不裁切，仅告警）
+    "max_line_sec": 8.0,        # 单句最长占用（0 = 不限制；超出按 atempo 变速压缩，不裁切内容）。
+    #                            ⚠️ 2026-09-19 之前这里是 0.0，导致 dub_mix.build_timeline_entries
+    #                            里的 `if max_line > 0 and dur > max_line` 恒为假 —— 变速兜底是死代码
+    #                            （实测 ep04 全部条目 fit_ratio 恒为 1.0）。台词写超预算时不再有人兜底，
+    #                            只能沿时间轴溢出到后面几镜，尾部被成片 `-shortest` 静默截掉。
+    #                            取值依据：单镜台词预算 30 字 ÷ 4.5 字/秒 ≈ 6.7 秒，这里留到 8 秒，
+    #                            即「正常预算内的台词不动，明显超预算的才压」。
     "video_codec": "copy",      # copy = 不重编码画面（快）；reencode = libx264 重编码
     "audio_bitrate": "192k",
     "sample_rate": 48000,

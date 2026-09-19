@@ -185,12 +185,14 @@ def audit_script(script: Optional[dict]) -> dict:
     为什么「配音生成成功却没有声音」。
 
     这里把这类缺口显式暴露出来，返回：
-      - silent_shots：台词与旁白**同时为空**（该镜配音必然产出 0 句 → 成片无声）
-      - narration_line_count：无台词但有旁白的镜头数（旁白会被
-        tts_client.build_dub_plan 以「旁白」音色合成进成片，故不计入静默）
+      - silent_shots：台词、旁白、音效提示**三者全空**（该镜成片既无人声也无音效）
+      - no_voice_shots：无台词但写了音效提示的镜头（**正常留白**，不算缺陷）
+      - narration_line_count：无台词但残留旁白的镜头数（**旧「旁白时代」剧本的遗留**；
+        本系统自 2026-09-19 起剧本阶段不再产出旁白，见 novel_to_script.REWRITE_RULES 第 8 条）
       - fallback_shots：兜底生成的镜头（内容照搬原文，需人工润色）
       - blank_visual_shots：description 与 prompt_h3 均为空（出片没有画面提示）
       - unknown_speaker_shots：出场角色不在角色表里（音色会退回「旁白」）
+      - overlong_speech_shots：台词量超出单镜时长上限（配音会溢出到后面几镜）
       - warnings：可直接展示给用户的中文提示
 
     纯函数、无副作用、不依赖项目内其它模块。
@@ -201,8 +203,9 @@ def audit_script(script: Optional[dict]) -> dict:
     known = {n for n in iter_names(script.get("characters") or [])}
 
     silent, fallback, blank_visual, unknown_speaker = [], [], [], []
+    no_voice, overlong, legacy_narration = [], [], []
     speakable_lines = 0        # 有台词的镜头数
-    narration_lines = 0        # 无台词但有旁白的镜头数（旁白会被合成进成片，故不算静默）
+    narration_lines = 0        # 无台词但残留旁白的镜头数（旧剧本遗留）
     for i, s in enumerate(shots):
         label = _shot_label(s, i)
         if s.get("fallback"):
@@ -211,12 +214,25 @@ def audit_script(script: Optional[dict]) -> dict:
         if not dlg_text and str(s.get("dialogue_text") or "").strip():
             dlg_text = str(s.get("dialogue_text")).strip()
         narration = str(s.get("narration") or "").strip()
+        cues = str(s.get("audio_cues") or "").strip()
         if dlg_text:
             speakable_lines += 1
         elif narration:
             narration_lines += 1
+            legacy_narration.append(label)
+        elif cues:
+            # 无台词但交代了音效/配乐 → 正常留白（成片由音效铺底），不是缺陷
+            no_voice.append(label)
         else:
             silent.append(label)
+        # 单镜台词量超出时长上限：配音会沿时间轴溢出到后面几镜，尾部被成片截掉。
+        # 该字段由 novel_to_script._norm_shots 在标准化时写入（生成期对账），不是此处凭空计算。
+        try:
+            overflow = float(s.get("duration_overflow_sec") or 0)
+        except (TypeError, ValueError):
+            overflow = 0.0
+        if overflow > 0:
+            overlong.append(f"{label}（超出 {overflow:g}s）")
         desc = str(s.get("description") or "").strip()
         if not desc and not str(s.get("prompt_h3") or "").strip():
             blank_visual.append(label)
@@ -245,9 +261,23 @@ def audit_script(script: Optional[dict]) -> dict:
             f"建议人工润色后再配音出片。")
     if silent:
         warnings.append(
-            f"有 {len(silent)} 个镜头既没有台词也没有旁白（{', '.join(silent[:8])}"
-            f"{' 等' if len(silent) > 8 else ''}）：这些镜头在配音环节不会产出任何音频，"
-            f"整集可能出现「无声片段」。")
+            f"有 {len(silent)} 个镜头没有台词，也没写音效提示（{', '.join(silent[:8])}"
+            f"{' 等' if len(silent) > 8 else ''}）：成片到该镜头既无人声也无音效，"
+            f"请补写 audio_cues 音效提示，或把原文的心理活动改写成该角色的自语台词。")
+    if no_voice:
+        warnings.append(
+            f"有 {len(no_voice)} 个镜头是无台词的纯画面镜（{', '.join(no_voice[:8])}"
+            f"{' 等' if len(no_voice) > 8 else ''}）：已写明音效提示，成片由音效与配乐铺底，属正常留白。")
+    if narration_lines:
+        warnings.append(
+            f"有 {narration_lines} 个镜头残留了「旁白」文本（{', '.join(legacy_narration[:8])}"
+            f"{' 等' if narration_lines > 8 else ''}）：本系统已不再产出旁白，"
+            f"这批剧本是改造前生成的，成片会带画外音解说、且旁白时长常远超画面。建议重新生成剧本。")
+    if overlong:
+        warnings.append(
+            f"有 {len(overlong)} 个镜头的台词量超出单镜时长上限（{', '.join(overlong[:8])}"
+            f"{' 等' if len(overlong) > 8 else ''}）：配音沿时间轴溢出会挤掉后面镜头的台词，"
+            f"成片尾部会被静默截断。建议把这些镜头的台词拆成更多镜头。")
     if blank_visual:
         warnings.append(
             f"有 {len(blank_visual)} 个镜头既无画面描述也无 H3 提示词（{', '.join(blank_visual[:8])}"
@@ -263,27 +293,33 @@ def audit_script(script: Optional[dict]) -> dict:
         "narration_line_count": narration_lines,
         "speakable_line_count_total": speakable_lines + narration_lines,
         "silent_shot_count": len(silent),
+        "no_voice_shot_count": len(no_voice),
+        "overlong_speech_shot_count": len(overlong),
         "fallback_shot_count": len(fallback),
         "all_fallback": all_fallback,
         "blank_visual_shot_count": len(blank_visual),
         "unknown_speaker_shot_count": len(unknown_speaker),
     }
-    if shots and speakable_lines == 0 and narration_lines == 0:
-        warnings.insert(0, f"整集 {len(shots)} 个镜头里既没有台词也没有旁白，配音合成会产出 0 句音频。")
-    elif shots and speakable_lines == 0:
-        warnings.insert(0, f"整集 {len(shots)} 个镜头里没有任何台词，只有 {narration_lines} 镜旁白："
-                           f"成片会全片只剩旁白、没有角色对话，建议检查剧本是否漏写台词。")
-    # ok = 「可以直接进配音出片」。四种情况都不放行：
-    #   有静默镜头（台词与旁白同时为空）/ 有空洞画面 /
-    #   整集既无台词也无旁白（配音链路只读 dialogue + narration）/
+    if shots and speakable_lines == 0:
+        warnings.insert(0, f"整集 {len(shots)} 个镜头里没有任何台词，配音合成会产出 0 句音频："
+                           f"本系统靠 dialogue 出声（旁白已取消），请检查剧本是否漏写台词"
+                           f"（原文的心理活动应当改写成该角色的自语台词）。")
+    # ok = 「可以直接进配音出片」。三种情况不放行：
+    #   有「既无台词也无音效提示」的空响镜头 / 有空洞画面 /
+    #   整集无任何**台词**（配音链路只读 dialogue，成片会完全无人声；旁白已取消、不再算数）/
     #   整集全是兜底镜头（剧本未经模型加工）。
+    #   有残留旁白的旧剧本同样不放行：旁白通道已关闭，成片不会念它。
+    # ⚠️ 「无台词但写了音效提示」的纯画面镜**不算缺陷** —— 新口径允许留白（旧口径曾把它算作
+    #    silent，会把合法的动作镜/空镜整集判失败）。
     return {
         "ok": (bool(shots) and not (silent or blank_visual)
-               and (speakable_lines + narration_lines) > 0 and not all_fallback),
+               and speakable_lines > 0 and not all_fallback),
         "stats": stats,
         "warnings": warnings,
         "problem_shots": {
             "silent": silent,
+            "no_voice": no_voice,
+            "overlong_speech": overlong,
             "fallback": fallback,
             "blank_visual": blank_visual,
             "unknown_speaker": unknown_speaker,

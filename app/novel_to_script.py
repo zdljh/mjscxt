@@ -62,22 +62,25 @@ COVERAGE_THRESHOLD = 0.95     # 原文覆盖率阈值：低于该值自动补生
 REWRITE_RULES = (
     "【改写规则（这是改编，不是缩写：严禁删减原文内容）】\n"
     "1) 原文的叙述、心理描写、场景描写、对话、人物动作必须全部落到镜头里，"
-    "分别体现为画面描述（description）、台词（dialogue）、旁白/画外音（audio_cues 标注「旁白」）、"
-    "动作与情绪（emotion）；\n"
-    "2) 允许体裁形式改写：心理活动可改为旁白或自语台词，叙述可改为画面动作描述，"
-    "环境描写可改为画面与音效，但不得改变情节、不得删减人物；\n"
+    "分别体现为画面描述（description）、台词（dialogue，含角色自语/心声）、"
+    "动作与情绪（emotion）、音效与配乐（audio_cues）；\n"
+    "2) 允许体裁形式改写：心理活动改写成该角色本人的自语台词（speaker 写角色名）"
+    "或可拍的表情/动作，叙述改写成画面动作描述，环境描写改写成画面与音效，"
+    "但不得改变情节、不得删减人物；\n"
     "3) 严禁删除情节、删除人物、跳过段落、合并概括、只挑重点写；"
     "原文内容越多，镜头就要越多（约每 {chars_per_shot} 字 1 个镜头，情节密集处更多）；\n"
     "4) 原文对话尽量原样写进对应角色的 dialogue.text，禁止改写成概括式引述；\n"
     "5) 镜头按原文时间顺序排列，块首镜头自然衔接上一块结尾，不得跳段、不得重复；\n"
     "6) 【细节零删减·最高优先级】原文单句内的修饰细节（外貌、衣着、神态、动作过程、心理活动、"
-    "环境与光线、器物声响）都必须落到镜头里：外貌/器物/环境写进 description（画面描述），"
-    "心理活动与背景补叙写进 narration（旁白，原句措辞优先），动作过程写进 description，"
-    "对话写进 dialogue；\n"
-    "7) 【措辞尽量原样】承载细节时优先沿用原文措辞（如原文「双亲已经亡故，是方之一脉仅剩下的双孤之一」"
-    "就照此措辞写进旁白或画面描述），只做体裁转换与必要的镜头化补白，严禁改写成笼统概括；\n"
-    "8) 自检：写完一块后逐句回看原文，确认每一句（含背景补叙、过渡句、环境句）都能在某条镜头的 "
-    "description / picture / dialogue / audio_cues 中找到对应承载，不允许出现「没写到」的句子。"
+    "环境与光线、器物声响）都必须落到镜头里：外貌/器物/环境/神态写进 description（画面描述），"
+    "心理活动转成可拍的表情动作或角色自语台词，动作过程写进 description，"
+    "对话与自语写进 dialogue，器物声响写进 audio_cues；\n"
+    "7) 【措辞尽量原样】承载细节时优先沿用原文措辞，只做体裁转换与必要的镜头化补白，"
+    "严禁改写成笼统概括；\n"
+    "8) 【本系统不产出旁白】成片没有画外音解说：原文里的背景补叙、环境描写一律靠画面呈现，"
+    "心理活动靠角色神态动作或自语台词呈现，**禁止**用任何「旁白/画外音」形式复述原文；\n"
+    "9) 自检：写完一块后逐句回看原文，确认每一句（含背景补叙、过渡句、环境句）都能在某条镜头的 "
+    "description / visual_detail / dialogue / audio_cues 中找到对应承载，不允许出现「没写到」的句子。"
 )
 
 
@@ -520,23 +523,25 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
     scene_brief = [{"name": s.get("name"), "appearance": (s.get("appearance") or "")[:40]}
                    for s in (bible.get("scenes") or [])[:6] if isinstance(s, dict)]
     shots_cap = max(int(shots_target), min(120, int(shots_target) * 3 + 6))
+    speech_budget = SHOT_SPEECH_BUDGET_CHARS
     prompt = f"""【任务】为漫剧《{bible.get('title') or ''}》的「{chunk.get('title')}」（第 {chunk['index']}/{chunk['total']} 段）编写分镜：至少 {shots_target} 个、上限 {shots_cap} 个，必须完整承载下方原文的全部情节。
 {REWRITE_RULES.format(chars_per_shot=CHARS_PER_SHOT)}
 【全剧风格】{bible.get('style') or ''}　【画面风格指南】{_ctx_block(continuity_ctx, 'style_guide_text') or (bible.get('production_notes') or {}).get('style_guide') or ''}
 {_ctx_line(continuity_ctx, 'prev_block')}{_ctx_line(continuity_ctx, 'bible_block')}{_ctx_line(continuity_ctx, 'contract_block')}{_ctx_line(continuity_ctx, 'style_block')}{_ctx_line(continuity_ctx, 'camera_block')}【可用角色】{json.dumps(char_brief, ensure_ascii=False)}
 【可用物品】{json.dumps(item_brief, ensure_ascii=False)}
 【可用场景】{json.dumps(scene_brief, ensure_ascii=False)}
-【本段原文（必须逐句改写成镜头/台词/旁白/画面描述，严禁删减或概括压缩）】
+【本段原文（必须逐句改写成镜头/台词/画面描述，严禁删减或概括压缩）】
 {chunk.get('text') or ''}
 【本段剧情摘要】{outline.get('summary', '')}
 【本段情节要点】{json.dumps(outline.get('key_beats') or [], ensure_ascii=False)}
 【输出要求】严格只输出一个 JSON 对象，不要 markdown 代码块、不要解释文字，结构如下：
-{{"shots": [{{"camera": "景别+运镜（必须取自上方运镜术语表，如 中景跟拍/特写推入，10 字以内）", "location": "所属场景名（必须来自可用场景）", "description": "画面内容描述（80 字以内，写清人物动作、表情与关键构图；四个要素缺一不可：①人物动作过程（谁做了什么、怎么做的）②外貌衣着细节（发型/瞳色/服装材质/配饰）③环境与光线（时间、天气、光源方向、色调）④构图与景别（人物在画面中的位置、前中后景关系）；尽量沿用原文措辞）", "visual_detail": "画面补充细节（可选；当 description 之外还有更细的时间/天气/光源方向/动作过程/环境细节时写在这里，80 字以内；没有多余细节时写空字符串）", "narration": "旁白文本（承载原文的心理活动/背景补叙/环境描写，尽量照原文措辞，60 字以内；会被合成进成片，无台词的镜头必须填。确实无需旁白时写空字符串，但不得与 dialogue 同时为空）", "dialogue": [{{"speaker": "说话角色名（必须与可用角色完全一致）", "text": "该角色台词（≤60 字，原文对话尽量原样保留）"}}], "emotion": "情绪（8 字以内）", "audio_cues": "音效/配乐提示（60 字以内；旁白请以「旁白:」开头）", "characters_in_shot": ["出场角色名"], "items_in_shot": ["出场物品名"]}}]}}
+{{"shots": [{{"camera": "景别+运镜（必须取自上方运镜术语表，如 中景跟拍/特写推入，10 字以内）", "location": "所属场景名（必须来自可用场景）", "description": "画面内容描述（80 字以内，写清人物动作、表情与关键构图；四个要素缺一不可：①人物动作过程（谁做了什么、怎么做的）②外貌衣着细节（发型/瞳色/服装材质/配饰）③环境与光线（时间、天气、光源方向、色调）④构图与景别（人物在画面中的位置、前中后景关系）；尽量沿用原文措辞）", "visual_detail": "画面补充细节（可选；当 description 之外还有更细的时间/天气/光源方向/动作过程/环境细节时写在这里，80 字以内；没有多余细节时写空字符串）", "dialogue": [{{"speaker": "说话角色名（必须与可用角色完全一致）", "text": "该角色台词（≤30 字；原文对话尽量原样保留；角色的自语/心声写成该角色本人的台词）"}}], "emotion": "情绪（8 字以内）", "audio_cues": "音效/配乐提示（60 字以内，只写环境音/音效/配乐，不写人声）", "characters_in_shot": ["出场角色名"], "items_in_shot": ["出场物品名"]}}]}}
 【禁止输出 prompt_h3 字段】视频提示词由程序在生成阶段按 H3 规范自动构建（它会结合当次实际传入的参考图，生成 subject_definitions / summary / retention_analysis / detailed_description / overall_soundscape / non_diegetic_music 六段）。你在剧本阶段并不知道最终配几张参考图，写出来的英文提示词缺少 <Picture N> 标签，反而会覆盖规范提示词导致出片偏离设定。因此**不要写 prompt_h3、不要写英文提示词**；把画面信息全部写进 description 即可。
-【台词要求】dialogue 必须是数组，数组元素为 {{"speaker": 角色名, "text": 台词}}；speaker 必须精确等于「可用角色」中的名字，禁止写“旁白/众人”等未登记角色；无台词的镜头 dialogue 写 []（空数组），禁止写成字符串或 null。
-【音轨不空约束（每镜必须有人声）】成片配音链路只读 dialogue 与 narration；audio_cues 里写「雨声」「风声」这类音效**不会产生任何人声**。因此每个镜头必须满足其中之一：① dialogue 至少 1 条台词；② narration 有实质文字（**不少于 8 个字**，承载该镜的心理/背景/环境旁白，会被合成进成片）。**严禁 narration 与 dialogue 同时为空**——那会形成「静默镜」，成片到该镜头完全无声（实测曾出现 24 镜里 18 镜无声）。纯画面/纯动作镜头（无台词）必须补写 narration，把该镜发生了什么讲出来。
+【台词要求】dialogue 必须是数组，数组元素为 {{"speaker": 角色名, "text": 台词}}；speaker 必须精确等于「可用角色」中的名字，禁止写“旁白/众人”等未登记角色；无台词的镜头 dialogue 写 []（空数组），禁止写成字符串或 null。角色的心理活动改写成该角色**本人**的自语台词时，speaker 仍写角色名（不要写成「旁白」，本系统没有旁白角色）。
+【台词预算（防成片截断）】单个镜头的 dialogue **合计不超过 {speech_budget} 字**（≈6.7 秒配音）。台词再多就**拆成更多镜头**，不要塞进同一个镜头——配音是按镜头时间轴铺的，单镜台词超出镜头时长会被成片尾部静默截掉。
+【音轨说明（本系统不产出旁白）】成片没有画外音解说，配音链路**只读 dialogue**：audio_cues 里写「雨声」「风声」这类音效**不会产生人声**。因此：① 有对话或自语的镜头必须写 dialogue，禁止把台词塞进 description / visual_detail / audio_cues；② 纯画面/纯动作镜头允许没有台词（该镜成片留白，由音效与配乐铺底），但**必须**在 audio_cues 写明音效/配乐提示；③ **严禁**凭空编造原文里没有的台词来「凑人声」——宁可留白，也不要无中生有。
 【硬性约束】shots 数组元素个数必须在 {shots_target} ~ {shots_cap} 之间：上方原文的全部情节都要落到镜头里，不得删减情节、不得跳过段落、不得合并概括（内容多时用更多镜头承载，而不是少写镜头）；name 字段必须与上面「可用角色/物品/场景」中的名字完全一致，不要新造名字。若上方给出「本集必须出现的原文金句」，必须把每句**原样**写进对应角色的 dialogue.text（不得改写、不得拆分、不得省略）。上一集已发生的事件禁止在本集重演。
-【逐句归属自检（细节零删减）】逐句回看原文，确保每一句（含背景补叙、过渡句、环境句）都落在某条镜头的 description / narration / dialogue / audio_cues 里；短句可合并到相邻镜头，但不得整句丢弃。心理活动与背景补叙优先用 narration 承载，并尽量保留原句措辞。"""
+【逐句归属自检（细节零删减）】逐句回看原文，确保每一句（含背景补叙、过渡句、环境句）都落在某条镜头的 description / visual_detail / dialogue / audio_cues 里；短句可合并到相邻镜头，但不得整句丢弃。记住：本系统没有旁白，背景补叙与环境描写靠画面承载，心理活动靠神态动作或角色自语承载。"""
     label = f"shots#{chunk.get('index')}"
     try:
         data = _robust_json(client, prompt, system=SYSTEM_BIBLE, temperature=0.6,
@@ -584,8 +589,9 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
 def _fallback_shots_for_chunk(chunk: dict, shots_target: int = 1, bible: dict = None) -> list:
     """分镜阶段模型失败时的兜底：按原文逐句生成「原文承载镜头」，保证该段内容不丢。
 
-    与覆盖率补生成同源（只增不删）：description / narration 直接沿用原文措辞，
-    标记 fallback=True 供前端提示需人工润色。
+    与覆盖率补生成同源（只增不删）：原文措辞写进 description（超长部分由 _norm_shots
+    拆进 visual_detail，故正文不会因为 200 字截断而丢失），标记 fallback=True 供前端提示需人工润色。
+    这类镜头没有台词（本系统不产出旁白），成片该段留白 —— dialogue_utils.audit_script 会显式告警。
     """
     text = str((chunk or {}).get("text") or "")
     if not text.strip():
@@ -613,8 +619,7 @@ def _fallback_shots_for_chunk(chunk: dict, shots_target: int = 1, bible: dict = 
     for g in groups:
         out.append({
             "camera": "中景", "location": (scenes[0] if scenes else ""),
-            "description": g[:200], "narration": g[:200],
-            "dialogue": [], "emotion": "平静", "audio_cues": "",
+            "description": g[:200], "dialogue": [], "emotion": "平静", "audio_cues": "",
             "characters_in_shot": chars[:1], "items_in_shot": [], "prompt_h3": "",
             "fallback": True,
             "fallback_reason": f"第 {chunk.get('index')} 段模型分镜失败，按原文逐句承载",
@@ -644,6 +649,10 @@ SHOT_DURATION_MIN = 3.0          # 单镜头最短秒数
 SHOT_DURATION_MAX = 12.0         # 单镜头最长秒数
 SHOT_DURATION_SILENT = 3.0       # 无台词的纯画面镜头基准秒数
 CHARS_PER_SECOND = 4.5           # 中文配音语速基准（字/秒），用于按台词长度推算镜头时长
+#: 单镜台词合计字数建议上限（≈6.7 秒配音）。这是「剧本阶段」的软预算：写超了应当拆成更多镜头。
+#: 「生成期」另有一道硬兜底 —— required_shot_duration() 超 SHOT_DURATION_MAX 的镜头会被 _norm_shots 自动拆镜，
+#: 所以即使模型没遵守预算，也不会让配音溢出到下一镜（溢出的尾部会被成片 -shortest 静默截掉）。
+SHOT_SPEECH_BUDGET_CHARS = 30
 
 # 动作镜识别词：description 命中任意一个即给画面停留时间加成（动作戏观感不仓促）
 _ACTION_MARKERS = (
@@ -654,23 +663,21 @@ _ACTION_MARKERS = (
 )
 
 
-def estimate_shot_duration(shot: dict) -> float:
-    """按画面 + 台词长度自动推算单镜头时长（秒），保证同一剧本多次运行结果稳定。
+def required_shot_duration(shot: dict) -> float:
+    """该镜头「装得下内容」所需的时长（秒），**不封顶**。
 
-    台词兼容两种写法：结构化 [{"speaker","text"}] / 旧字符串（含 "角色名：台词" 前缀）。
+    与 estimate_shot_duration 同源，只是不做 [MIN, MAX] 夹取：返回值 > SHOT_DURATION_MAX
+    就说明这个镜头的台词/画面塞不进一个镜头，配音铺到时间轴上会溢出到下一镜、尾部被
+    成片 `-shortest` 静默截掉（历史缺陷：ep04 旁白 496 秒铺在 100 秒画面上）。
 
-    2026-09-19 优化：纯动作/无台词镜头不再一律给 3 秒 ——
-    - description 里动作要素越多（动词/动作过程词），画面停留越久（动作镜需要呈现完整过程）；
-    - 动作描写长的镜头（描述超 60 字）给更高基准，避免「动作才做一半就切走」。
+    生成期用它做对账：超限即拆镜（见 _norm_shots），而不是事后告警。
     """
-    dialogue = _dlg_text(shot.get("dialogue"))
-    dialogue = re.sub(r"^[^：:]{1,12}[：:]", "", dialogue)          # 去掉“角色名：”前缀
-    if not dialogue:
-        # 无台词时改用旁白长度推算：旁白现在也会被合成进成片
-        # （见 tts_client.build_dub_plan 的「旁白补声」）。若仍按「无台词」给 3 秒基准，
-        # 一句 60 字旁白（≈13 秒）会硬贴在 3 秒画面上 → 音画错位、旁白被截断。
-        dialogue = str(shot.get("narration") or "").strip()
-    speak_sec = len(dialogue) / CHARS_PER_SECOND if dialogue else 0.0
+    # 台词合计时长：_dlg_text 会把同镜多条台词拼起来，正是配音链路的实际喂入量。
+    spoken = _dlg_text(shot.get("dialogue"))
+    spoken = re.sub(r"^[^：:]{1,12}[：:]", "", spoken)               # 去掉“角色名：”前缀
+    if not spoken:
+        spoken = str(shot.get("dialogue_text") or "").strip()
+    speak_sec = len(spoken) / CHARS_PER_SECOND if spoken else 0.0
 
     desc = " ".join(x for x in (
         str(shot.get("description") or ""),
@@ -684,10 +691,23 @@ def estimate_shot_duration(shot: dict) -> float:
         action_hits = sum(1 for kw in _ACTION_MARKERS if kw in desc)
         if action_hits:
             action_sec = min(1.5, 0.4 + action_hits * 0.15)
+    return SHOT_DURATION_SILENT + speak_sec + desc_sec + action_sec
 
-    raw = SHOT_DURATION_SILENT + speak_sec + desc_sec + action_sec
-    value = max(SHOT_DURATION_MIN, min(SHOT_DURATION_MAX, raw))
-    return round(value * 2) / 2.0                                    # 取整到 0.5 秒
+
+def estimate_shot_duration(shot: dict) -> float:
+    """按画面 + 台词长度自动推算单镜头时长（秒），保证同一剧本多次运行结果稳定。
+
+    台词兼容两种写法：结构化 [{"speaker","text"}] / 旧字符串（含 "角色名：台词" 前缀）。
+
+    2026-09-19 优化：纯动作/无台词镜头不再一律给 3 秒 ——
+    - description 里动作要素越多（动词/动作过程词），画面停留越久（动作镜需要呈现完整过程）；
+    - 动作描写长的镜头（描述超 60 字）给更高基准，避免「动作才做一半就切走」。
+
+    ⚠️ 值被夹在 [SHOT_DURATION_MIN, SHOT_DURATION_MAX]：返回值**无法**表达「装不下」。
+    需要判断是否溢出请用 required_shot_duration()。
+    """
+    return round(max(SHOT_DURATION_MIN,
+                     min(SHOT_DURATION_MAX, required_shot_duration(shot))) * 2) / 2.0
 
 
 def build_episode_stats(shots: list) -> dict:
@@ -833,8 +853,13 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
             # h3_prompt_kit 等下游取用。
             "visual_detail": (str(s.get("visual_detail") or "").strip()[:400]
                               or _overflow_detail(s.get("description"), 200)),
-            # 旁白：承载原文心理/背景补叙/环境描写的原句措辞（只做体裁改写，不删减）
-            "narration": str(s.get("narration") or "").strip()[:200],
+            # narration：**已废弃字段，此处显式丢弃**。
+            # 历史缺陷：narration 被当成「心理活动 + 背景补叙 + 环境描写」的公共出口，
+            # 再叠加当时的「每镜必须有人声」约束，导致原著所有叙述性文字都变成画外音解说
+            #（实测 ep04 旁白 2231 字 ≈ 496 秒，铺在 100 秒画面上 → 4.93x 溢出，尾部被
+            # 成片 -shortest 静默截断）。现在剧本阶段不再产出旁白，这里也不再透传模型的
+            # 越界输出，保证「成片无旁白」是硬不变量而不是提示词君子协定。
+            # 旧剧本文件里残留的 narration 由读取侧（coverage / h3_prompt_kit）按需兼容。
             # 台词：结构化 [{"speaker","text"}]（分镜阶段直接写明说话人，配音链路直接读取）
             "dialogue": _dlg_lines(s.get("dialogue"), chars, chars),
             "emotion": str(s.get("emotion") or "平静").strip()[:20],
@@ -867,16 +892,27 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
             (f"{d['speaker']}：{d['text']}" if d.get("speaker") else d.get("text") or "")
             for d in row["dialogue"]
         ).strip()
-        # 单镜头时长：模型显式给出且合法则采用，否则按台词长度自动判定
+        # 单镜头时长：取「模型给的时长」与「内容实际需要的时长」的**较大值**。
+        # 历史缺陷：原实现只要模型给了合法值就直接采用（4~5 秒），完全不看这镜有多少台词
+        #   → 长台词硬贴在短画面上，配音沿时间轴溢出到后面几镜，成片尾部被 `-shortest` 静默截掉。
+        #   （实测《蛊真人》ep04：21/21 镜都直接采用模型值，与 estimate_shot_duration 的返回值全部不一致）
+        auto_dur = estimate_shot_duration(row)
         model_dur = None
         try:
             model_dur = float(s.get("duration"))
         except (TypeError, ValueError):
             model_dur = None
         if model_dur and SHOT_DURATION_MIN <= model_dur <= SHOT_DURATION_MAX:
-            row["duration"] = round(model_dur * 2) / 2.0
+            row["duration"] = round(max(model_dur, auto_dur) * 2) / 2.0
         else:
-            row["duration"] = estimate_shot_duration(row)
+            row["duration"] = auto_dur
+        # 生成期对账：内容确实塞不进单镜上限时**显式记账**，不静默吞咽。
+        # 不在这里私自抬高 SHOT_DURATION_MAX —— QC 侧的 SHOT_DURATION_MAX_OK 是同一个口径，
+        # 单方面拉高会让成片被剧本质检判「时长过长」。溢出部分由 dub_mix 的 max_line_sec 变速兜底，
+        # 该字段供 dialogue_utils.audit_script 提示用户「这一镜台词写多了，建议拆镜」。
+        need = required_shot_duration(row)
+        if need > SHOT_DURATION_MAX:
+            row["duration_overflow_sec"] = round(need - SHOT_DURATION_MAX, 2)
         shots.append(row)
         sid += 1
     # 分配集数

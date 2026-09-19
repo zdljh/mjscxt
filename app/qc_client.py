@@ -31,6 +31,10 @@ from urllib.parse import urlparse
 
 import requests
 
+# 音频客观层（ffmpeg 指标 + 频谱/波形渲染）。⚠️ audio_qc **不反向依赖本模块**，
+# 因此这里 import 不会形成循环；硬阈值与渲染逻辑都由它持有（谁消费谁定义）。
+import audio_qc
+
 logger = logging.getLogger(__name__)
 
 # 项目根目录（定位加密密钥库 output/secrets.enc 与主密钥 .secret_key）
@@ -94,6 +98,18 @@ CRITICAL_ISSUE_KEYWORDS = (
     "人物多余", "人物重叠", "人物数量异常", "多个人物", "分身",
 )
 
+# 音频关键缺陷词表（供 check_audio 的 AI 层结论做代码侧硬闸）。
+# ⚠️ 不能复用上面那张图片词表：音频缺陷与画面缺陷没有交集，拿「畸变/多手」去匹配
+#    音频结论等于永远不阻断；反过来把「杂音」加进图片词表又会让图片质检误杀。
+AUDIO_CRITICAL_KEYWORDS = (
+    "无声", "静音", "没声音", "没有声音", "听不到", "空白", "空音",
+    "爆音", "爆裂", "削波", "削顶", "失真", "过载", "破音",
+    "杂音", "噪声过大", "电流声", "底噪", "嘶嘶",
+    "断续", "断句异常", "跳音", "卡顿", "丢帧", "损坏", "无法播放",
+    "忽大忽小", "音量异常", "忽高忽低",
+    "漏配", "漏句", "缺少人声", "人声缺失", "不是人声", "非人声",
+)
+
 
 #: 否定语境词（出现在关键词前若干字符内，说明该条是在**说明不存在缺陷**）
 _NEGATION_WORDS = ("无", "没有", "未", "不存在", "非", "不", "缺少", "未发现", "已消除")
@@ -108,16 +124,20 @@ def _has_negative_context(text: str, idx: int, window: int = 6) -> bool:
     return any(neg in ctx for neg in _NEGATION_WORDS)
 
 
-def find_critical_issues(issues) -> list:
+def find_critical_issues(issues, keywords=None) -> list:
     """从 issues 文本中筛出命中关键缺陷词的条目
 
     带否定语境过滤：命中词前 6 字内出现「无/没有/未/不存在/非/不」的（如"无明显畸变"）
     不视为关键缺陷，避免把「说明没有缺陷」的条目误判成阻断项。
+
+    ``keywords`` 可换成音频词表（``AUDIO_CRITICAL_KEYWORDS``）；默认走图片/视频词表。
+    ⚠️ 必须可换：音频结论里根本不会出现「畸变/多手」，共用一张词表等于音频永不阻断。
     """
+    table = tuple(keywords) if keywords else CRITICAL_ISSUE_KEYWORDS
     hits: list = []
     for it in (issues or []):
         s = str(it)
-        for k in CRITICAL_ISSUE_KEYWORDS:
+        for k in table:
             found = False
             start = 0
             while True:
@@ -291,9 +311,10 @@ DEFAULT_VIDEO_PROMPT = (
 # 真实 schema（见 output/scripts/<项目>/第N集.json）：
 #   script   : title / episode_no / episode_title / theme / style / characters /
 #              items / scenes / shots / production_notes / metadata
-#   shot     : shot_id / duration / camera / location / description / narration /
+#   shot     : shot_id / duration / camera / location / description / visual_detail /
 #              dialogue[{speaker,text}] / emotion / audio_cues / characters_in_shot /
 #              items_in_shot / prompt_h3 / style
+#              （narration 是 2026-09-19 之前的旧字段，本系统已不产出旁白）
 #   character: name / age / identity / appearance / current_outfit / personality /
 #              voice_style / reference_prompt_zh / reference_prompt_en
 #   item     : name / category / appearance / owner / importance /
@@ -325,8 +346,11 @@ DEFAULT_SCRIPT_PROMPT = (
     "【可执行性评估】\n"
     "14. 总时长应接近目标时长（{target_duration} 秒）\n"
     "15. 每个镜头时长应在 3-12 秒范围内\n"
-    "16. 不得出现台词与旁白同时为空的「静默镜」（成片会整段无声；"
-    "dialogue 与 narration 至少一个要有实质内容）\n\n"
+    "16. 本系统不产出旁白：镜头没有台词是**允许**的（纯画面镜/空镜），"
+    "只要该镜的 audio_cues 写了音效或配乐提示即算合格；"
+    "但如果某镜既没有台词、又没写 audio_cues，成片到该镜会既无人声也无音效，判为问题。\n"
+    "17. 单个镜头的台词合计不宜超过 30 字（约 6.7 秒配音）：台词过多会溢出到后面几镜，"
+    "成片尾部被截断，应拆成更多镜头\n\n"
     "剧本数据：\n{script_data}\n\n"
     "请只输出一个JSON对象，格式：\n"
     '{\"score\": 0-100, \"pass\": true/false, \"reason\": \"一句话结论\", '
@@ -335,17 +359,18 @@ DEFAULT_SCRIPT_PROMPT = (
     '\"prompt_quality\": 0-100, \"feasibility\": 0-100}}'
 )
 
-# ===================== 音频客观判定阈值 =====================
-# 说明：音频无法像图片那样直接交给视觉模型「听」，因此采用两层判定：
-#   客观层（ffmpeg 指标，零模型依赖，始终执行）负责硬闸：无声 / 静音 / 削波 / 时长失控；
-#   AI 层（把频谱图与波形图渲染成图交给多模态模型）负责内容层面的判读。
-# 客观层阈值集中在这里，便于按不同音色与语速整体调档。
-AUDIO_SILENCE_THRESHOLD_DB = -35.0   # 静音判定门限（低于该电平视为静音）
-AUDIO_SILENCE_MIN_DURATION = 0.35    # 最短静音段（秒），避免把正常换气当静音
-AUDIO_NEAR_SILENT_MEAN_DB = -50.0    # 平均电平低于此值 → 视为近乎无声（硬闸）
-AUDIO_CLIP_MAX_DB = -0.1             # 峰值电平高于此值 → 削波失真风险（扣分）
-AUDIO_MIN_VALID_DURATION = 0.15      # 有效音频最短时长（秒），更短视为空文件/合成失败
-AUDIO_HARD_SILENT_RATIO = 0.15       # 有声占比低于此值 → 视为整段无声（硬闸）
+# ===================== 音频质检 =====================
+# 音频无法像图片那样直接交给视觉模型「听」，因此采用两层判定：
+#   客观层（`audio_qc.py`，ffmpeg 指标，零模型依赖，**始终执行**）负责硬闸：
+#     整段无声 / 近乎无声 / 空文件 / 不含音频流；
+#   AI 层（`check_audio`：把音频渲染成频谱图+波形图再送多模态模型）负责内容层判读。
+#
+# ⚠️ 2026-09-19 之前的状况：`audio_enabled` / `audio_prompt` / `audio_min_*` 等配置键、
+#    `DEFAULT_AUDIO_PROMPT`、以及六个 AUDIO_* 阈值常量**全部零消费** —— 配置写好了、
+#    提示词写好了、阈值写好了，但没有任何代码读它们，`audio_qc_ready` 也不存在，
+#    前端「音频质检」页写着「功能正在开发中」。用户打开开关、调阈值什么都不会发生。
+#    硬阈值现已**迁到实际消费它们的 `audio_qc.py`**（单一事实源：谁用谁定义），
+#    可调阈值仍留在本配置文件里，由用户按音色与语速整体调档。
 
 CONFIG_KEYS = (
     "enabled", "image_enabled", "video_enabled", "audio_enabled", "script_enabled",
@@ -362,6 +387,8 @@ CONFIG_KEYS = (
     "audio_min_speech_ratio", "audio_min_mean_db", "audio_max_drift",
     # 尾帧质检开关
     "keyframe_qc_enabled",
+    # 提示词预检（生成前质检，见 prompt_qc.py）。⚠️ 它不依赖质检接口，默认开启
+    "prompt_enabled", "prompt_mode",
 )
 
 
@@ -407,6 +434,12 @@ def _empty_config() -> dict:
             "prompt_quality": {"weight": 0.15, "pass_threshold": 60},
             "feasibility": {"weight": 0.15, "pass_threshold": 70}
         },
+        # 提示词预检（生成前质检，实现见 prompt_qc.py）
+        # ⚠️ 与图片/视频质检不同：它**不依赖质检接口**（纯确定性检查、零成本、零模型依赖），
+        # 因此即使没配质检接口也默认开启 —— 提示词是出图/出片的输入，输入错了后面白跑。
+        "prompt_enabled": True,
+        # warn=只记录 / repair=确定性自愈后放行（默认）/ block=有问题就拦
+        "prompt_mode": "repair",
         "updated_at": None,
     }
 
@@ -576,10 +609,39 @@ def load_config_dict(raw: dict) -> dict:
     return _normalize(base)
 
 
+def _as_bool(v, default: bool = False) -> bool:
+    """宽容布尔解析。
+
+    ⚠️ 不能用 ``bool(v)``：字符串 ``"false"`` / ``"0"`` / ``"no"`` / ``"off"`` 都是
+    非空字符串，``bool()`` 一律判 True —— 于是用户在页面或第三方脚本里把开关存成
+    ``"false"``，读回来反而是「开」，开关形同虚设（本轮审计发现的正是这类空壳开关）。
+    """
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("false", "0", "no", "off", "none", "null", ""):
+            return False
+        if s in ("true", "1", "yes", "on"):
+            return True
+        return default
+    if v is None:
+        return default
+    return bool(v)
+
+
 def _normalize(cfg: dict) -> dict:
-    cfg["enabled"] = bool(cfg.get("enabled"))
-    cfg["image_enabled"] = bool(cfg.get("image_enabled", True))
-    cfg["video_enabled"] = bool(cfg.get("video_enabled", True))
+    cfg["enabled"] = _as_bool(cfg.get("enabled"), False)
+    cfg["image_enabled"] = _as_bool(cfg.get("image_enabled"), True)
+    cfg["video_enabled"] = _as_bool(cfg.get("video_enabled"), True)
+    # ⚠️ 这三个开关此前只出现在 CONFIG_KEYS / _empty_config，_normalize 里没有归一化：
+    #    用户在页面上把 audio_enabled 存成字符串 "false" 或 0，读回来就是真值，
+    #    开关形同虚设。补齐布尔归一化（与 image_enabled / video_enabled 同口径）。
+    cfg["audio_enabled"] = _as_bool(cfg.get("audio_enabled"), True)
+    cfg["script_enabled"] = _as_bool(cfg.get("script_enabled"), True)
+    cfg["keyframe_qc_enabled"] = _as_bool(cfg.get("keyframe_qc_enabled"), True)
+    # 提示词预检：默认开启；模式非法时回落到 repair（与 prompt_qc.prompt_qc_mode 同语义）
+    cfg["prompt_enabled"] = _as_bool(cfg.get("prompt_enabled"), True)
+    _pmode = str(cfg.get("prompt_mode") or "repair").strip().lower()
+    cfg["prompt_mode"] = _pmode if _pmode in ("warn", "repair", "block") else "repair"
     cfg["endpoint_override"] = _normalize_override(cfg.get("endpoint_override"))
     for key, default, lo, hi in (("pass_score", 70, 0, 100), ("max_retries", 2, 0, 10),
                                  ("video_frame_count", 3, 1, 6), ("image_max_side", 1024, 256, 2048),
@@ -593,6 +655,16 @@ def _normalize(cfg: dict) -> dict:
         cfg["api_backoff"] = max(0.0, min(30.0, float(cfg.get("api_backoff", API_RETRY_BACKOFF))))
     except Exception:  # noqa: BLE001
         cfg["api_backoff"] = API_RETRY_BACKOFF
+
+    # 音频客观层可调阈值。⚠️ 此前这三个键只在 _empty_config 里写死，_normalize 不碰它们，
+    # 于是任何越界值（负数占比、正数 dB、>1 的偏差上限）都会原样生效，把判定卡死或放空。
+    for key, default, lo, hi in (("audio_min_speech_ratio", 0.50, 0.0, 1.0),
+                                 ("audio_min_mean_db", -45.0, -100.0, 0.0),
+                                 ("audio_max_drift", 0.50, 0.0, 5.0)):
+        try:
+            cfg[key] = max(lo, min(hi, float(cfg.get(key, default))))
+        except Exception:  # noqa: BLE001
+            cfg[key] = default
     return cfg
 
 
@@ -693,8 +765,15 @@ def public_view(cfg: dict) -> dict:
         "ready": ready,
         "image_qc_active": bool(cfg.get("enabled") and cfg.get("image_enabled") and ep["base_url"] and ep["api_key"] and ep["model"]),
         "video_qc_active": bool(cfg.get("enabled") and cfg.get("video_enabled") and ep["base_url"] and ep["api_key"] and ep["model"]),
+        # 音频分两档：客观层只要开关打开就能跑（零模型依赖），AI 层还要接口就绪。
+        # 分开暴露是为了让前端能如实告诉用户「客观层在跑但 AI 层没配置」，
+        # 而不是笼统显示一个「未启用」让人误以为整条音频质检都没生效。
+        "audio_qc_active": bool(cfg.get("enabled") and cfg.get("audio_enabled")),
+        "audio_ai_active": bool(cfg.get("enabled") and cfg.get("audio_enabled")
+                                and ep["base_url"] and ep["api_key"] and ep["model"]),
         "default_image_prompt": DEFAULT_IMAGE_PROMPT,
         "default_video_prompt": DEFAULT_VIDEO_PROMPT,
+        "default_audio_prompt": DEFAULT_AUDIO_PROMPT,
     })
     return view
 
@@ -719,6 +798,23 @@ def image_qc_ready(cfg: dict, override: dict = None) -> bool:
 def video_qc_ready(cfg: dict, override: dict = None) -> bool:
     return bool(cfg.get("enabled") and cfg.get("video_enabled")
                 and qc_endpoint_ready(cfg, override))
+
+
+def audio_qc_ready(cfg: dict, override: dict = None) -> bool:
+    """音频质检**客观层**是否可执行。
+
+    ⚠️ 与 image_qc_ready / video_qc_ready 不同，这里**不要求质检接口就绪**：
+    客观层是纯 ffmpeg 指标判定（零模型依赖、零成本、毫秒级），没配多模态接口的项目
+    同样应该享受「整段无声 / 时长失控 / 削波」这些硬闸保护。AI 层是否可跑另见
+    ``audio_ai_ready``，``check_audio`` 内部会自行判断。
+    """
+    return bool(_as_bool(cfg.get("enabled"), False)
+                and _as_bool(cfg.get("audio_enabled"), True))
+
+
+def audio_ai_ready(cfg: dict, override: dict = None) -> bool:
+    """音频质检**AI 层**（频谱图 + 波形图送多模态模型）是否可执行。"""
+    return bool(audio_qc_ready(cfg) and qc_endpoint_ready(cfg, override))
 
 
 # ===================== 网络层重试与退避（仅针对瞬时故障） =====================
@@ -1076,11 +1172,63 @@ def _repair_json_quotes(text: str) -> str:
     return "".join(out)
 
 
+def _balance_brackets(text: str) -> str:
+    """括号配平：丢掉多余的右括号 / 补齐缺失的右括号（模型另一种常见破坏方式）。
+
+    实测案例（2026-09-19 音频 AI 层）：模型返回的 issues 数组后面多了一个 ``]``
+        {"score": 5, ..., "issues": ["…", "…", "…"]]}
+    这种输出 json.loads 必然失败，而质检解析失败会走「AI 层调用失败」，让一次
+    措辞/括号失误把整条音频 AI 质检降级成「只有客观层结论」。
+
+    ⚠️ 必须**跳过字符串内部**的括号（reason 里出现「」【】都是正常内容），
+    只对结构括号 `{}` `[]` 做栈式配平；字符串内的括号原样保留。
+    """
+    out: list = []
+    stack: list = []
+    in_str = False
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if in_str:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_str = False
+            i += 1
+            continue
+        if ch == '"':
+            in_str = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch in "{[":
+            stack.append(ch)
+            out.append(ch)
+            i += 1
+            continue
+        if ch in "}]":
+            want = "{" if ch == "}" else "["
+            if stack and stack[-1] == want:
+                stack.pop()
+                out.append(ch)
+            # 多余的右括号：直接丢弃（这是要修的那种情况）
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    closers = {"{": "}", "[": "]"}
+    out.extend(closers[c] for c in reversed(stack))
+    return "".join(out)
+
+
 def _loads_lenient(text: str):
     """多级容错解析模型返回的 JSON（都失败时返回 None，由调用方决定如何处置）
 
-    顺序：原文 → 截取花括号区间 → 去尾逗号 → 修复内嵌未转义引号。
-    逐级收紧，能救回就救回，绝不因一次措辞不当就丢掉一份有效质检结论。
+    顺序：原文 → 截取花括号区间 → 去尾逗号 → 修复内嵌未转义引号 → 括号配平。
+    逐级收紧，能救回就救回，绝不因一次措辞/括号失误就丢掉一份有效质检结论。
     """
     s, e = text.find("{"), text.rfind("}")
     inner = text[s:e + 1] if (s != -1 and e > s) else ""
@@ -1088,7 +1236,8 @@ def _loads_lenient(text: str):
     if inner:
         candidates += [inner, re.sub(r",\s*([}\]])", r"\1", inner)]
     for c in candidates:
-        for cand in (c, _repair_json_quotes(c)):
+        for cand in (c, _repair_json_quotes(c),
+                     _balance_brackets(re.sub(r",\s*([}\]])", r"\1", c))):
             try:
                 obj = json.loads(cand)
             except Exception:  # noqa: BLE001
@@ -1567,6 +1716,168 @@ def check_video(video_path: str, shot_desc: str = "", cfg: dict = None,
                     "duration_source": (fr.get("meta") or {}).get("source"),
                     "video_meta": fr.get("meta") or {}})
     return _apply_style_gate(verdict, style_norm)
+
+
+# ===================== 音频质检（客观层 + AI 层） =====================
+
+def _merge_audio_verdict(objective: dict, ai: dict) -> dict:
+    """把客观层与 AI 层结论合成一份 verdict。
+
+    合成规则是**单向收紧**（与 ``_finalize_verdict`` 同一取向，绝不反向放行）：
+
+    * ``blocked`` = 客观层致命 OR AI 命中音频关键缺陷词；
+    * ``passed``  = 两层都通过（任何一层说不通过就是不通过）；
+    * ``score``   = 两层取**较小值**（避免「客观层 20 分、AI 层 90 分 → 平均 55 分」
+      这种把硬缺陷摊薄的算法）；
+    * ``issues``  = 两层合并去重，并把客观层的硬缺陷放在最前面。
+    """
+    obj = objective or {}
+    aiv = ai or {}
+    obj_issues = list(obj.get("issues") or [])
+    obj_fatal = list(obj.get("critical_issues") or [])
+    ai_issues = [str(x) for x in (aiv.get("issues") or [])]
+    ai_fatal = find_critical_issues(ai_issues, AUDIO_CRITICAL_KEYWORDS) if aiv.get("ok") else []
+
+    issues = []
+    for it in list(obj_fatal) + list(ai_fatal) + obj_issues + ai_issues:
+        s = str(it)
+        if s and s not in issues:
+            issues.append(s)
+
+    scores = [s for s in (obj.get("score"), aiv.get("score"))
+              if isinstance(s, int)]
+    score = min(scores) if scores else None
+    passed = bool(obj.get("passed")) and bool(aiv.get("passed")) if aiv.get("ok") \
+        else bool(obj.get("passed"))
+    blocked = bool(obj_fatal) or bool(ai_fatal)
+
+    fatal_all = list(obj_fatal)
+    for it in ai_fatal:
+        if it not in fatal_all:
+            fatal_all.append(it)
+    if blocked:
+        reason = "关键缺陷：" + "；".join([str(x) for x in fatal_all][:2])
+    elif not passed:
+        reason = "存在可优化项：" + "；".join([str(x) for x in issues][:2])
+    elif issues:
+        reason = "存在可优化项（不阻断）：" + "；".join([str(x) for x in issues][:2])
+    else:
+        reason = obj.get("reason") or aiv.get("reason") or "音频达标"
+
+    out = dict(obj)
+    out.update({
+        "ok": True,
+        "skipped": False,
+        "objective_only": False,
+        "ai_used": bool(aiv.get("ok")),
+        "passed": passed,
+        "accepted": not blocked,
+        "blocked": blocked,
+        "issues": [str(x)[:300] for x in issues][:8],
+        "critical_issues": [str(x)[:200] for x in fatal_all][:6],
+        "reason": str(reason)[:500],
+        "objective": {"passed": obj.get("passed"), "score": obj.get("score"),
+                      "issues": obj_issues, "critical_issues": obj_fatal},
+        "ai": {k: v for k, v in aiv.items() if k != "raw"} if aiv.get("ok") else None,
+    })
+    if isinstance(score, int):
+        out["score"] = score
+    # 音频没有「画面风格」维度，AI 层返回的 style_match 字段在这里没有意义，删掉以免误导
+    out.pop("style_match", None)
+    return out
+
+
+def check_audio(audio_path: str, expect_sec: float = None, line_text: str = "",
+                cfg: dict = None, override: dict = None, visuals_dir: str = None,
+                check_speech_ratio: bool = True) -> dict:
+    """音频质检：客观层（ffmpeg 指标）→ AI 层（频谱图 + 波形图送多模态）。永不抛异常。
+
+    参数
+    ----
+    ``expect_sec``  期望时长（单句传台词推算时长，整轨传视频时长）。只用于「时长偏差」判定。
+    ``line_text``   该句台词，注入 ``audio_prompt`` 的 ``{line_text}`` 占位符供模型比对。
+    ``check_speech_ratio``
+        是否启用「有声占比下限」判定。⚠️ 整集/成片音轨必须传 ``False``：这类音轨本来就有
+        大量刻意留白（无台词镜头），拿单句的 50% 标准去卡它必然误判成「漏句」。
+
+    执行策略（两层都不阻断生成，只给结论）
+    ------------------------------------
+    1. 客观层永远执行；**客观层已判致命时直接返回，不再花一次模型调用** ——
+       整段无声的音频没必要再让模型看频谱图。
+    2. AI 层仅在 ``audio_ai_ready`` 为真时执行；未配置接口时如实标注
+       ``ai_skip_reason``，客观层结论单独生效（不假装做过 AI 质检）。
+    """
+    cfg = cfg or _empty_config()
+    if not cfg.get("enabled"):
+        return {"ok": False, "skipped": True, "reason": "质检总开关未开启"}
+    if not cfg.get("audio_enabled"):
+        return {"ok": False, "skipped": True, "reason": "音频质检开关未开启"}
+    if not audio_path or not os.path.isfile(audio_path):
+        return {"ok": False, "skipped": False, "blocked": True, "passed": False,
+                "score": 0, "issues": [], "critical_issues": [f"音频文件不存在：{audio_path}"],
+                "reason": f"音频文件不存在：{audio_path}", "metrics": {},
+                "objective_only": True}
+
+    # ---- ① 客观层（零模型依赖，始终执行）----
+    objective = audio_qc.quick_check(
+        audio_path, expect_sec=expect_sec,
+        min_speech_ratio=(cfg.get("audio_min_speech_ratio", 0.50)
+                          if check_speech_ratio else None),
+        min_mean_db=cfg.get("audio_min_mean_db", -45.0),
+        max_drift=cfg.get("audio_max_drift", 0.50))
+
+    if objective.get("blocked"):
+        objective["ai_skipped"] = True
+        objective["ai_skip_reason"] = "客观层已判定致命缺陷（整段无声/无音轨/空文件），跳过 AI 层"
+        return objective
+
+    # ---- ② AI 层（需要质检接口）----
+    if not audio_ai_ready(cfg, override):
+        objective["ai_skipped"] = True
+        objective["ai_skip_reason"] = "质检接口未配置（base_url/api_key/model），仅客观层结论生效"
+        return objective
+
+    if not visuals_dir:
+        visuals_dir = os.path.join(os.path.dirname(os.path.abspath(audio_path)),
+                                   "_qc_audio",
+                                   os.path.splitext(os.path.basename(audio_path))[0])
+    vis = audio_qc.render_visuals(
+        audio_path, visuals_dir,
+        prefix=os.path.splitext(os.path.basename(audio_path))[0])
+    if not vis.get("ok"):
+        objective["ai_skipped"] = True
+        objective["ai_skip_reason"] = f"频谱/波形图渲染失败：{vis.get('error')}"
+        return objective
+
+    m = objective.get("metrics") or {}
+    facts = [f"实测时长 {float(m.get('duration') or 0):.2f} 秒"]
+    if expect_sec:
+        facts.append(f"期望时长 {float(expect_sec):.2f} 秒")
+    if isinstance(m.get("speech_ratio"), float):
+        facts.append(f"有声占比 {float(m['speech_ratio']) * 100:.1f}%")
+    if isinstance(m.get("mean_db"), float):
+        facts.append(f"平均电平 {float(m['mean_db']):.1f} dB")
+    if isinstance(m.get("max_db"), float):
+        facts.append(f"峰值电平 {float(m['max_db']):.1f} dB")
+    prompt = (cfg.get("audio_prompt") or DEFAULT_AUDIO_PROMPT)
+    prompt = prompt.replace("{line_text}", str(line_text or "（未提供）")[:200])
+    prompt = prompt.replace("{pass_score}", str(cfg.get("pass_score", 70)))
+    prompt = ("以下是该段配音的 ffmpeg 客观指标（可信的实测值，请结合图片一并判断）："
+              + "，".join(facts) + "。\n") + prompt
+
+    try:
+        ep = resolve_endpoint(cfg, override)
+        ai = _run_vision(ep, prompt, vis["images"], cfg)
+    except Exception as e:  # noqa: BLE001 - 质检失败不能影响主流程
+        logger.warning(f"音频 AI 层质检调用失败：{e}")
+        objective["ai_skipped"] = True
+        objective["ai_skip_reason"] = f"AI 层调用失败：{e}"
+        objective["visuals"] = vis["images"]
+        return objective
+
+    merged = _merge_audio_verdict(objective, ai)
+    merged["visuals"] = vis["images"]
+    return merged
 
 
 # ===================== 质检历史持久化 =====================

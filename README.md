@@ -86,6 +86,14 @@
 | 一致性看板 | 步骤9 · 一致性看板 | 报告落盘 `output/continuity/<项目>/consistency.json`，按镜头/角色展示相似度与判定 |
 | 原文承载归属 | `_shot_coverage_map` | 每个镜头承载了原文哪几句（4-gram 字面比对，与 `coverage.py` 同口径），画布上直接可见 |
 | 单镜重跑 | `/api/storyboard/retry-shot`、`/api/video/retry-shot` | 只影响目标镜头，不触碰其它产物；分镜重跑同样受质检闸门约束 |
+| 提示词预检（生成前质检） | `app/prompt_qc.py` + 生成链路 7 处接入 | 出图/出片**之前**先过一遍质检：分镜图 / H3 / 资产 / **尾帧** 四类提示词的确定性检查（骨架完整性、风格声明、参考图用途、台词泄漏、字幕类指令、质量空词、H3 六段结构与时间码、语言标记、尾帧的「锚定参考图 / 取景连贯 / 链式承接」语义）。可修的当场**自愈**，致命的按模式拦截 —— 把 GPU 花在有问题的提示词上是纯浪费，且出图后才发现就已经晚了。**覆盖全部图片生成路径**（资产图 / 分镜图 / 尾帧），手动链路与 autopilot 流水线一致 |
+| 预检开关与模式 | `qc_config.json` | `prompt_enabled`（默认开）/ `prompt_mode`（`warn` 只记录 / `repair` 自愈后放行（默认）/ `block` 有问题即拦）。⚠️ 与图片/视频质检不同，这一层**不依赖质检接口**：纯确定性检查、零成本、零模型依赖，没配质检接口的项目也能用 |
+| 按需预检接口 | `POST /api/qc/prompt` | 传 `kind`（`storyboard`/`h3`/`asset`/`keyframe`/`audio`）/`prompt`/`style`/`context`/`ref_count` 即返回 `verdict` + 自愈后的 `prompt` + `repairs` + `gate`；`repair=false` 可只检查不改写 |
+| 音频客观质检 | `app/audio_qc.py` | 零模型依赖、毫秒级、**永远执行**：一次 ffmpeg 解码取全量指标（时长 / 平均电平 / 峰值 / 静音时长 → 有声占比），再做硬闸（时长 < 0.15s、有声占比 < 15%、平均电平 < -50dB）+ 软扣分（占比偏低 / 电平偏低 / 峰值触顶 / 时长偏差超上限）。⚠️ **解析不出平均电平即判失败** —— 无声轨的 mp4 不能因为读得出 Duration 就被放行 |
+| 音频 AI 质检（可选） | `qc_client.check_audio` | 用 `showspectrumpic` + `showwavespic` 把音轨渲染成**频谱图 + 波形图**喂多模态模型（顺序固定，对齐 `DEFAULT_AUDIO_PROMPT`）。两层结论**单向收紧**：客观层判死的，AI 层说好也翻不回来；AI 层任何异常一律 fail-open，绝不拖垮出片 |
+| 配音台词预检 | `prompt_qc`（kind=`audio`） | 送 TTS **之前**检查台词：结构化残留（`(S1) 说：` 这类说话人前缀、`[Chinese]` 语言标记）、舞台指示、零宽字符、emoji、超长、情绪未随 instruct 下发。能确定不是台词的当场剥掉，**语义缺陷不在文本层硬改**（改为提示从剧本重新取台词），空台词绝不自愈 |
+| 音频质检配置 | `qc_config.json` | `audio_enabled` / `audio_min_speech_ratio` / `audio_min_mean_db` / `audio_max_drift`；⚠️ 开关按**字符串语义**解析（`"false"`/`"0"`/`"no"` = 关），否则 `bool("false")` 为真、开关形同虚设。阈值单一事实源在 `audio_qc.py` |
+| 音频质检接口 | `POST /api/qc/audio` | 不传 `path` 时按 `mix`（带配音成片）> `merged`（整集音轨）> `line`（单句）推导；`with_ai=false` 只跑客观层。⚠️ **整轨口径自动关闭有声占比判定** —— 成片/整集天然有留白，按单句口径判会满屏误报「漏句」 |
 
 ### 生成可控性
 
@@ -120,6 +128,12 @@
 | 参考图静默丢失 | 前端传结构不完整的角色对象时，视频退化为无角色锚点 | 后端 `_collect_asset_refs` 从磁盘资产兜底 |
 | 提示词分析器看不到画面细节 | 细节只写在 `visual_detail` 时，它写出的 `prompt_h3` / `storyboard_prompt_zh` 完全没有光影与时间描述 | `script_prompt_analyzer.build_shot_prompt` 改为合并 `description + visual_detail` 后喂入模型 |
 | 重写镜头后细节错位 | 局部重写只换 `description`，旧 `visual_detail` 仍留着上一条描述的尾巴（新写正午、旧留黄昏逆光） | `rewrite_shots_for_issues` 同步刷新/清空 `visual_detail`，并把该字段纳入喂入内容与输出 schema |
+| AI 总控不知道本项目在拍什么小说 | 新建项目（《铜铃巷》）后与 AI 总控沟通风格，总控却按**另一部小说**（《蛊真人》）给出整套风格方案 —— 因为它 31 个工具里**没有任何读取本项目原著的能力**，只能拿上下文里的项目名瞎猜 | 新增 `get_novel` 工具 + `GET /api/projects/<key>/novel-brief`（书名 / 章节数 / 开篇正文 / 已定风格），并在系统提示里要求「谈风格前必须先调用」 |
+| 总控看得见别的项目在跑什么 | `GET /api/autopilot/status?project=X` 虽把计数/交付/曲线收敛到 X，但 `current` / `last_error` 仍直接来自全局状态，把**当时正在跑的另一个项目**的名字与剧情标题一起回显。该段落在 agent 工具结果的 1600 字符窗口内 → 模型把别的项目当成本项目 | `autopilot.status(project)` 收敛 `current`：正在生产的不是本项目时置空，只回一个中性 `other_project_running: true`；`last_error` 一并清空。前端只用不带 `project` 的全局视图，行为不变 |
+| 成片被「画外音解说」淹没 | `narration` 被当成原文「心理活动 + 背景补叙 + 环境描写」的公共出口，再叠加「每镜必须有人声」的硬约束，原著所有叙述性文字都变成旁白解说。实测《蛊真人》ep04 旁白 2231 字 ≈ 496 秒铺在 100 秒画面上（**4.93x**），尾部被成片 `-shortest` 静默截掉；ep2/ep3 同为纯旁白集 | **产品决定：成片不再产出旁白**。剧本提示词新增第 8 条「本系统不产出旁白」（心理活动→角色自语台词/神态，背景与环境→画面），分镜 schema 删除 `narration`；`_norm_shots` 显式丢弃模型越界输出的 narration（硬不变量）；`tts_client` 旁白补声通道关闭并对旧剧本记警告；`audit_script` 的 ok 只认 dialogue |
+| 镜头时长无视台词量 | `_norm_shots` 只要模型给了合法 duration（4~5 秒）就直接采用，从不校验这镜有多少台词 → 长台词硬贴短画面，配音沿时间轴溢出到后面几镜，尾部被静默截断（实测 ep04 21/21 镜的 duration 都取自模型值，与 `estimate_shot_duration` 返回值全不一致） | 新增 `required_shot_duration()`（不封顶的时长需求）；`_norm_shots` 取 `max(模型值, 实际需要值)`，超上限的镜头写 `duration_overflow_sec` 供体检告警；提示词新增「单镜台词合计 ≤ 30 字，超出要拆镜」 |
+| 变速兜底是死代码 | `MIX_DEFAULT_PARAMS["max_line_sec"] = 0.0` 让 `dub_mix` 的 `if max_line > 0 and dur > max_line` 恒为假 → `atempo` 变速从未执行（实测 ep04 全部条目 `fit_ratio` 恒为 1.0），台词超预算时无人兜底 | 默认值改为 `8.0`（正常预算内不动、明显超预算才压），并保留每次压缩的告警 |
+| 旁白体检口径与配音链路不一致 | 旧口径「无台词但有旁白」不算静默、但配音链路不念旁白；且「既无台词也无音效提示」的镜头反而不被点名 | `audit_script` 拆成 `silent`（台词/旁白/音效**三者全空**＝真缺陷）与 `no_voice`（有音效提示的合法留白，不再判失败），并新增 `overlong_speech` 溢出告警；`speaker_fallback` 改按最终音色判定，不再是一条永远为假的死规则 |
 
 > ⚠️ **密钥提醒**：若 `ai_config.json` / `qc_config.json` 曾以明文形式进过 git、云盘同步或被分享，
 > 请到对应平台**轮换密钥**——加密只防未来，已暴露的无法追回。
@@ -338,4 +352,4 @@ custom_nodes/
 
 ---
 
-**版本**: 2.2.0 | **日期**: 2026-09-19
+**版本**: 2.5.0 | **日期**: 2026-09-19

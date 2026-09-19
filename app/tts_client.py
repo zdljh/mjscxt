@@ -66,11 +66,10 @@ VOICE_PRESETS = [
 SPEAKER_KEYS = tuple(v["speaker"] for v in VOICE_PRESETS)
 MALE_POOL = ["Ryan", "Aiden", "Dylan", "Eric", "Uncle_fu"]
 FEMALE_POOL = ["Serena", "Vivian", "Ono_anna", "Sohee"]
-# 旁白发言人名（非角色表中的真实角色）。它是「无台词镜头的旁白补声」用的伪角色名，
-# 与 build_dub_plan 里原有的说话人兜底值保持一致。
+# 说话人兜底名（非角色表中的真实角色）：当某句台词无法定位说话人时用它的默认音色。
+# ⚠️ 2026-09-19 起它**不再是**「旁白补声」入口 —— 旁白通道已关闭（见 build_dub_plan 注释），
+# 这里只作为「说话人识别不出来」时的音色兜底保留。
 NARRATION_SPEAKER = "旁白"
-# 旁白补声的最小字数：太短（如「……」）不值得单独合成一句。
-NARRATION_MIN_CHARS = 4
 
 LANGUAGES = ["Auto", "Chinese", "English", "Japanese", "Korean", "French",
              "German", "Spanish", "Portuguese", "Russian", "Italian"]
@@ -464,6 +463,7 @@ def build_dub_plan(script: Dict, voice_map: Optional[Dict] = None,
 
     # 逐句角色覆盖：voice_map["lines"][str(shot_id)] = {"character": "...", ...}
     lines: List[Dict] = []
+    legacy_narration: List[str] = []   # 旧剧本里「只剩旁白、没有台词」的镜头（旁白通道已关闭，会被记警告）
     for shot in script.get("shots") or []:
         shot_id = shot.get("shot_id")
         if shot_ids and str(shot_id) not in [str(s) for s in shot_ids]:
@@ -473,18 +473,15 @@ def build_dub_plan(script: Dict, voice_map: Optional[Dict] = None,
         dlg_rows = _norm_dlg_lines(shot.get("dialogue"), characters, cast)
         if not dlg_rows and shot.get("dialogue_text"):
             dlg_rows = _norm_dlg_lines(shot.get("dialogue_text"), characters, cast)
-        # ---- 旁白补声：修「静默镜 → 成片整段无声」 ----
-        # 此前 build_dub_plan **只读 dialogue**，剧本的 narration（心理活动/背景补叙/
-        # 环境描写）完全不进配音 → 「无台词但有旁白」的镜头成片照样无声
-        # （实测《雨夜归人》第 1 集 24 镜 / 台词 3 / 无台词镜 21，其中 18 镜连旁白也是空的）。
-        # 这里在该镜没有任何台词时，用默认「旁白」音色把 narration 念出来，与
-        # dialogue_utils.audit_script 的 silent 口径（台词或旁白有其一即不算静默）对齐。
-        narration_voiced = False
-        if not dlg_rows:
-            _nar = clean_line_text(shot.get("narration"))
-            if len(_nar) >= NARRATION_MIN_CHARS:
-                dlg_rows = [{"speaker": NARRATION_SPEAKER, "text": _nar}]
-                narration_voiced = True
+        # ---- 旁白通道已关闭（2026-09-19）----
+        # 原实现会在这里把 narration（心理活动/背景补叙/环境描写）用默认「旁白」音色补声，
+        # 目的是让「无台词但有旁白」的镜头不成片无声。但旁白被当成原文叙述的公共出口后，
+        # 一句句画外音解说把成片彻底淹没（实测 ep04 旁白 2231 字 ≈ 496 秒铺在 100 秒画面上，
+        # 尾部被 `-shortest` 静默截掉）。现在产品侧已决定「成片不产出旁白」：
+        # 剧本阶段不再写 narration（novel_to_script.REWRITE_RULES 第 8 条），配音链路也不再念它。
+        # 旧剧本里残留的 narration 会被显式记账（见下方 legacy_narration），不静默丢弃。
+        if not dlg_rows and clean_line_text(shot.get("narration")):
+            legacy_narration.append(str(shot_id))
         override = (vmap.get("lines") or {}).get(str(shot_id)) or {}
         multi = len(dlg_rows) > 1
         for li, row in enumerate(dlg_rows):
@@ -522,8 +519,8 @@ def build_dub_plan(script: Dict, voice_map: Optional[Dict] = None,
                 "shot_id": shot_id,
                 "character": char_name,
                 "text": text,
-                # "narration" = 由该镜旁白补声生成的配音行（无台词镜头），便于前端/审计区分
-                "source": "narration" if narration_voiced else "dialogue",
+                # 配音行一律来自剧本 dialogue（旁白通道已于 2026-09-19 关闭）
+                "source": "dialogue",
                 "duration_hint": shot.get("duration"),
                 "emotion": emotion,
                 "voice": voice,
@@ -542,11 +539,19 @@ def build_dub_plan(script: Dict, voice_map: Optional[Dict] = None,
             "voice": voice,
             "line_count": used,
         })
+    warns: List[str] = []
+    if legacy_narration:
+        warns.append(
+            f"有 {len(legacy_narration)} 个镜头只有旁白、没有台词（镜头 {', '.join(legacy_narration[:8])}"
+            f"{' 等' if len(legacy_narration) > 8 else ''}）：旁白通道已关闭，这些镜头不会产出配音，"
+            f"成片会留白。这批剧本是旁白改造前生成的，建议重新生成剧本"
+            f"（原文的心理活动应当改写成该角色的自语台词）。")
     return {
         "project": project, "episode": episode,
         "characters": chars_out,
         "lines": lines,
         "line_count": len(lines),
+        "warnings": warns,
         "voice_map": vmap,
     }
 

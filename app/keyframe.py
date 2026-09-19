@@ -308,7 +308,8 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
                        progress_cb: Optional[Callable[[int, int, dict], None]] = None,
                        chain_mode: str = DEFAULT_CHAIN_MODE,
                        verify_cb: Optional[Callable[[str, dict, dict], Tuple[bool, str]]] = None,
-                       max_verify_retries: int = 0
+                       max_verify_retries: int = 0,
+                       preflight_cb: Optional[Callable[[str, dict, dict], dict]] = None
                        ) -> dict:
     """批量生成尾帧（串行；单镜失败不影响其它镜）
 
@@ -316,6 +317,11 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
     verify_cb(path, shot, item) -> (ok, reason)：可选的尾帧质检回调（由 app.py 注入
         QC 实现）。返回 False 时会换 seed 重画，最多 max_verify_retries 次；
         仍不通过则本镜判失败（链式会让后续镜自动回退到自己的分镜图，不会连环污染）。
+    preflight_cb(prompt, shot, item) -> dict：**生成前**提示词预检回调（由 app.py 注入
+        ``prompt_qc.preflight``，与 verify_cb 同一注入风格）。返回
+        ``{"prompt": <自愈后的提示词>, "verdict": …, "repairs": [...]}``；本函数取其中的
+        ``prompt`` 作为实际生成用提示词，并把精简结论记进结果。**不阻断**：尾帧是成批
+        生成的，为一条提示词打断整批代价过大 —— 与资产/整集链路同一取舍。
     progress_cb(done, total, item) —— 每个镜头完成后回调一次
     """
     cm = norm_chain_mode(chain_mode)
@@ -371,6 +377,35 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
         _mirror(start, start_frame_link_path(keyframes_dir, seq))
         prompt = build_end_frame_prompt(shot, chained=chained)
 
+        # ---- 生成前预检（与资产 / 分镜 / 视频同一条链路）----
+        # 尾帧是「以首帧为参考图的图生图」，提示词缺锚定语义就会换脸换服装；链式模式下
+        # 坏尾帧还会成为下一镜的首帧并顺着链污染。这里能自愈的先自愈，不能自愈的只记录
+        # （成批生成不阻断），真正的拦截交给生成后的尾帧质检 verify_cb。
+        pf_info: Optional[dict] = None
+        if preflight_cb is not None:
+            try:
+                pf = preflight_cb(prompt, shot, item) or {}
+                if isinstance(pf, dict):
+                    cand = pf.get("prompt")
+                    if cand:
+                        if cand != prompt:
+                            logger.info(f"尾帧 shot {sid} 提示词预检自愈："
+                                        f"{'；'.join((pf.get('repairs') or [])[:3]) or '已规范化'}")
+                        prompt = cand
+                    pf_info = {
+                        "label": pf.get("label") or "",
+                        "accept": bool(pf.get("accept", True)),
+                        "repairs": list(pf.get("repairs") or []),
+                        "verdict": pf.get("verdict") or {},
+                        "rebuild_hint": pf.get("rebuild_hint") or "",
+                    }
+                    if not pf_info["accept"]:
+                        logger.warning(f"尾帧 shot {sid} 提示词预检未通过"
+                                       f"（{pf_info['label']}）：{pf.get('reason') or ''}")
+            except Exception as e:  # noqa: BLE001
+                # fail-open：预检自身出问题绝不能拖垮尾帧生成
+                logger.warning(f"尾帧提示词预检回调异常（按原样生成）：{e}")
+
         attempts = max(0, int(max_verify_retries or 0)) if verify_cb else 0
         r: dict = {}
         for attempt in range(attempts + 1):
@@ -395,7 +430,8 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
 
         r.update({"shot_id": sid, "seq": seq, "chained": chained,
                   "chain_from": item.get("chain_from"),
-                  "start_frame": start})
+                  "start_frame": start,
+                  "prompt_qc": pf_info})
         results.append(r)
         if r.get("ok"):
             ok_count += 1

@@ -573,18 +573,22 @@ def step_keyframe(ctx) -> dict:
         ctx["progress"](f"尾帧 {done}/{total}", min(pct, 82), phase="keyframe")
 
     _kf_verify, _kf_vretries = A._keyframe_qc_verifier(ctx["project_name"])
+    # 尾帧提示词预检（生成前质检）：与手动链路保持同一覆盖（能自愈先自愈，成批不阻断）
+    _kf_pre, _kf_pre_on = A._keyframe_prompt_preflight(ctx["project_name"])
     report = A.keyframe.generate_keyframes(
         shots, sb_map, kf_dir, seed=ctx["config"].get("seed"),
         timeout=int(ctx.get("timeout_per_segment") or 900),
         only_missing=True, progress_cb=_cb,
         chain_mode=ctx["config"].get("keyframe_chain_mode") or "auto",
-        verify_cb=_kf_verify, max_verify_retries=_kf_vretries)
+        verify_cb=_kf_verify, max_verify_retries=_kf_vretries,
+        preflight_cb=_kf_pre)
     recheck = probe_keyframe(ctx)
     if not recheck.get("done"):
         return {"ok": False, "detail": {"report": report, "probe": recheck},
                 "error": f"尾帧缺失 {len(recheck.get('missing') or [])} 镜："
                          f"{recheck.get('missing')[:8]}"}
-    return {"ok": True, "detail": {"report": report, "probe": recheck}, "artifact": kf_dir}
+    return {"ok": True, "detail": {"report": report, "probe": recheck,
+                                   "prompt_qc_enabled": _kf_pre_on}, "artifact": kf_dir}
 
 
 def step_video(ctx) -> dict:

@@ -214,6 +214,9 @@ def _beats(shot: dict, duration: float) -> List[Tuple[float, float, str]]:
     避免「描述只有一瞬、视频却要演 12 秒」的空转。
     """
     desc = str(shot.get("description") or "").strip()
+    # narration 是**旧剧本遗留字段**（本系统自 2026-09-19 起剧本阶段不再产出旁白）。
+    # 保留读取只为兼容改造前生成的项目、让它们重出视频时不至于丢掉画面里的情绪衔接；
+    # 新剧本这里恒为空串，下方「画外音延续」分支不会触发。
     narration = str(shot.get("narration") or "").strip()
     detail = str(shot.get("visual_detail") or "").strip()
     # ⚠️ 模型可能把同一条细节同时写进 description 与 visual_detail（两个字段本就允许重叠），

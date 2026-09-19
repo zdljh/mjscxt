@@ -882,6 +882,20 @@ def status(project: str = "") -> dict:
     else:
         enabled_count = len(enabled)
         plan_count = len(plans)
+    # ⚠️ 2026-09-19 用户旅程实测教训：新建项目后与 AI 总控沟通风格，总控却按
+    # **另一个项目的小说**给建议（拿《蛊真人》的方案回答《铜铃巷》的项目）。
+    # 根因：status(project=X) 虽然把计数 / 交付物 / 曲线收敛到了 X，但 current 与
+    # last_error 直接来自全局 _STATE，仍是「当时正在跑的那个项目」的内容，而这两段
+    # 都落在 agent 工具结果的 1600 字符窗口内 —— 模型看到别的项目名，就当成本项目。
+    # 这里：只有当正在生产的项目就是本项目时才回显 current，否则只给中性标志。
+    if project:
+        cur = st.get("current") or {}
+        cur_proj = str(cur.get("project") or "")
+        if cur_proj and cur_proj != project:
+            st["current"] = None
+            st["other_project_running"] = True
+            # last_error 无项目归属，同样可能是别的项目的报错，一并藏起来
+            st["last_error"] = ""
     st.update({
         # 回显作用域：调用方（含 AI 总控）必须能一眼看出这份数字属于哪个项目，
         # 否则模型会拿历史对话里的项目名去「对号入座」，把 A 的数据说成 B 的。

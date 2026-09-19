@@ -19,7 +19,7 @@ from config import (
     COMFYUI_URL, PROJECT_ROOT_DIR, PROJECT_OUTPUT_DIR, SCRIPT_DIR,
     CHARACTERS_DIR, ITEMS_DIR, SCENES_DIR, STORYBOARDS_DIR, KEYFRAMES_DIR, VIDEOS_DIR, FINAL_DIR,
     NOVELS_DIR, LLM_CONFIG_PATH, NOVEL_CHUNK_CHARS, NOVEL_MAX_CHUNKS,
-    NOVEL_DEFAULT_SHOTS, NOVEL_PREVIEW_CHARS, LLM_REQUEST_TIMEOUT,
+    NOVEL_DEFAULT_SHOTS, NOVEL_PREVIEW_CHARS, NOVEL_BRIEF_CHARS, LLM_REQUEST_TIMEOUT,
     QC_CONFIG_PATH, QC_DIR,
     WATERMARK_CONFIG_PATH, WATERMARK_DIR,
     AI_CONFIG_PATH, AI_MODULES, AI_CHAT_HISTORY_PATH, AI_SETTINGS_PATH,
@@ -61,9 +61,11 @@ import export_manager
 from export_manager import ExportManager
 import nle_export
 import pipeline
+import audio_qc
 import plugin_registry
 import project_store
 import providers
+import prompt_qc
 import qc_client
 import style_kit
 import task_store
@@ -409,6 +411,60 @@ def api_project_detail(pid):
 @app.route('/api/projects/<path:pid>/detail', methods=['GET'])
 def api_project_detail_alias(pid):
     return api_project_detail(pid)
+
+
+@app.route('/api/projects/<path:pid>/novel-brief', methods=['GET'])
+def api_project_novel_brief(pid):
+    """本项目「原著简报」：书名 + 章节数 + 开篇正文 + 已定风格。
+
+    ⚠️ 2026-09-19 用户旅程实测教训：AI 总控此前**没有任何读取本项目小说的能力**，
+    而它在「启动生产前先与用户沟通风格」这一步必须知道原著讲什么。缺了这个接口，
+    模型只能靠上下文里别的东西瞎猜 —— 实测拿《蛊真人》的方案回答了《铜铃巷》的项目。
+    """
+    rec = project_store.summarize(pid)
+    if not rec:
+        return jsonify({"success": False, "error": f"项目不存在：{pid}"}), 404
+    dir_key = rec.get("dir_key") or rec.get("key") or pid
+    try:
+        cfg = project_store.read_config(dir_key) or {}
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning("读取项目配置失败（%s）：%s", dir_key, e)
+        cfg = {}
+    novel_id = str(rec.get("novel_id") or "")
+    out = {
+        "project": rec.get("name") or dir_key,
+        "project_key": dir_key,
+        "style": cfg.get("style") or "",
+        "art_style": cfg.get("art_style") or "",
+        "episodes": cfg.get("episodes"),
+        "target_shots": cfg.get("target_shots") or cfg.get("shots_per_episode"),
+        "novel_id": novel_id,
+        "novel_name": rec.get("novel_name") or "",
+        "novel_title": "",
+        "chapter_count": 0,
+        "preview": "",
+        "preview_chars": 0,
+        "total_chars": 0,
+        "note": "",
+    }
+    if not novel_id:
+        out["note"] = "该项目未关联小说，无法给出原著依据"
+        return jsonify({"success": True, **out})
+    try:
+        meta = get_novel(NOVELS_DIR, novel_id) or {}
+        out["novel_title"] = meta.get("title") or ""
+        out["chapter_count"] = len(meta.get("chapters") or [])
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning("读取小说元信息失败（%s）：%s", novel_id, e)
+    try:
+        pv = preview_novel(NOVELS_DIR, novel_id, offset=0, limit=NOVEL_BRIEF_CHARS)
+        out["preview"] = pv.get("text") or ""
+        out["preview_chars"] = len(out["preview"])
+        out["total_chars"] = pv.get("total_chars") or 0
+    except Exception as e:  # noqa: BLE001
+        out["note"] = f"原著正文读取失败：{e}"
+        app.logger.warning("读取小说正文失败（%s）：%s", novel_id, e)
+    return jsonify({"success": True, **out})
 
 
 @app.route('/api/projects/<path:pid>/rename', methods=['POST'])
@@ -1286,6 +1342,9 @@ def api_keyframes_generate():
                                    chain_mode=chain_mode)
     # 尾帧质检（可选）：默认跟随图片质检开关，不达标换 seed 重画，仍不通过则本镜判失败
     _kf_verify, _kf_vretries = _keyframe_qc_verifier(project)
+    # 尾帧提示词预检（生成前质检）：能自愈的先自愈再出图；成批生成不阻断
+    # （与资产 / 整集视频同一取舍 —— 为一条提示词打断整批代价过大）
+    _kf_pre, _kf_pre_on = _keyframe_prompt_preflight(project)
     with lock:
         generation_state[task_id] = {
             "status": "running", "progress": 0, "phase": "关键帧尾帧生成",
@@ -1333,7 +1392,7 @@ def api_keyframes_generate():
                 shots, sb_map, kf_dir, seed=seed, timeout=timeout,
                 only_missing=only_missing, progress_cb=_progress,
                 chain_mode=chain_mode, verify_cb=_kf_verify,
-                max_verify_retries=_kf_vretries)
+                max_verify_retries=_kf_vretries, preflight_cb=_kf_pre)
             ok = int(report.get("succeeded") or 0)
             with lock:
                 generation_state[task_id].update({
@@ -1358,7 +1417,8 @@ def api_keyframes_generate():
     return jsonify({"success": True, "task_id": task_id, "status": "started",
                     "total": len([p for p in plan if p["need_gen"]]),
                     "keyframes_dir": kf_dir, "chain_mode": chain_mode,
-                    "qc_enabled": bool(_kf_verify)})
+                    "qc_enabled": bool(_kf_verify),
+                    "prompt_qc_enabled": bool(_kf_pre_on)})
 
 
 @app.route('/api/keyframes/file/<path:filename>')
@@ -1618,6 +1678,17 @@ def api_storyboard_retry_shot():
         shot = dict(shot, style=(shot.get("style") or _rs_style))
     _rs_size = style_kit.aspect_size(style_kit.aspect_ratio(_rs_style))
     prompt = comfyui_client.build_storyboard_prompt(shot, labels)
+    # ---- 提示词预检（生成前质检）：先判 → 确定性自愈 → 再出图 ----
+    # 目的：把 GPU 花在有问题的提示词上是纯浪费，且出图后质检才发现就已经晚了。
+    qc_cfg = _qc_load_cfg()
+    prompt, _pf, _pgate = _prompt_preflight(
+        "storyboard", prompt, ctx=shot, style=(shot.get("style") or _rs_style),
+        ref_count=len(refs))
+    if not _pgate.get("accept"):
+        return jsonify({"success": False, "prompt_qc_blocked": True,
+                        "error": f"提示词预检未通过（{_pgate.get('label')}）：{_pgate.get('reason')}"
+                                 + (f"；建议：{_pf.get('rebuild_hint')}" if _pf.get("rebuild_hint") else ""),
+                        "prompt_qc": _pf.get("verdict")}), 200
     seed = data.get('seed')
     try:
         result = comfyui_client.generate_storyboard(
@@ -1631,7 +1702,6 @@ def api_storyboard_retry_shot():
         return jsonify({"success": False, "error": "ComfyUI 未返回分镜图"}), 500
 
     # 质检（若已开启）：不达标同样阻断入库（与批量链路一致）
-    qc_cfg = _qc_load_cfg()
     qc_on = qc_client.image_qc_ready(qc_cfg)
     _ep = _ep_of_script(script, data.get('episode_no'))
     dst_dir = _ep_dir(os.path.join(STORYBOARDS_DIR, project), _ep)
@@ -1664,11 +1734,24 @@ def api_storyboard_retry_shot():
     # 同步更新 manifest 中该镜条目
     _update_storyboard_manifest_shot(project, shot_id, seq, dst, prompt, refs, verdict, gate,
                                      episode_no=_ep)
+    # 提示词预检结论也落质检历史（kind=prompt），便于回溯「这一镜出图前提示词是什么状态」
+    if not _pf.get("skipped"):
+        try:
+            _qc_record_verdict(project, "prompt", shot_id, "分镜图提示词预检",
+                               0, seed, None, _pf.get("verdict") or {}, extra={
+                                   "prompt_kind": "storyboard",
+                                   "repairs": _pf.get("repairs") or [],
+                                   "mode": (_pf.get("verdict") or {}).get("mode"),
+                                   "accept": bool(_pf.get("accept")),
+                               }, style=(shot.get("style") or _rs_style))
+        except Exception as e:  # noqa: BLE001
+            app.logger.warning(f"提示词预检记录落盘失败：{e}")
     _sub = f"ep{int(_ep):02d}/" if _ep and int(_ep) > 1 else ""
     return jsonify({"success": True, "project": project, "shot_id": shot_id, "seq": seq,
                     "path": dst,
                     "url": f"/api/storyboards/file/{project}/{_sub}shot_{seq:02d}.png",
                     "prompt": prompt, "ref_count": len(refs),
+                    "prompt_qc": _pf.get("verdict"), "prompt_qc_repairs": _pf.get("repairs") or [],
                     "qc": verdict})
 
 
@@ -1800,6 +1883,23 @@ def api_video_retry_shot():
             dur = 5.0
         seg = {"prompt": prompt, "duration": dur, "reference_images": refs,
                "name": f"shot_{seq:02d}"}
+
+    # ---- 提示词预检（生成前质检）----
+    # H3 的结构缺段只有生成端能重建（必须有每张参考图的用途），所以这里做「验证 + 安全追加」，
+    # 命中致命缺陷就直接拦：缺段的 H3 提示词等于出片跑偏，而一次视频生成的代价远大于一次判断。
+    prompt, _pf_v, _pgate_v = _prompt_preflight(
+        "h3", prompt, ctx=shot,
+        style=(shot.get("style") or style_kit.normalize_style(
+            (autopilot.get_plan(project) or {}).get("style"))),
+        # ⚠️ 用 seg 里的参考图数量，不要用 `refs`：关键帧分支只设 ref_images，没有 `refs`，
+        #    直接引用会 NameError（该分支走不到 else，`refs` 从未绑定）。
+        expect_refs=bool(seg.get("reference_images")))
+    seg["prompt"] = prompt
+    if not _pgate_v.get("accept"):
+        return jsonify({"success": False, "prompt_qc_blocked": True,
+                        "error": f"视频提示词预检未通过（{_pgate_v.get('label')}）：{_pgate_v.get('reason')}"
+                                 + (f"；建议：{_pf_v.get('rebuild_hint')}" if _pf_v.get("rebuild_hint") else ""),
+                        "prompt_qc": _pf_v.get("verdict")}), 200
 
     try:
         result = comfyui_client.generate_h3_sequence(
@@ -2148,6 +2248,15 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
             base_files = []
             seed = None
             orig_asset_prompt = prompt_zh     # 教训库稳定键（改写后的提示词不参与指纹）
+            # ---- 提示词预检（生成前质检）----
+            # 资产是「一对多」批量生成（一个项目几十个角色/物品/场景），与整集同理不做硬阻断：
+            # 单条提示词有问题就自愈 + 记录，不让整批资产生成中断。缺失/过短这类致命缺陷
+            # 由后面的生成+质检链路兜底（空提示词本就出不来可用资产）。
+            prompt_zh, _pf_asset, _pgate_asset = _prompt_preflight(
+                "asset", prompt_zh, ctx=asset, style=(asset.get("style") or gen_style or ""))
+            if not _pgate_asset.get("accept"):
+                app.logger.warning("资产「%s」参考图提示词预检未通过（%s）：%s",
+                                   name, _pgate_asset.get("label"), _pgate_asset.get("reason"))
             for attempt in range(max_retries + 1):
                 if attempt > 0:
                     seed = random.randint(1, 2 ** 31 - 1)
@@ -2601,6 +2710,22 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     item["prompt"] = prompt
                     orig_prompt = prompt      # 教训库的稳定键：改写后的提示词不参与指纹
                     item["refs"] = {r[0]: os.path.basename(os.path.dirname(r[2])) for r in refs}
+
+                    # ---------- 提示词预检（生成前质检）：先判 → 确定性自愈 → 再出图 ----------
+                    # ⚠️ 放在 orig_prompt 之后：教训库指纹仍以构建器输出为准（自愈不参与指纹，
+                    #    否则同一镜头在自愈前后会生成两条互不相认的教训）。
+                    prompt, _pf_item, _pgate_item = _prompt_preflight(
+                        "storyboard", prompt, ctx=shot,
+                        style=(shot.get("style") or _sb_style), ref_count=len(refs))
+                    item["prompt"] = prompt
+                    item["prompt_qc"] = _pf_item.get("verdict")
+                    item["prompt_qc_repairs"] = _pf_item.get("repairs") or []
+                    if not _pgate_item.get("accept"):
+                        item["prompt_qc_blocked"] = True
+                        raise _PromptQCBlocked(
+                            f"提示词预检未通过（{_pgate_item.get('label')}）："
+                            f"{_pgate_item.get('reason')}" +
+                            (f"；建议：{_pf_item.get('rebuild_hint')}" if _pf_item.get("rebuild_hint") else ""))
 
                     # ---------- 图片 AI 质检（不达标自动重生成） ----------
                     qc_cfg = _qc_load_cfg()
@@ -3062,8 +3187,26 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                 dur = float(shot.get('duration') or 5)
             except (TypeError, ValueError):
                 dur = 5.0
-            return {"prompt": prompt, "duration": dur, "reference_images": refs,
-                    "name": f"shot_{seq:02d}"}, sb_local
+            # ---- 提示词预检（生成前质检）----
+            # ⚠️ 这里**只自愈 + 记录，不阻断**：整集模式一次提交 N 段，为一条提示词的问题把
+            #    整集生成打断，代价远大于收益；且 H3 提示词由构建器产出、结构必然齐全，
+            #    出现 fatal 只可能是构建器自身有 bug —— 那更该留下证据继续跑，
+            #    而不是让整集静默失败。单镜重跑接口（用户显式只跑一镜）才做硬阻断。
+            prompt, _pf_seg, _pgate_seg = _prompt_preflight(
+                "h3", prompt, ctx=shot,
+                style=(shot.get("style") or _style_res.get("style") or ""),
+                expect_refs=bool(refs))
+            seg = {"prompt": prompt, "duration": dur, "reference_images": refs,
+                   "name": f"shot_{seq:02d}"}
+            if _pf_seg.get("repairs") or (_pf_seg.get("verdict") or {}).get("issues"):
+                seg["prompt_qc"] = _pf_seg.get("verdict")
+                seg["prompt_qc_repairs"] = _pf_seg.get("repairs") or []
+            if not _pgate_seg.get("accept"):
+                seg["prompt_qc_blocked"] = True
+                app.logger.warning("镜头 %s 视频提示词预检未通过（%s）：%s",
+                                   shot.get("shot_id"), _pgate_seg.get("label"),
+                                   _pgate_seg.get("reason"))
+            return seg, sb_local
 
         # ---------- 模式 episode：整集 N 段一次生成（H3 原生衔接）+ 整片 QC 门控 ----------
         if mode == 'episode':
@@ -4519,6 +4662,46 @@ def _qc_test_override(data: dict) -> dict:
     return ep
 
 
+class _PromptQCBlocked(RuntimeError):
+    """提示词预检未通过（内部信号）
+
+    批处理循环里每个镜头是一大段嵌套代码，用异常跳出比「把生成段整体再缩进一层」
+    安全得多；异常会被同一层的 ``except Exception`` 接住，该镜头照常记入 manifest
+    （状态为失败），不会从产物清单里消失。
+    """
+
+
+def _prompt_preflight(kind: str, prompt: str, *, ctx=None, style: str = "",
+                      ref_count=None, expect_refs=None) -> tuple:
+    """生成前提示词预检 + 确定性自愈（统一入口）。
+
+    返回 ``(应交给生成端的提示词, preflight 结果, 闸门结论)``。
+
+    ⚠️ **一律 fail-open**：预检自身异常时按「原样放行」处理并记 warning。
+    这一层是新增的保险，绝不能因为它自己出问题就把整集生产卡死。
+    """
+    text = str(prompt or "")
+    try:
+        cfg = _qc_load_cfg()
+        pf = prompt_qc.preflight(kind, text, ctx=ctx, style=style, cfg=cfg,
+                                 ref_count=ref_count, expect_refs=expect_refs)
+        gate = prompt_qc.prompt_qc_gate(pf, cfg)
+        if pf.get("repairs") or pf["verdict"].get("issues"):
+            app.logger.info(
+                "提示词预检[%s] %s｜自愈 %s 项｜issue %s 项｜accept=%s",
+                kind, pf.get("label"), len(pf.get("repairs") or []),
+                len(pf["verdict"].get("issues") or []), pf.get("accept"))
+        return pf["prompt"], pf, gate
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning(f"提示词预检异常（{kind}），按放行处理：{e}")
+        skip = {"ok": False, "skipped": True, "accept": True, "blocked": False,
+                "label": "提示词预检异常", "reason": str(e), "repairs": [],
+                "verdict": {"issues": [], "critical_issues": [], "reason": str(e)}}
+        return text, skip, {"accept": True, "blocked": False, "skipped": True,
+                            "label": "提示词预检异常", "reason": str(e),
+                            "critical_issues": [], "repairs": []}
+
+
 def _qc_gate(verdict: dict) -> dict:
     """统一质检入库闸门（P0）：ok=false 或 不达标 一律不得静默入库。
 
@@ -4759,6 +4942,53 @@ def _keyframe_qc_verifier(project_name: str):
     return _verify, min(2, int(cfg.get("max_retries") or 0))
 
 
+def _keyframe_prompt_preflight(project_name: str):
+    """尾帧「生成前提示词预检」回调构建器（与 ``_keyframe_qc_verifier`` 同一注入风格）
+
+    返回 ``(preflight_cb, enabled)``；``preflight_cb(prompt, shot, item) -> dict`` 直接返回
+    ``prompt_qc.preflight`` 的结果（含自愈后的提示词），由
+    ``keyframe.generate_keyframes`` 取其中的 ``prompt`` 去出图。
+
+    ⚠️ 与尾帧质检（生成后、依赖质检接口）不同：预检是**纯确定性**的，所以只看
+    ``prompt_enabled`` —— 质检接口没配好时它照样能拦住「提示词为空」「缺锚定参考图语义」
+    这类必然废图的输入。这正是预检比事后质检便宜、且能兜住事后质检的原因。
+    """
+    try:
+        cfg = _qc_load_cfg()
+    except Exception:  # noqa: BLE001
+        return None, False
+    if not prompt_qc.prompt_qc_ready(cfg):
+        return None, False
+
+    # 项目级风格只解析一次：预检要按镜头逐个跑，不能在闭包里反复读盘
+    _proj_style = ""
+    try:
+        _proj_style = _qc_style_of(project_name) or ""
+    except Exception:  # noqa: BLE001
+        _proj_style = ""
+
+    def _pre(prompt: str, shot: dict, item: dict) -> dict:
+        shot = shot or {}
+        # 风格与生成端对齐：build_end_frame_prompt 只读 shot["style"]。镜头没带风格时退回
+        # 项目当前风格 —— 这样预检能把「风格缺失」判出来并自愈补上，而不是直接放过。
+        style = shot.get("style") or _proj_style
+        ctx = dict(shot)
+        ctx["chained"] = bool(item.get("chained"))
+        pf = prompt_qc.preflight("keyframe", prompt, ctx=ctx, style=style, cfg=cfg)
+        _qc_record(project_name, "prompt",
+                   f"shot_{item.get('seq') or item.get('shot_id')}",
+                   {"stage": "keyframe",
+                    "label": pf.get("label"),
+                    "accept": bool(pf.get("accept")),
+                    "repairs": list(pf.get("repairs") or []),
+                    "rebuild_hint": pf.get("rebuild_hint") or "",
+                    "verdict": pf.get("verdict") or {},
+                    "prompt": pf.get("prompt") or ""})
+        return pf
+
+    return _pre, True
+
+
 def _qc_record(project_name: str, kind: str, shot_id, payload: dict) -> str:
     """写一条质检/重试历史（失败也不影响主流程）"""
     try:
@@ -4956,6 +5186,280 @@ def api_qc_history(project_name, kind, shot_key):
     return jsonify({"success": bool(data), "project_name": project, "kind": kind,
                     "shot_id": shot_key, "exists": bool(data), "history": data,
                     "history_file": os.path.abspath(path)})
+
+
+@app.route('/api/qc/prompt', methods=['POST'])
+def api_qc_prompt():
+    """提示词预检（生成前质检）：按需检查一条提示词，并按配置自愈。
+
+    body::
+
+        {kind: "storyboard"|"h3"|"asset", prompt: "...", style?: "...",
+         context?: <镜头/资产 dict>, ref_count?: int, expect_refs?: bool,
+         repair?: true}   # repair=false 时只检查、不改写
+
+    与图片/视频质检不同，这一层**不依赖质检接口**（纯确定性检查），因此未配置质检
+    接口也能用；返回的 verdict 与 check_image/check_video 同构，便于前端统一展示。
+    """
+    data = _body()
+    kind = str(data.get('kind') or '').strip().lower()
+    if not kind:
+        return jsonify({"success": False,
+                        "error": f"缺少 kind（可选 {' / '.join(prompt_qc.PROMPT_KINDS)}）"}), 400
+    if kind not in prompt_qc.PROMPT_KINDS:
+        return jsonify({"success": False,
+                        "error": f"不支持的 kind：{kind}（可选 {'/'.join(prompt_qc.PROMPT_KINDS)}）"}), 400
+    prompt = str(data.get('prompt') or '')
+    if not prompt.strip():
+        return jsonify({"success": False, "error": "缺少 prompt"}), 400
+
+    cfg = _qc_load_cfg()
+    style = str(data.get('style') or '').strip()
+    ctx = data.get('context') if isinstance(data.get('context'), dict) else None
+    rc = data.get('ref_count')
+    try:
+        rc = int(rc) if rc is not None else None
+    except (TypeError, ValueError):
+        rc = None
+    expect_refs = data.get('expect_refs')
+    expect_refs = bool(expect_refs) if isinstance(expect_refs, (bool, int)) else None
+
+    if bool(data.get('repair', True)):
+        pf = prompt_qc.preflight(kind, prompt, ctx=ctx, style=style, cfg=cfg,
+                                 ref_count=rc, expect_refs=expect_refs)
+    else:
+        v = prompt_qc.check_prompt(kind, prompt, ctx=ctx, style=style, cfg=cfg,
+                                   ref_count=rc, expect_refs=expect_refs)
+        blocked = bool(v.get("critical_issues"))
+        pf = {"prompt": prompt, "verdict": v, "repairs": [], "accept": not blocked,
+              "blocked": blocked, "skipped": not prompt_qc.prompt_qc_ready(cfg),
+              "label": "提示词达标" if v.get("passed") and not v.get("issues") else "提示词不达标",
+              "reason": v.get("reason") or "", "rebuild_hint": v.get("rebuild_hint") or ""}
+    return jsonify({"success": True, "kind": kind,
+                    "prompt": pf.get("prompt"), "verdict": pf.get("verdict"),
+                    "repairs": pf.get("repairs") or [],
+                    "gate": prompt_qc.prompt_qc_gate(pf, cfg),
+                    "mode": prompt_qc.prompt_qc_mode(cfg),
+                    "accept": bool(pf.get("accept")),
+                    "label": pf.get("label"), "reason": pf.get("reason"),
+                    "rebuild_hint": pf.get("rebuild_hint") or ""})
+
+
+@app.route('/api/qc/audio', methods=['POST'])
+def api_qc_audio():
+    """音频质检（成品质检）：客观层（ffmpeg 指标）+ AI 层（频谱图/波形图送多模态）。
+
+    body::
+
+        {project_name?: "...", 
+         path?: "output/dub/<项目>/lines/xxx.wav",   # 显式指定文件（必须位于 output/ 内）
+         source?: "mix" | "merged" | "line",         # 未给 path 时按此推导（默认 mix > merged）
+         expect_sec?: 3.2,          # 期望时长；不给则只做无声/削波判定，不做时长偏差
+         line_text?: "三年了，我回来了。",
+         check_speech_ratio?: true, # 「有声占比下限」判定。单句传 true；整轨必须 false
+         with_ai?: true}            # false 时只跑客观层（毫秒级、零模型调用）
+
+    与 ``/api/qc/prompt``（生成前预检）配套：那个管「台词写对没有」，这个管
+    「录出来是不是真的有人声」。
+    """
+    data = _body()
+    project = _safe_project(data.get('project_name') or '')
+    cfg = _qc_load_cfg()
+    if not qc_client.audio_qc_ready(cfg):
+        return jsonify({"success": False,
+                        "error": "音频质检未启用（请检查质检总开关与音频质检开关）",
+                        "audio_qc_active": False}), 400
+
+    # ---- 定位待检文件：显式 path 优先，否则按 source 推导 ----
+    raw_path = str(data.get('path') or '').strip()
+    source = str(data.get('source') or '').strip().lower()
+    target, why = '', ''
+    if raw_path:
+        cand = os.path.abspath(os.path.join(PROJECT_ROOT_DIR, raw_path)) \
+            if not os.path.isabs(raw_path) else os.path.abspath(raw_path)
+        root = os.path.abspath(PROJECT_OUTPUT_DIR)
+        # 只允许检查 output/ 内的产物：这是「回显用户自己的成品」，不是任意文件读取接口
+        if not cand.startswith(root + os.sep):
+            return jsonify({"success": False,
+                            "error": f"只允许检查 output/ 目录内的文件：{raw_path}"}), 400
+        if not os.path.isfile(cand):
+            return jsonify({"success": False, "error": f"文件不存在：{cand}"}), 404
+        target, source = cand, (source or 'path')
+    elif project:
+        target, source, why = _resolve_audio_qc_target(project, source)
+        if not target:
+            return jsonify({"success": False, "error": why or "未找到可质检的音频产物",
+                            "project_name": project}), 404
+    else:
+        return jsonify({"success": False, "error": "需要 project_name 或 path"}), 400
+
+    # ---- 期望时长 / 有声占比口径 ----
+    expect = data.get('expect_sec')
+    try:
+        expect = float(expect) if expect not in (None, '') else None
+    except (TypeError, ValueError):
+        expect = None
+    if expect is None and source == 'mix':
+        try:
+            expect = float(mix_probe_audio(target).get('duration') or 0) or None
+        except Exception:  # noqa: BLE001
+            expect = None
+    # ⚠️ 整轨（成片 mp4 / 整集合成音轨）默认**关闭**有声占比判定：
+    #    成片天然有大段无台词留白，拿单句的 50% 标准卡它必然误报「漏句」。
+    #    判据是「整轨口径」而不是「调用方有没有传 source」—— 前端直接拖一个 mp4 过来
+    #    检查（source 会是 path）时同样必须关掉，否则一进来就是满屏「静音过多」。
+    is_whole_track = source in ('mix', 'merged') or target.lower().endswith(('.mp4', '.mkv', '.mov'))
+    default_ratio = not is_whole_track
+    check_ratio = data.get('check_speech_ratio')
+    check_ratio = default_ratio if not isinstance(check_ratio, bool) else check_ratio
+
+    stem = os.path.splitext(os.path.basename(target))[0]
+    bucket = 'audio_mix' if (source == 'mix' or target.lower().endswith('.mp4')) else 'audio'
+    visuals_dir = os.path.join(
+        QC_DIR, bucket,
+        _audio_qc_visuals_key(data.get('project_name'), target), stem)
+
+    with_ai = bool(data.get('with_ai', True))
+    if not with_ai:
+        verdict = audio_qc.quick_check(
+            target, expect_sec=expect,
+            min_speech_ratio=(cfg.get("audio_min_speech_ratio", 0.50) if check_ratio else None),
+            min_mean_db=cfg.get("audio_min_mean_db", -45.0),
+            max_drift=cfg.get("audio_max_drift", 0.50))
+        verdict["ai_skipped"] = True
+        verdict["ai_skip_reason"] = "请求显式要求只做客观层（with_ai=false）"
+    else:
+        verdict = qc_client.check_audio(
+            target, expect_sec=expect, line_text=str(data.get('line_text') or ''),
+            cfg=cfg, visuals_dir=visuals_dir, check_speech_ratio=check_ratio)
+
+    vis_urls = []
+    for p in (verdict.get("visuals") or []):
+        try:
+            rel = os.path.relpath(p, QC_DIR).replace(os.sep, '/')
+        except ValueError:
+            continue
+        if not rel.startswith('..'):
+            vis_urls.append(f"/api/qc/frames/{rel}")
+    return jsonify({
+        "success": True,
+        "project_name": project, "source": source, "path": os.path.abspath(target),
+        "expect_sec": expect, "check_speech_ratio": check_ratio,
+        "passed": verdict.get("passed"), "blocked": bool(verdict.get("blocked")),
+        "score": verdict.get("score"), "reason": verdict.get("reason"),
+        "issues": verdict.get("issues") or [],
+        "critical_issues": verdict.get("critical_issues") or [],
+        "metrics": verdict.get("metrics") or {},
+        "ai_used": bool(verdict.get("ai_used")),
+        "ai_skipped": bool(verdict.get("ai_skipped")),
+        "ai_skip_reason": verdict.get("ai_skip_reason") or "",
+        "objective_only": bool(verdict.get("objective_only")),
+        "visuals": vis_urls,
+        "verdict": verdict,
+        "audio_qc_active": True,
+        "audio_ai_active": qc_client.audio_ai_ready(cfg),
+        "file_url": _audio_qc_file_url(project, target),
+    })
+
+
+def _audio_qc_file_url(project: str, path: str) -> str:
+    """尽量给出可直接播放的 URL（只对 tts/mix 两个既有静态路由下的产物）"""
+    ap = os.path.abspath(path)
+    try:
+        rel_dub = os.path.relpath(ap, os.path.join(DUB_DIR, project or 'project'))
+        if not rel_dub.startswith('..'):
+            return f"/api/tts/file/{project or 'project'}/{rel_dub.replace(os.sep, '/')}"
+        rel_mix = os.path.relpath(ap, mix_out_dir(project or 'project'))
+        if not rel_mix.startswith('..'):
+            return f"/api/mix/file/{project or 'project'}/{rel_mix.replace(os.sep, '/')}"
+    except ValueError:
+        pass
+    return ""
+
+
+_AUDIO_QC_MEDIA_EXT = ('.mp4', '.mkv', '.mov', '.webm', '.m4v', '.avi')
+_AUDIO_QC_AUDIO_EXT = ('.wav', '.mp3', '.flac', '.m4a', '.aac', '.ogg')
+
+
+_AUDIO_QC_NON_PROJECT_DIRS = ('lines', 'frames', 'output', 'temp', 'qc', 'audio', 'audio_mix')
+
+
+def _audio_qc_project_key(target: str) -> str:
+    """按产物路径反推项目名，用于可视化图片的落盘目录。
+
+    ⚠️ 不能退化成字面量（如 ``project``）：按 ``path`` 直接检查时拿不到项目名，
+    所有项目就会挤进同一个目录，**不同项目的同名文件互相覆盖** —— 而 AI 读图是
+    子进程/网络异步进行的，覆盖会变成竞态（读数项目的图）。
+    布局：成片 ``output/final_dub/<项目>/x.mp4``、逐句 ``output/dub/<项目>/lines/x.wav``。
+    """
+    d = os.path.dirname(os.path.abspath(target))
+    for _ in range(4):
+        name = os.path.basename(d)
+        if name and name.lower() not in _AUDIO_QC_NON_PROJECT_DIRS:
+            return name
+        parent = os.path.dirname(d)
+        if parent == d:                       # 已到根，别再往上
+            break
+        d = parent
+    return 'adhoc'
+
+
+def _audio_qc_visuals_key(requested_project, target: str) -> str:
+    """音频质检可视化图片用的项目键。
+
+    ⚠️ 调用方**不能**写成 ``_safe_project(x) or _audio_qc_project_key(target)``：
+    ``_safe_project('')`` 返回的是**字面量 'project'**（``project_store.safe_key``
+    的空值兜底），恒为真值 → 兜底永不生效。后果是所有按 ``path`` 直接检查的请求都
+    挤进同一个 ``.../project/`` 目录，**不同项目的同名产物互相覆盖** —— 而 AI 读图是
+    异步进行的，覆盖会变成竞态（读到了别的项目的频谱图）。
+    判「调用方到底有没有传项目名」必须看**原始入参**。
+    """
+    if str(requested_project or '').strip():
+        return _safe_project(requested_project)
+    return _audio_qc_project_key(target)
+
+
+def _resolve_audio_qc_target(project: str, source: str = ''):
+    """按项目推导待质检音频：mix（带配音成片）> merged（整集合成音轨）> line（单句）
+
+    返回 ``(路径, source, 失败原因)``。
+
+    ⚠️ 必须按扩展名过滤：``mix_out_dir`` 里除了成片还有 ``*_mix_report.json``
+    等边车文件（且它们往往最新），不过滤就会把 JSON 报告当成成片送去解码，
+    结论变成「文件无法解码」——假失败。
+    """
+    def _newest(paths):
+        cands = [p for p in paths if os.path.isfile(p) and os.path.getsize(p) > 0]
+        return max(cands, key=os.path.getmtime) if cands else ''
+
+    def _media(d, exts):
+        if not os.path.isdir(d):
+            return []
+        return [os.path.join(d, f) for f in os.listdir(d) if f.lower().endswith(exts)]
+
+    mix_dir = mix_out_dir(project)
+    merged_dir = os.path.join(DUB_DIR, project)
+    lines_dir = os.path.join(merged_dir, 'lines')
+
+    if source in ('', 'mix'):
+        p = _newest(_media(mix_dir, _AUDIO_QC_MEDIA_EXT))
+        if p:
+            return p, 'mix', ''
+        if source == 'mix':
+            return '', 'mix', f"项目 '{project}' 下没有带配音成片（请先做音画合成）"
+    if source in ('', 'merged'):
+        p = _newest(_media(merged_dir, _AUDIO_QC_AUDIO_EXT))
+        if p:
+            return p, 'merged', ''
+        if source == 'merged':
+            return '', 'merged', f"项目 '{project}' 下没有整集配音音轨"
+    if source in ('', 'line'):
+        p = _newest(_media(lines_dir, _AUDIO_QC_AUDIO_EXT))
+        if p:
+            return p, 'line', ''
+        if source == 'line':
+            return '', 'line', f"项目 '{project}' 下没有逐句配音文件"
+    return '', source or 'mix', f"项目 '{project}' 下没有可质检的音频产物（先做配音/合成）"
 
 
 @app.route('/api/qc/project-summary', methods=['GET'])
@@ -6240,6 +6744,278 @@ def _dub_audio_url(project_name: str, rel_path: str) -> str:
     return f"/api/tts/file/{project_name}/{rel}" if not rel.startswith("..") else ""
 
 
+# =====================================================================
+# 音频质检接线（提示词预检 + 成品质检）
+# =====================================================================
+# 两层都在「生成前后」各管一段，与图片/视频质检的三层结构（预检 → 成品质检 → 重试）对齐：
+#   ① 配音台词预检（零模型依赖，默认开启）：挡住会被念出来的结构化残留、空台词、错配音色；
+#   ② 配音成品质检（ffmpeg 客观层 + 频谱/波形 AI 层）：挡住「合成成功但整段无声」这类
+#      在旧流程里要等到成片验收才暴露的问题。
+# 两者都**不阻断生成**：整集生产不能被单句质检拖死，结论如实记录、逐句可定位即可。
+
+def _audio_line_expect_sec(line: dict) -> float:
+    """该句配音的期望时长（由台词字数推算；推算不出时退回镜头时长）
+
+    只用于「时长偏差」这一条软判据，因此宁松勿紧：优先用字数推算（能发现「被截断」），
+    推算不出（空台词）时才退回剧本给的镜头时长，避免拿 0 当期望值把一切都判成偏差。
+    """
+    est = audio_qc.estimate_speech_sec(line.get("text"))
+    if est > 0:
+        return est
+    try:
+        return max(0.0, float(line.get("duration_hint") or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _dub_prompt_preflight(lines: list, project_name: str = "") -> dict:
+    """配音台词生成前预检：就地自愈 ``lines[i]["text"]``，结论写入 ``lines[i]["prompt_qc"]``。
+
+    永不抛异常（预检是保险，保险本身出问题不能耽误配音）。
+    """
+    stats = {"enabled": False, "checked": 0, "repaired": 0, "blocked": 0,
+             "issue_lines": 0, "repaired_lines": 0, "problem_lines": []}
+    if not lines:
+        return stats
+    try:
+        cfg = _qc_load_cfg()
+        if not prompt_qc.prompt_qc_ready(cfg):
+            return stats
+        stats["enabled"] = True
+        mode = prompt_qc.prompt_qc_mode(cfg)
+        for ln in lines:
+            text = ln.get("text") or ""
+            ctx = {
+                "project_name": project_name,
+                "shot_id": ln.get("shot_id"),
+                "character": ln.get("character"),
+                "emotion": ln.get("emotion"),
+                # preset（CustomVoice）会忽略 instruct → 情绪送不进 TTS，预检据此提示
+                "voice_mode": (ln.get("voice") or {}).get("mode"),
+                # 剧本没写 speaker（或写了未登记角色）时 build_dub_plan 落到「旁白」音色，
+                # 角色台词会被旁白念 —— 用「最终音色是不是旁白兜底」判定，而不是旧写法
+                # `source == "narration"`（旁白通道关闭后 source 恒为 dialogue，那个判据永远为假，
+                # 等于这条预检规则静默失效）。
+                "speaker_fallback": str(ln.get("character") or "") == tts_client.NARRATION_SPEAKER,
+            }
+            pf = prompt_qc.preflight("audio", text, ctx=ctx, cfg=cfg)
+            verdict = pf.get("verdict") or {}
+            stats["checked"] += 1
+            if pf.get("repairs"):
+                stats["repaired"] += 1
+            if verdict.get("issues"):
+                stats["issue_lines"] += 1
+            # ⚠️ 自愈结果为空时**保留原文**：把台词改成空串会让该句直接合成失败/静音，
+            #    比「带一点噪音」更糟。空台词交给调用方按 rebuild_hint 从剧本重建。
+            new_text = pf.get("prompt") or ""
+            if new_text and new_text != text:
+                ln["text"] = new_text
+                stats["repaired_lines"] += 1
+            ln["prompt_qc"] = {
+                "mode": mode,
+                "passed": bool(verdict.get("passed")),
+                "blocked": bool(pf.get("blocked")),
+                "score": verdict.get("score"),
+                "issues": list(verdict.get("issues") or []),
+                "critical_issues": list(verdict.get("critical_issues") or []),
+                "repairs": list(pf.get("repairs") or []),
+                "label": pf.get("label") or "",
+                "reason": pf.get("reason") or "",
+                "rebuild_hint": pf.get("rebuild_hint") or "",
+            }
+            if pf.get("blocked") or verdict.get("issues"):
+                if pf.get("blocked"):
+                    stats["blocked"] += 1
+                if len(stats["problem_lines"]) < 20:
+                    stats["problem_lines"].append({
+                        "line_id": ln.get("line_id"), "shot_id": ln.get("shot_id"),
+                        "character": ln.get("character"),
+                        "blocked": bool(pf.get("blocked")),
+                        "issues": list(verdict.get("issues") or [])[:3]
+                                  + list(verdict.get("critical_issues") or [])[:2],
+                        "repairs": list(pf.get("repairs") or []),
+                        "rebuild_hint": pf.get("rebuild_hint") or "",
+                    })
+    except Exception as e:  # noqa: BLE001 - 预检失败绝不影响配音
+        app.logger.warning(f"配音台词预检异常（已跳过，不影响配音）：{e}")
+    return stats
+
+
+def _audio_qc_lines(project_name: str, lines: list, results: list, cfg: dict,
+                    retry_cb=None) -> dict:
+    """配音成品逐句质检（客观层 + AI 层），结论写入 ``results[i]["audio_qc"]``。
+
+    ``retry_cb(line, result) -> dict|None``：可选的重配合回调。**只对客观层判致命的句子
+    调用**（整段无声/空文件）—— 这类失败属于「合成出了东西但不是人声」，重配一次是最有效
+    的补救；软扣分项（音量偏小、时长偏差）不重配，交由用户决定。
+
+    永不抛异常；批量口径为「记录 + 有限重配」，不阻断整集。
+    """
+    stats = {"enabled": False, "checked": 0, "passed": 0, "failed": 0, "blocked": 0,
+             "ai_used": 0, "retried": 0, "recovered": 0, "problems": []}
+    if not results:
+        return stats
+    try:
+        if not qc_client.audio_qc_ready(cfg):
+            return stats
+        stats["enabled"] = True
+        by_id = {str(l.get("line_id")): l for l in (lines or [])}
+        visuals_root = os.path.join(QC_DIR, "audio", _safe_project(project_name or "project"))
+        for r in results:
+            if not r.get("ok") or not r.get("out_path"):
+                continue
+            ln = by_id.get(str(r.get("line_id"))) or {}
+            expect = _audio_line_expect_sec(ln)
+            verdict = qc_client.check_audio(
+                r["out_path"], expect_sec=expect or None,
+                line_text=ln.get("text") or r.get("text") or "", cfg=cfg,
+                visuals_dir=os.path.join(visuals_root,
+                                         os.path.splitext(os.path.basename(r["out_path"]))[0]))
+            stats["checked"] += 1
+            # 致命（整段无声/空文件）→ 重配一次。⚠️ 计数必须在重配之后按**最终**结论统计：
+            # 先记 blocked 再重配会出现「致命 1 句 / 未通过 0 句」这种自相矛盾的汇总，
+            # 前端与任务消息都在读这两个数，口径必须一致。
+            if verdict.get("blocked") and retry_cb is not None:
+                try:
+                    stats["retried"] += 1
+                    again = retry_cb(ln, r)
+                    if again:
+                        verdict = again
+                        if not verdict.get("blocked"):
+                            stats["recovered"] += 1
+                except Exception as e:  # noqa: BLE001 - 重配失败不影响已有结论
+                    app.logger.warning(f"音频质检重配失败（{r.get('line_id')}）：{e}")
+            if verdict.get("blocked"):
+                stats["blocked"] += 1
+            if verdict.get("ai_used"):
+                stats["ai_used"] += 1
+            if verdict.get("passed"):
+                stats["passed"] += 1
+            else:
+                stats["failed"] += 1
+                if len(stats["problems"]) < 20:
+                    stats["problems"].append({
+                        "line_id": r.get("line_id"), "shot_id": r.get("shot_id"),
+                        "character": r.get("character"),
+                        "blocked": bool(verdict.get("blocked")),
+                        "score": verdict.get("score"),
+                        "reason": str(verdict.get("reason") or "")[:200],
+                        "metrics": verdict.get("metrics") or {},
+                        "visuals": [f"/api/qc/frames/audio/{_safe_project(project_name or 'project')}/"
+                                    f"{os.path.basename(os.path.dirname(p))}/{os.path.basename(p)}"
+                                    for p in (verdict.get("visuals") or [])],
+                    })
+            r["audio_qc"] = {
+                "passed": verdict.get("passed"), "blocked": bool(verdict.get("blocked")),
+                "score": verdict.get("score"),
+                "reason": str(verdict.get("reason") or "")[:300],
+                "issues": list(verdict.get("issues") or [])[:5],
+                "critical_issues": list(verdict.get("critical_issues") or [])[:3],
+                "metrics": verdict.get("metrics") or {},
+                "ai_used": bool(verdict.get("ai_used")),
+                "ai_skipped": bool(verdict.get("ai_skipped")),
+                "ai_skip_reason": verdict.get("ai_skip_reason") or "",
+                "visuals": [f"/api/qc/frames/audio/{_safe_project(project_name or 'project')}/"
+                            f"{os.path.basename(os.path.dirname(p))}/{os.path.basename(p)}"
+                            for p in (verdict.get("visuals") or [])],
+            }
+    except Exception as e:  # noqa: BLE001 - 质检失败绝不影响配音产物
+        app.logger.warning(f"配音成品质检异常（已跳过，不影响配音）：{e}")
+    if stats["enabled"]:
+        app.logger.info(f"配音质检（{project_name}）：检查 {stats['checked']} 句，"
+                        f"通过 {stats['passed']}，未通过 {stats['failed']}，"
+                        f"致命 {stats['blocked']}，重配 {stats['retried']}，"
+                        f"恢复 {stats['recovered']}，AI 层 {stats['ai_used']}")
+    return stats
+
+
+def _mix_audio_qc(report: dict, cfg: dict) -> dict:
+    """带配音成片的音频质检（整轨口径）。
+
+    ⚠️ 必须关掉「有声占比下限」：成片天然有大段无台词留白（无台词镜头/纯环境音），
+    拿单句的 50% 标准去卡它必然误报「漏句」。整轨真正要挡的是**整条音轨近乎无声**
+    （amix 失败 / 全部条目静音）与**不含音频流** —— 这两条都在客观层的硬闸里。
+    """
+    try:
+        if not qc_client.audio_qc_ready(cfg):
+            return {"enabled": False, "reason": "音频质检开关未开启"}
+        out = report.get("output_path") or ""
+        before = report.get("video_before") or {}
+        expect = 0.0
+        try:
+            expect = float(before.get("duration") or 0)
+        except (TypeError, ValueError):
+            expect = 0.0
+        project_name = _safe_project(report.get("project") or "project")
+        stem = os.path.splitext(os.path.basename(out))[0]
+        verdict = qc_client.check_audio(
+            out, expect_sec=expect or None, cfg=cfg,
+            check_speech_ratio=False,
+            visuals_dir=os.path.join(QC_DIR, "audio_mix", project_name, stem))
+        metrics = verdict.get("metrics") or {}
+        out_v = {
+            "enabled": True,
+            "passed": verdict.get("passed"), "blocked": bool(verdict.get("blocked")),
+            "score": verdict.get("score"),
+            "reason": str(verdict.get("reason") or "")[:300],
+            "issues": list(verdict.get("issues") or [])[:5],
+            "critical_issues": list(verdict.get("critical_issues") or [])[:3],
+            "metrics": metrics,
+            "ai_used": bool(verdict.get("ai_used")),
+            "ai_skipped": bool(verdict.get("ai_skipped")),
+            "ai_skip_reason": verdict.get("ai_skip_reason") or "",
+            "visuals": [f"/api/qc/frames/audio_mix/{project_name}/{stem}/"
+                        f"{os.path.basename(p)}" for p in (verdict.get("visuals") or [])],
+            "coverage_sec": report.get("coverage_sec"),
+            "video_duration": expect or None,
+        }
+        # 配音覆盖率：逐句音频总时长 / 视频时长。**两端都要看**：
+        #   偏低（<50%）→ 大量镜头没有配音落点；
+        #   偏高（>115%）→ 台词总长超过画面，末尾整段被 `-shortest` **静默截掉**
+        #     （成片仍「有声音」所以客观层查不出来，但台词已经丢了一大半）。
+        #   ⚠️ 曾只写「偏低」这一个方向，实测把 ep04（台词 606.4s / 画面 85.2s，
+        #      21 句里 17 句落在片外）这条最该拦的缺陷直接放过了 —— 覆盖率是**比值**，
+        #      单向判定等于漏掉一半语义。
+        try:
+            cov = float(report.get("coverage_sec") or 0)
+            if expect > 0:
+                ratio = cov / expect
+                out_v.setdefault("issues", [])
+                if ratio < 0.5:
+                    out_v["issues"].append(
+                        f"配音覆盖偏低：逐句音频合计 {cov:.1f}s / 视频 {expect:.1f}s"
+                        f"（{ratio * 100:.0f}%）")
+                elif ratio > 1.15:
+                    entries = report.get("entries") or []
+                    dropped = 0
+                    for e in entries:
+                        try:
+                            if float(e.get("start") or 0) >= expect:
+                                dropped += 1
+                        except (TypeError, ValueError):
+                            continue
+                    detail = (f"，其中 {dropped}/{len(entries)} 句起始点已在片长之外、放不出来"
+                              if dropped else "")
+                    msg = (f"配音总长超出画面：逐句音频合计 {cov:.1f}s / 视频 {expect:.1f}s"
+                           f"（{ratio * 100:.0f}%）{detail} —— 超出部分会被合成命令静默截断")
+                    out_v["issues"].append(msg)
+                    out_v.setdefault("critical_issues", [])
+                    out_v["critical_issues"].append(msg)
+                    # 单向收紧：客观层/AI 层说通过也翻不回来
+                    out_v["blocked"] = True
+                    out_v["passed"] = False
+                    try:
+                        out_v["score"] = min(int(out_v.get("score") or 0), 40)
+                    except (TypeError, ValueError):
+                        pass
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+        return out_v
+    except Exception as e:  # noqa: BLE001 - 质检失败绝不影响合成结果
+        app.logger.warning(f"成片音频质检异常（已跳过）：{e}")
+        return {"enabled": True, "passed": None, "error": f"{type(e).__name__}: {e}"}
+
+
 def _dub_worker(task_id: str, project_name: str, plan: dict, out_dir: str,
                 fmt: str, episode: int):
     """后台配音：批量合成逐句音频 → 合并整集音轨 → 落盘清单"""
@@ -6252,6 +7028,16 @@ def _dub_worker(task_id: str, project_name: str, plan: dict, out_dir: str,
         client = QwenTTSClient(out_root=DUB_DIR, params=TTS_DEFAULT_PARAMS)
         for ln in lines:
             ln["project_tag"] = project_name
+
+        # ---- ① 生成前提示词预检（配音台词）----
+        # 台词会被 TTS 逐字念出来：结构化残留（`(S1) 说：[Chinese] …`）、舞台指示
+        # （`（转身冷笑）`）都会原样进成片；空台词/纯标点则合成出静音却显示「成功」。
+        # 这一层零模型依赖、默认开启，在消耗 GPU 之前把确定性缺陷挡住/修掉。
+        qc_cfg = _qc_load_cfg()
+        pre = _dub_prompt_preflight(lines, project_name)
+        if pre.get("blocked") or pre.get("repaired_lines"):
+            with dub_lock:
+                dub_tasks[task_id].update({"prompt_qc": pre})
 
         def _cb(done, total, last, note):
             with dub_lock:
@@ -6271,6 +7057,44 @@ def _dub_worker(task_id: str, project_name: str, plan: dict, out_dir: str,
                     for r in results
                 ],
                 "success_count": len(ok_items), "failed_count": len(results) - len(ok_items),
+            })
+
+        # ---- ② 成品质检（音频客观层 + 频谱/波形 AI 层）----
+        # 「合成成功」不等于「念出来了」：节点正常返回、文件也落盘，但整段可以是静音
+        # （漏配音 / 模型未发声）。旧流程要等到成片验收才发现整集缺一句。
+        # 这里逐句实测，致命的（整段无声/空文件）当场重配一次，软扣分项只记录。
+        def _retry_line(ln, rec):
+            """重配单句并重新质检（只对客观层判致命的句子调用）"""
+            import copy as _copy
+            one = _copy.deepcopy(ln)
+            one["project_tag"] = project_name
+            res = client.synthesize_lines([one], lines_dir)
+            if not res or not res[0].get("ok"):
+                return None
+            rec.update({k: v for k, v in res[0].items() if k != "audio_qc"})
+            return qc_client.check_audio(
+                rec["out_path"], expect_sec=_audio_line_expect_sec(ln) or None,
+                line_text=ln.get("text") or "", cfg=qc_cfg,
+                visuals_dir=os.path.join(QC_DIR, "audio", _safe_project(project_name),
+                                         os.path.splitext(os.path.basename(rec["out_path"]))[0]))
+
+        if qc_cfg.get("enabled") and qc_cfg.get("audio_enabled"):
+            with dub_lock:
+                dub_tasks[task_id].update({"phase": "配音质检中（客观指标 + 频谱波形送检）",
+                                           "progress": 92})
+        aqua = _audio_qc_lines(project_name, lines, results, qc_cfg, retry_cb=_retry_line)
+        if aqua.get("enabled"):
+            with dub_lock:
+                dub_tasks[task_id].update({"audio_qc": aqua})
+        ok_items = [r for r in results if r.get("ok")]
+        with dub_lock:
+            dub_tasks[task_id].update({
+                "results": [
+                    dict(r, url=_dub_audio_url(project_name, r.get("out_path") or ""))
+                    for r in results
+                ],
+                "success_count": len(ok_items), "failed_count": len(results) - len(ok_items),
+                "audio_qc_failed": aqua.get("failed", 0),
             })
 
         # 合并整集音轨（按剧本镜头顺序）
@@ -6293,6 +7117,9 @@ def _dub_worker(task_id: str, project_name: str, plan: dict, out_dir: str,
             "characters": plan.get("characters") or [],
             "merged_audio": merged,
             "merged_info": merged_probe,
+            # 质检结论随清单落盘：成片验收时能回溯「这句当时是怎么判的」
+            "prompt_qc": pre if pre.get("enabled") else {},
+            "audio_qc": aqua if aqua.get("enabled") else {},
             "lines": [dict(r, url=_dub_audio_url(project_name, r.get("out_path") or ""))
                       for r in results],
         }
@@ -6300,11 +7127,16 @@ def _dub_worker(task_id: str, project_name: str, plan: dict, out_dir: str,
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
 
+        _msg = f"成功 {len(ok_items)} 句 / 失败 {len(results) - len(ok_items)} 句"
+        if aqua.get("enabled") and aqua.get("checked"):
+            _msg += f"；质检通过 {aqua['passed']}/{aqua['checked']} 句"
+            if aqua.get("recovered"):
+                _msg += f"（重配恢复 {aqua['recovered']} 句）"
         with dub_lock:
             dub_tasks[task_id].update({
                 "status": "completed" if ok_items else "failed",
                 "progress": 100, "phase": "配音完成" if ok_items else "配音失败",
-                "message": f"成功 {len(ok_items)} 句 / 失败 {len(results) - len(ok_items)} 句",
+                "message": _msg,
                 "merged_audio": merged,
                 "merged_url": _dub_audio_url(project_name, merged) if merged else "",
                 "merged_info": merged_probe,
@@ -6401,6 +7233,23 @@ def api_tts_preview():
     if not text:
         return jsonify({"success": False, "error": "缺少待合成文本 text"}), 400
 
+    # 试听前先跑一遍台词预检：用户在这里就能看到「这句会被念成什么样」以及为什么，
+    # 不必等到整集配完才发现结构残留被念了出来。
+    _pf = None
+    try:
+        _pcfg = _qc_load_cfg()
+        _pf = prompt_qc.preflight(
+            "audio", text,
+            ctx={"character": str(data.get('character') or '') or None,
+                 "emotion": data.get('emotion'),
+                 "voice_mode": (data.get('voice') or {}).get('mode')
+                               if isinstance(data.get('voice'), dict) else None},
+            cfg=_pcfg)
+        if _pf.get("prompt"):
+            text = _pf["prompt"]
+    except Exception as e:  # noqa: BLE001 - 预检失败不影响试听
+        app.logger.debug(f"试听台词预检跳过：{e}")
+
     env = tts_env_check()
     if not env.get("available"):
         return jsonify({"success": False, "error": "TTS 环境不可用：" + "；".join(env.get("reasons") or []),
@@ -6431,8 +7280,28 @@ def api_tts_preview():
         return jsonify({"success": False, "error": rec.get("error") or "合成失败", "result": rec}), 502
 
     info = probe_audio_info(rec["out_path"])
+    # 试听只跑**客观层**音频质检：纯 ffmpeg、毫秒级，不花模型调用，保证试听依然「点一下就响」。
+    # 需要含 AI 层（频谱/波形送检）的完整结论时走 POST /api/qc/audio。
+    _objs = None
+    try:
+        _ocfg = _qc_load_cfg()
+        if qc_client.audio_qc_ready(_ocfg):
+            # ⚠️ quick_check 的 verdict 里已经带了 metrics，不要再单独 probe 一次 ——
+            #    那会重复解码一遍音频（白等一次 ffmpeg）。
+            _objs = audio_qc.quick_check(
+                rec["out_path"], expect_sec=audio_qc.estimate_speech_sec(text) or None,
+                min_speech_ratio=_ocfg.get("audio_min_speech_ratio", 0.50),
+                min_mean_db=_ocfg.get("audio_min_mean_db", -45.0),
+                max_drift=_ocfg.get("audio_max_drift", 0.50))
+    except Exception as e:  # noqa: BLE001
+        app.logger.debug(f"试听音频客观质检跳过：{e}")
     return jsonify({"success": True, "result": dict(rec, url=_dub_audio_url(project_name, rec["out_path"])),
-                    "audio": info, "voice": voice, "url": _dub_audio_url(project_name, rec["out_path"])})
+                    "audio": info, "voice": voice, "url": _dub_audio_url(project_name, rec["out_path"]),
+                    "prompt_qc": (_pf or {}).get("verdict"),
+                    "prompt_qc_label": (_pf or {}).get("label"),
+                    "prompt_qc_repairs": (_pf or {}).get("repairs") or [],
+                    "text_used": text,
+                    "audio_qc": _objs})
 
 
 @app.route('/api/tts/generate', methods=['POST'])
@@ -6837,6 +7706,11 @@ def _mix_worker(task_id: str, prepared: dict, out_name: str):
             mix_tasks[task_id].update({"phase": "音画对齐混音中", "progress": 30})
         report = mix_video_with_entries(prepared["video_path"], prepared["entries"],
                                         out_path, prepared["params"])
+        # ---- 成品音频质检：成片音轨是不是真的有人声 ----
+        # ffmpeg 返回成功、文件也有音频流，并不代表「配音真的混进去了」：
+        # 条目路径错、amix 被压成静音、源片段本身无声，都能产出一条「合法但没声音」的
+        # 音轨。这里对**最终成片**实测一遍（整轨口径，不做有声占比判定）。
+        report["audio_qc"] = _mix_audio_qc(report, _qc_load_cfg())
         report.update({
             "task_id": task_id, "project": project_name, "episode": prepared["episode"],
             "mode": prepared["mode"], "video_source": prepared["video_path"],
@@ -6847,13 +7721,20 @@ def _mix_worker(task_id: str, prepared: dict, out_name: str):
         })
         report_path = os.path.join(out_dir, f"{os.path.splitext(out_name)[0]}_mix_report.json")
         write_mix_report(report, report_path)
+        _aq = report.get("audio_qc") or {}
+        _aq_msg = ""
+        if _aq.get("enabled") and _aq.get("passed") is not None:
+            _aq_msg = "；音频质检通过" if _aq.get("passed") else \
+                f"；音频质检未通过（{str(_aq.get('reason') or '')[:60]}）"
         with mix_lock:
             mix_tasks[task_id].update({
                 "status": "completed", "progress": 100, "phase": "合成完成",
-                "message": f"已合成 {report['entry_count']} 句配音，耗时 {report['elapsed_sec']}s",
+                "message": (f"已合成 {report['entry_count']} 句配音，"
+                            f"耗时 {report['elapsed_sec']}s{_aq_msg}"),
                 "output_path": report["output_path"],
                 "report_path": report_path,
                 "url": _mix_audio_url(project_name, report["output_path"]),
+                "audio_qc": _aq,
                 "result": report,
             })
         # 带配音成片＝用户真正要验收的成品：自动登记进「成品验收」队列

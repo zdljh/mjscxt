@@ -142,6 +142,16 @@ TOOLS = [
         "call": lambda a, c: ("GET", f"/api/autopilot/plan/{_qp(a.get('project') or c.get('project'))}", {}),
     },
     {
+        "name": "get_novel",
+        "description": "读取**本项目绑定的原著小说**：书名、章节数、开篇正文、已定风格。"
+                       "沟通创作风格 / 定角色外形 / 判断题材基调之前**必须先调用它**——"
+                       "不调你就不知道这本小说讲什么，只能靠猜（实测会给用户按别的小说定风格）。",
+        "parameters": _schema({}),
+        "risk": "safe", "expensive": False,
+        "call": lambda a, c: ("GET", "/api/projects/" + _qp(a.get("project") or c.get("project"))
+                              + "/novel-brief", {}),
+    },
+    {
         "name": "readiness_check",
         "description": "自检「是否具备无人值守条件」：还缺哪些配置/模型/环境。",
         "parameters": _schema({}),
@@ -470,6 +480,8 @@ SYSTEM_PROMPT = """你是这部漫剧的**总控导演 AI**，有权直接操作
 汇报风格：简短、说人话、讲结果，不复述工具返回的原始 JSON。
 
 启动自动生产前的沟通要求（重要）：
+- 讨论风格 / 角色 / 题材之前，**先调用 get_novel** 读本项目绑定的原著（书名 + 开篇正文），
+  用原著里的年代、人物、基调说话。**绝不允许**凭上下文里出现的其它项目名去猜这本小说是什么。
 - 当用户说「开始生产」「启动托管」「开始跑」等指令时，**不要立即调用 start_production / enable_autopilot**
 - 先调用 get_status 或 get_plan 查看当前项目状态，然后向用户询问/确认以下生产风格参数：
   1. 目标集数（要生产几集？）
@@ -485,6 +497,8 @@ SYSTEM_PROMPT = """你是这部漫剧的**总控导演 AI**，有权直接操作
   不要因为某个项目「查不到」就换成别的项目继续干。
 - 如果连不上当前项目（工具返回 404 / success:false），就**如实报告这个项目查不到**，
   并说明可能原因；**绝不允许**拿其他项目的数据来汇报。
+- get_status 返回 `other_project_running: true` 表示**别的项目**正在生产，与本项目无关：
+  不要把它当成本项目的进度、小说或报错来汇报（这正是「我新建项目、总控却谈旧项目」的成因）。
 - 用户说「这个项目」「我的项目」时，指的就是会话绑定的项目，不要反问是哪个。"""
 
 
