@@ -30,6 +30,7 @@ from datetime import datetime
 from config import (
     PROJECT_OUTPUT_DIR, SCRIPT_DIR, ASSETS_DIR, CHARACTERS_DIR, ITEMS_DIR, SCENES_DIR,
     STORYBOARDS_DIR, VIDEOS_DIR, FINAL_DIR, UPSCALE_DIR, DUB_DIR, QC_DIR,
+    KEYFRAMES_DIR, CONTINUITY_DIR, DUB_MIX_DIR, WATERMARK_DIR,
     PROJECTS_DIR, PROJECT_INDEX_PATH, PROJECT_TRASH_DIR, PROJECT_MIGRATE_REPORT,
     PROJECT_DEFAULT_CONFIG, AI_CHAT_DIR, AI_SETTINGS_PATH, AI_CHAT_HISTORY_PATH,
     NOVELS_DIR,
@@ -276,10 +277,86 @@ def update_config(ref: str, patch: dict) -> dict:
     return cfg
 
 
+#: 项目专属产物根目录（kind → 绝对根目录）。
+#:
+#: ⚠️ 2026-09-19 实测教训：这里曾**只列 11 类**，漏掉 final_dub（配音成片）、keyframes（尾帧）、
+#: continuity（跨镜连续性）、autopilot（托管计划/历史/交付物索引）、autonomous（自主模式）、
+#: comic_drama（漫画剧资产）、exports（导出件）、watermark（水印成片）。
+#: 后果是「删掉项目」后 output/ 里仍残留 76MB 的 final_dub，用户以为已经删干净了。
+#: 新增产物目录时**必须**同步登记到这里，否则删除会再次漏。
+def project_kind_roots() -> list:
+    """(kind, 根目录) 列表 —— 删除/清理项目时需要覆盖的**全部**产物目录。
+
+    注意：其中若干目录（autopilot/autonomous/exports/export/comic_drama）没有独立
+    config 常量，按名字从 PROJECT_OUTPUT_DIR 拼出，避免为了一个字符串去动 config 接口。
+    """
+    out = PROJECT_OUTPUT_DIR
+    return [
+        ("scripts", SCRIPT_DIR),
+        ("characters", CHARACTERS_DIR),
+        ("items", ITEMS_DIR),
+        ("scenes", SCENES_DIR),
+        ("storyboards", STORYBOARDS_DIR),
+        ("videos", VIDEOS_DIR),
+        ("final", FINAL_DIR),
+        ("upscale", UPSCALE_DIR),
+        ("dub", DUB_DIR),
+        ("qc", QC_DIR),
+        ("keyframes", KEYFRAMES_DIR),
+        ("continuity", CONTINUITY_DIR),
+        ("final_dub", DUB_MIX_DIR),
+        ("watermark", WATERMARK_DIR),
+        # 下面几个是「两层」结构：comic_drama/{characters,scenes}/<项目>
+        ("comic_characters", os.path.join(out, "comic_drama", "characters")),
+        ("comic_scenes", os.path.join(out, "comic_drama", "scenes")),
+        ("autopilot", os.path.join(out, "autopilot")),
+        ("autonomous", os.path.join(out, "autonomous")),
+        ("exports", os.path.join(out, "exports")),
+        ("export", os.path.join(out, "export")),
+    ]
+
+
+def _project_alias_names(rec: dict) -> list:
+    """该项目在磁盘上可能出现过的目录名（项目键 + 显示名）"""
+    names = []
+    for v in (rec.get("dir_key"), rec.get("name")):
+        v = str(v or "").strip()
+        if v and v not in names:
+            names.append(v)
+    return names
+
+
+def _match_project_entries(root: str, names: list) -> list:
+    """在 root 下找出属于该项目的全部条目（子目录**和**文件）。
+
+    一部小说 = 一个项目，但产物在磁盘上有多种形态：
+    - ``<项目名>/``                —— 项目级产物目录
+    - ``<项目名>_第N集/``          —— 分集时每集一个子目录，互不覆盖
+    - ``<项目名>_<时间戳>.json``    —— 整本转换的单文件剧本（落在 output/scripts 下）
+    - ``<项目名>_..._wm.mp4``      —— 水印成片（落在 output/watermark 下，是文件不是目录）
+    统一按「精确名 / 前缀」聚合，保证既不串项目、也不漏分集目录与单文件产物。
+    """
+    if not root or not os.path.isdir(root):
+        return []
+    hit = []
+    for entry in sorted(os.listdir(root)):
+        full = os.path.join(root, entry)
+        if not (os.path.isdir(full) or os.path.isfile(full)):
+            continue
+        for n in names:
+            if entry == n or entry.startswith(n + "_") or entry.startswith(n + "-"):
+                hit.append(full)
+                break
+    return hit
+
+
 def delete_project(ref: str, confirm: bool = False) -> dict:
     """删除项目 = 移入回收站（output/projects/_trash/…），非物理删除，可手工还原。
 
     需要显式 confirm=True（前端会弹出二次确认框），未确认一律拒绝。
+
+    覆盖范围：项目工作区 + :func:`project_kind_roots` 里的**全部**产物目录
+    （含分集变体 `<项目名>_第N集`）。漏登记的后果见 project_kind_roots 的注释。
     """
     rec = get_project(ref)
     if not rec:
@@ -289,15 +366,15 @@ def delete_project(ref: str, confirm: bool = False) -> dict:
 
     key = rec["dir_key"]
     p = paths(key)
+    names = _project_alias_names(rec)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     trash_root = os.path.join(PROJECT_TRASH_DIR, f"{stamp}_{key}")
     os.makedirs(trash_root, exist_ok=True)
 
     moved, skipped = [], []
     targets = [("projects_workspace", p["root"])]
-    for kind in ("scripts", "characters", "items", "scenes", "storyboards",
-                 "videos", "final", "upscale", "dub", "qc"):
-        targets.append((kind, p[kind]))
+    for kind, root in project_kind_roots():
+        targets.extend((kind, d) for d in _match_project_entries(root, names))
 
     for kind, src in targets:
         if not os.path.exists(src):
