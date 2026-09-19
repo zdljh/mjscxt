@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { AppProvider } from '@/context/AppContext';
+import { ToastProvider } from '@/components/ui/toast';
 import { Navbar } from '@/components/layout/Navbar';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
@@ -86,10 +87,13 @@ function AppContent() {
 export default function App() {
   return (
     <ErrorBoundary>
-      <AppProvider>
-        <AppContent />
-        <ServiceMonitor />
-      </AppProvider>
+      {/* ToastProvider 必须在 AppProvider 之外：AppContext.showError 要往 Toast 里推消息 */}
+      <ToastProvider>
+        <AppProvider>
+          <AppContent />
+          <ServiceMonitor />
+        </AppProvider>
+      </ToastProvider>
     </ErrorBoundary>
   );
 }

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { aiConfigApi, watermarkApi } from '@/api/client';
+import { ConfirmDialog } from '@/components/ui';
 import type { AIConfigModule, AIConfigResponse, AITestResult } from '@/types';
 
 type ModuleKey = 'text' | 'qc' | 'chat';
@@ -85,6 +86,8 @@ export function AIVaultPage() {
     text: null, qc: null, chat: null,
   });
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [clearTarget, setClearTarget] = useState<ModuleKey | null>(null);
+  const [clearing, setClearing] = useState(false);
 
   // 系统设置状态（ComfyUI 只读展示 + 水印）
   const [sysSettings, setSysSettings] = useState<SystemSettings>({
@@ -244,8 +247,14 @@ export function AIVaultPage() {
     }
   };
 
-  const handleClear = async (module: ModuleKey) => {
-    if (!confirm(`确定要清空 ${MODULE_CONFIG[module].title} 的配置吗？`)) return;
+  // 清空配置：改为统一确认弹窗（原生 confirm 阻塞主线程、样式与深色主题脱节，
+  // 也无法显示「处理中」状态，误点后没有可撤销的余地）
+  const handleClear = (module: ModuleKey) => setClearTarget(module);
+
+  const doClear = async () => {
+    const module = clearTarget;
+    if (!module) return;
+    setClearing(true);
     try {
       const result = await aiConfigApi.clear(module);
       if (result.success) {
@@ -257,6 +266,9 @@ export function AIVaultPage() {
       }
     } catch (err) {
       showMessage('error', '清空失败');
+    } finally {
+      setClearing(false);
+      setClearTarget(null);
     }
   };
 
@@ -596,6 +608,21 @@ export function AIVaultPage() {
           <li>建议先点「测试连接」确认接口可用后再保存</li>
         </ul>
       </div>
+
+      <ConfirmDialog
+        isOpen={clearTarget !== null}
+        onClose={() => (clearing ? undefined : setClearTarget(null))}
+        onConfirm={doClear}
+        title="清空配置"
+        danger
+        loading={clearing}
+        confirmText="清空"
+        message={
+          clearTarget
+            ? `确定要清空「${MODULE_CONFIG[clearTarget].title}」的接口配置吗？该模块的 base_url、模型与 API Key 都会被移除，需要重新填写。`
+            : null
+        }
+      />
     </div>
   );
 }

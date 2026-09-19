@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useApp } from '@/context/AppContext';
 import { memoryApi } from '@/api/client';
-import { Card, Button, Loading, EmptyState, Badge } from '@/components/ui';
+import { Card, Button, Loading, EmptyState, Badge, ConfirmDialog } from '@/components/ui';
+import { useToast } from '@/components/ui/toast';
 import type { Memory, MemoryType, MemoryStats, PromptLesson } from '@/types';
 
 /** 教训类型 → 人话（避免界面出现原始 kind 值） */
@@ -24,6 +25,9 @@ export function MemoryPage() {
   // 质检教训库：生成链路**自动沉淀**的学习成果（与手动登记的 memories 是两套数据）
   const [lessons, setLessons] = useState<PromptLesson[]>([]);
   const [lessonKind, setLessonKind] = useState('');
+  const [clearOpen, setClearOpen] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const toast = useToast();
 
   useEffect(() => {
     Promise.all([
@@ -50,7 +54,7 @@ export function MemoryPage() {
   }, [lessonKind]);
 
   const handleClearOld = async () => {
-    if (!confirm(t('memory.confirmClear'))) return;
+    setClearing(true);
     try {
       await memoryApi.clearOld(30);
       // memoryApi.list() 已在这一层拆封成数组，可直接 setState。
@@ -60,6 +64,10 @@ export function MemoryPage() {
       setStats(s);
     } catch (e) {
       console.error('Failed to clear', e);
+      toast.error(`清理失败：${e instanceof Error ? e.message : '未知错误'}`);
+    } finally {
+      setClearing(false);
+      setClearOpen(false);
     }
   };
 
@@ -82,7 +90,7 @@ export function MemoryPage() {
           <Button variant="secondary" onClick={() => window.location.reload()}>
             {t('common.refresh')}
           </Button>
-          <Button variant="danger" onClick={handleClearOld}>
+          <Button variant="danger" onClick={() => setClearOpen(true)}>
             {t('memory.clearOld')}
           </Button>
         </div>
@@ -193,6 +201,16 @@ export function MemoryPage() {
           </div>
         )}
       </Card>
+
+      <ConfirmDialog
+        isOpen={clearOpen}
+        onClose={() => (clearing ? undefined : setClearOpen(false))}
+        onConfirm={handleClearOld}
+        title={t('memory.clearOld')}
+        danger
+        loading={clearing}
+        message={`将删除 30 天前的记忆条目。此操作不可撤销。`}
+      />
     </div>
   );
 }

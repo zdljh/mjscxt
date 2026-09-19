@@ -1,7 +1,10 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useApp } from '@/context/AppContext';
 import { projectsApi, keyframesApi, storyboardApi, videoApi, ttsApi, mixApi, qcApi, exportApi, autopilotApi, upscaleApi, chatApi, agentApi, episodesApi } from '@/api/client';
 import { Button, Loading, EmptyState } from '@/components/ui';
+import { useToast } from '@/components/ui/toast';
+import { useModalBehavior } from '@/hooks/useModalBehavior';
 import { GridPage } from '@/pages/GridPage';
 import { RelationGraphTab } from '@/components/RelationGraphTab';
 import { OutputReviewTab } from '@/components/OutputReviewTab';
@@ -655,50 +658,83 @@ function AssetPreviewModal({
   onClose: () => void;
 }) {
   const [active, setActive] = useState(0);
+  const isOpen = !!preview;
+  // 复用共享弹窗行为（ESC 关闭 / 锁定背景滚动 / 焦点陷阱 / 关闭后归还焦点）。
+  // 此前这套自建弹窗是三无产品：不能按 ESC 关、打开后背景还能滚、
+  // 键盘用户 Tab 会跑到弹窗后面的页面上；z-index 也和共享 Modal 不一致（z-50 vs z-[100]）。
+  const containerRef = useModalBehavior({ isOpen, onClose });
+  const titleId = React.useId();
 
   useEffect(() => { setActive(0); }, [preview]);
 
+  const gallery = React.useMemo(() => {
+    if (!preview) return [] as { url: string; view?: string; size?: number }[];
+    return [
+      preview.item.thumb,
+      ...(preview.item.views || []),
+    ].filter(Boolean) as { url: string; view?: string; size?: number }[];
+  }, [preview]);
+
+  // ← / → 在多个视角之间切换（图片浏览器的最低预期）
+  useEffect(() => {
+    if (!isOpen || gallery.length <= 1) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowRight') setActive((i) => (i + 1) % gallery.length);
+      else if (e.key === 'ArrowLeft') setActive((i) => (i - 1 + gallery.length) % gallery.length);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [isOpen, gallery.length]);
+
   if (!preview) return null;
   const { item } = preview;
-
-  // 汇总所有可看的图：主图 + 各视角
-  const gallery = [
-    item.thumb,
-    ...(item.views || []),
-  ].filter(Boolean) as { url: string; view?: string; size?: number }[];
-
   const current = gallery[active];
   const src = assetSrc(current?.url);
 
-  return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={onClose}>
+  const node = (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm animate-modal-backdrop" onClick={onClose} aria-hidden="true" />
       <div
-        className="bg-white dark:bg-gray-800 rounded-xl w-full max-w-3xl max-h-[90vh] overflow-auto"
-        onClick={(e) => e.stopPropagation()}
+        ref={containerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="relative flex w-full max-w-3xl max-h-[90vh] flex-col rounded-2xl bg-white shadow-xl animate-modal-in dark:bg-gray-800"
       >
-        <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
-          <h3 className="font-semibold text-lg text-gray-900 dark:text-white">{item.name}</h3>
-          <button onClick={onClose} className="text-gray-500 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-2xl leading-none">×</button>
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-gray-200 p-4 dark:border-gray-700">
+          <h3 id={titleId} className="min-w-0 truncate font-semibold text-lg text-gray-900 dark:text-white">{item.name}</h3>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="关闭"
+            className="shrink-0 rounded-lg p-1 text-2xl leading-none text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+          >
+            ×
+          </button>
         </div>
 
-        <div className="p-4 space-y-4">
+        <div className="flex-1 space-y-4 overflow-y-auto p-4">
           {src ? (
-            <img src={src} alt={item.name} className="w-full rounded-lg bg-gray-100 dark:bg-gray-900" />
+            <img src={src} alt={`${item.name}${current?.view ? ` - ${current.view}` : ''}`} className="w-full rounded-lg bg-gray-100 dark:bg-gray-900" />
           ) : (
             <div className="py-16 text-center text-gray-500 dark:text-gray-400">图片不可用</div>
           )}
 
           {gallery.length > 1 && (
-            <div className="flex gap-2 flex-wrap">
+            <div className="flex flex-wrap gap-2" role="tablist" aria-label="视角切换">
               {gallery.map((g, i) => {
                 const t = assetSrc(g.url);
                 return (
                   <button
                     key={i}
+                    type="button"
+                    role="tab"
+                    aria-selected={i === active}
+                    aria-label={g.view || `视角 ${i + 1}`}
                     onClick={() => setActive(i)}
-                    className={`w-20 h-14 rounded overflow-hidden border-2 ${i === active ? 'border-indigo-500' : 'border-transparent'}`}
+                    className={`h-14 w-20 overflow-hidden rounded border-2 ${i === active ? 'border-indigo-500' : 'border-transparent hover:border-gray-300 dark:hover:border-gray-600'}`}
                   >
-                    {t && <img src={t} alt={g.view || `view-${i}`} className="w-full h-full object-cover" />}
+                    {t && <img src={t} alt="" className="h-full w-full object-cover" />}
                   </button>
                 );
               })}
@@ -722,11 +758,15 @@ function AssetPreviewModal({
             {current?.size && (
               <span className="text-xs text-gray-500">{(current.size / 1024).toFixed(0)} KB</span>
             )}
+            {gallery.length > 1 && (
+              <span className="ml-auto text-xs text-gray-400">← → 切换视角</span>
+            )}
           </div>
         </div>
       </div>
     </div>
   );
+  return typeof document === 'undefined' ? node : createPortal(node, document.body);
 }
 
 // ========== QC Tab（功能质检） ==========
@@ -947,6 +987,7 @@ function StoryboardHubTab({ projectKey }: { projectKey: string }) {
 // ========== Keyframes Tab ==========
 function KeyframesTab({ projectKey }: { projectKey: string }) {
   const { t } = useApp();
+  const toast = useToast();
   const [plan, setPlan] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -972,10 +1013,12 @@ function KeyframesTab({ projectKey }: { projectKey: string }) {
     setError('');
     try {
       const result = await keyframesApi.generate({ project_name: projectKey });
-      alert(`尾帧生成任务已启动: ${result.task_id}`);
+      toast.success(`尾帧生成任务已启动：${result.task_id}`);
       setTimeout(fetchPlan, 3000);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '生成失败');
+      const msg = err instanceof Error ? err.message : '生成失败';
+      setError(msg);
+      toast.error(msg);
     } finally {
       setGenerating(false);
     }

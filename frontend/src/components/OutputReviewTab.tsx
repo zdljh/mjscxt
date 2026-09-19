@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useApp } from '@/context/AppContext';
 import { exportApi, autopilotApi } from '@/api/client';
 import { Button, Loading } from '@/components/ui';
+import { useToast } from '@/components/ui/toast';
 import type { Deliverable } from '@/types';
 
 interface AssetItem {
@@ -30,7 +31,7 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
   const [rejecting, setRejecting] = useState<number | null>(null);
   const [reason, setReason] = useState('');
   const [playing, setPlaying] = useState<string | null>(null);
-  const [toast, setToast] = useState('');
+  const toast = useToast();
 
   const loadAll = useCallback(async () => {
     if (!projectKey) return;
@@ -83,13 +84,14 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
         review: verdict,
         note,
       });
-      setToast(verdict === 'accepted' ? t('deliver.acceptedOk') : t('deliver.rejectedOk'));
+      toast.success(verdict === 'accepted' ? t('deliver.acceptedOk') : t('deliver.rejectedOk'));
       setRejecting(null);
       setReason('');
       await loadAll();
-      window.setTimeout(() => setToast(''), 3200);
     } catch (e) {
-      setError(e instanceof Error ? e.message : t('deliver.actionFailed'));
+      const msg = e instanceof Error ? e.message : t('deliver.actionFailed');
+      setError(msg);
+      toast.error(msg);
     } finally {
       setBusy(null);
     }
@@ -141,12 +143,6 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
           {error}
         </div>
       )}
-      {toast && (
-        <div className="p-3 bg-green-50 dark:bg-green-500/10 border border-green-200 dark:border-green-500/30 rounded-lg text-sm text-green-700 dark:text-green-300">
-          {toast}
-        </div>
-      )}
-
       {/* 区域 1: 导出配置 */}
       <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
         <h4 className="font-semibold text-gray-900 dark:text-white mb-3 flex items-center gap-2">

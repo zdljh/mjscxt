@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import { loadLocale, t, getLocaleVersion } from '@/i18n';
+import { useToast } from '@/components/ui/toast';
 
 interface AppContextType {
   lang: string;
@@ -54,7 +55,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [localeVersion]
   );
 
-  const showError = useCallback((msg: string) => setError(msg), []);
+  // showError 此前是**死 API**：导出了却没人调用、也没人渲染 error，
+  // 页面只能各自用原生 alert / console.error 兜着。现在接到全局 Toast 上，
+  // 任何地方调 showError 都能真正被用户看到（error 状态保留以兼容旧取值）。
+  const toast = useToast();
+  const showError = useCallback((msg: string) => {
+    setError(msg);
+    if (msg) toast.error(msg);
+  }, [toast]);
   const clearError = useCallback(() => setError(null), []);
 
   const value = useMemo(

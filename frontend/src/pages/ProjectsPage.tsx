@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '@/context/AppContext';
 import { projectsApi, novelsApi } from '@/api/client';
-import { Button, Loading, Modal, Badge } from '@/components/ui';
+import { Button, Loading, Modal, Badge, ConfirmDialog } from '@/components/ui';
 import type { Project, Novel } from '@/types';
 
 type NovelSource = 'upload' | 'existing';
@@ -47,7 +47,6 @@ export function ProjectsPage() {
 
   // --- 删除项目弹窗 ---
   const [deletingProject, setDeletingProject] = useState<Project | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState('');
 
@@ -194,18 +193,16 @@ export function ProjectsPage() {
   // --- 删除项目 ---
   const openDeleteModal = (proj: Project) => {
     setDeletingProject(proj);
-    setConfirmDelete(false);
     setDeleteError('');
   };
 
   const closeDeleteModal = () => {
     setDeletingProject(null);
-    setConfirmDelete(false);
     setDeleteError('');
   };
 
   const handleDelete = async () => {
-    if (!deletingProject || !confirmDelete) return;
+    if (!deletingProject) return;
     setDeleting(true);
     setDeleteError('');
     try {
@@ -289,9 +286,7 @@ export function ProjectsPage() {
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    setDeletingProject(proj);
-                    setConfirmDelete(false);
-                    setDeleteError('');
+                    openDeleteModal(proj);
                   }}
                   className="px-3 py-1.5 text-xs font-medium rounded-lg border border-red-300 dark:border-red-700 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
                 >
@@ -304,7 +299,8 @@ export function ProjectsPage() {
       )}
 
       {/* 新建项目（上传小说 / 选已有小说 二合一） */}
-      <Modal isOpen={showNewProject} onClose={closeModal} title={t('project.createNew')}>
+      <Modal isOpen={showNewProject} onClose={closeModal} title={t('project.createNew')}
+        size="lg" closeOnBackdrop={false} closeOnEsc={false} preventClose={submitting}>
         <div className="space-y-4">
           {/* 项目名称 */}
           <div>
@@ -423,7 +419,8 @@ export function ProjectsPage() {
 
       {/* 编辑项目弹窗 */}
       {editingProject && (
-        <Modal isOpen={!!editingProject} onClose={closeEditModal} title="编辑项目">
+        <Modal isOpen={!!editingProject} onClose={closeEditModal} title="编辑项目"
+          closeOnBackdrop={false} closeOnEsc={false} preventClose={savingEdit}>
           <div className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
@@ -453,51 +450,31 @@ export function ProjectsPage() {
         </Modal>
       )}
 
-      {/* 删除项目弹窗 */}
-      {deletingProject && (
-        <Modal isOpen={!!deletingProject} onClose={closeDeleteModal} title="删除项目">
-          <div className="space-y-4">
+      {/* 删除项目：统一确认弹窗（原生手写两步确认已被 ConfirmDialog 取代） */}
+      <ConfirmDialog
+        isOpen={!!deletingProject}
+        onClose={closeDeleteModal}
+        onConfirm={handleDelete}
+        title="删除项目"
+        danger
+        loading={deleting}
+        confirmText="确认删除"
+        message={
+          <>
             <p className="text-gray-700 dark:text-gray-300">
-              确定要删除项目《<span className="font-semibold">{deletingProject.name}</span>》吗？
+              确定要删除项目《<span className="font-semibold">{deletingProject?.name}</span>》吗？
             </p>
-            {!confirmDelete ? (
-              <p className="text-sm text-red-500">
-                ⚠️ 此操作会将项目及其所有产物移入回收站，可从磁盘还原。
-              </p>
-            ) : (
-              <p className="text-sm text-red-600 font-medium">
-                已确认：输入「{deletingProject.name}」以确认删除
-              </p>
-            )}
+            <p className="mt-2 text-sm text-red-500">
+              ⚠️ 此操作会将项目及其所有产物移入回收站，可从磁盘还原。
+            </p>
             {deleteError && (
-              <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-500 text-sm">
+              <p className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-500">
                 {deleteError}
-              </div>
+              </p>
             )}
-            <div className="flex gap-3 pt-2">
-              <Button variant="secondary" onClick={closeDeleteModal} disabled={deleting}>
-                取消
-              </Button>
-              {!confirmDelete ? (
-                <Button 
-                  onClick={() => setConfirmDelete(true)}
-                  className="bg-red-600 hover:bg-red-700"
-                >
-                  确认删除
-                </Button>
-              ) : (
-                <Button 
-                  onClick={handleDelete} 
-                  disabled={deleting}
-                  className="bg-red-600 hover:bg-red-700"
-                >
-                  {deleting ? '删除中...' : '确认删除'}
-                </Button>
-              )}
-            </div>
-          </div>
-        </Modal>
-      )}
+          </>
+        }
+      />
     </div>
   );
 }

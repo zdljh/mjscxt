@@ -87,6 +87,45 @@ body {
   animation: fadeIn 0.4s cubic-bezier(0.4, 0, 0.2, 1) backwards;
 }
 
+/* 弹窗 / Toast 的入场动画。
+   同样只给起始帧（backwards），结束不留 transform，理由见上面 .fade-in 的说明。 */
+@keyframes modalIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes modalBackdropIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: none; }
+}
+
+.animate-modal-in {
+  animation: modalIn 0.18s cubic-bezier(0.4, 0, 0.2, 1) backwards;
+}
+
+.animate-modal-backdrop {
+  animation: modalBackdropIn 0.18s ease-out backwards;
+}
+
+.animate-toast-in {
+  animation: toastIn 0.22s cubic-bezier(0.4, 0, 0.2, 1) backwards;
+}
+
+/* 尊重系统「减少动态效果」设置：前庭失调用户对位移/缩放动画敏感 */
+@media (prefers-reduced-motion: reduce) {
+  .fade-in,
+  .animate-modal-in,
+  .animate-modal-backdrop,
+  .animate-toast-in {
+    animation: none;
+  }
+}
+
 .glow-border {
   box-shadow: 0 0 15px rgba(99, 102, 241, 0.2), inset 0 0 15px rgba(99, 102, 241, 0.05);
   border: 1px solid rgba(99, 102, 241, 0.3);

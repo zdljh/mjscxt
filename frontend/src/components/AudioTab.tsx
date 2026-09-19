@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useApp } from '@/context/AppContext';
 import { ttsApi, mixApi } from '@/api/client';
 import { Button, Loading } from '@/components/ui';
+import { useToast } from '@/components/ui/toast';
 
 interface AudioTabProps {
   projectKey: string;
@@ -9,6 +10,7 @@ interface AudioTabProps {
 
 export function AudioTab({ projectKey }: AudioTabProps) {
   const { t } = useApp();
+  const toast = useToast();
   const [activeStep, setActiveStep] = useState<1 | 2 | 3>(1);
   
   // Step 1: TTS 配音
@@ -80,10 +82,12 @@ export function AudioTab({ projectKey }: AudioTabProps) {
     setTtsError('');
     try {
       const result = await ttsApi.generate({ project_name: projectKey });
-      alert(`配音生成任务已启动: ${result.task_id}`);
+      toast.success(`配音生成任务已启动：${result.task_id}`);
       await loadTtsPlan();
     } catch (e) {
-      setTtsError(e instanceof Error ? e.message : '配音生成失败');
+      const msg = e instanceof Error ? e.message : '配音生成失败';
+      setTtsError(msg);
+      toast.error(msg);
     } finally {
       setTtsGenerating(false);
     }
