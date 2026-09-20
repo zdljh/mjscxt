@@ -1797,6 +1797,7 @@ class ComfyUIClient:
         last_prompt_id = ""
         passed = False
         last_seg_report: List[dict] = []
+        last_error: str = ""
 
         for attempt in range(max_retries + 1):
             attempts_used = attempt + 1
@@ -1820,7 +1821,14 @@ class ComfyUIClient:
                     template_file=template_file,
                     size=size,
                 )
+            except RuntimeError as e:
+                # S12：确定性输入错误（如某段无可用参考图被拒绝提交）——
+                # 重试必然同败，立即停止并保留原因，不再空转换种子。
+                last_error = str(e)
+                logger.warning(f"[H3-episode] 生成被拒绝（不再重试）: {e}")
+                break
             except Exception as e:
+                last_error = str(e)
                 logger.warning(f"[H3-episode] 第 {attempt + 1} 次生成异常: {e}")
                 continue
 
@@ -1879,10 +1887,11 @@ class ComfyUIClient:
                 break
 
         if not best_file:
-            logger.error(f"[H3-episode] {n} 段整集生成失败（无成片）")
+            logger.error(f"[H3-episode] {n} 段整集生成失败（无成片）{('：' + last_error) if last_error else ''}")
             return {
                 "files": [], "segments": last_seg_report,
                 "qc_results": qc_results, "failed": True,
+                "error": last_error,
                 "attempts_used": attempts_used, "prompt_id": last_prompt_id,
                 "segment_count": n,
             }
@@ -1962,18 +1971,24 @@ class ComfyUIClient:
                     local_refs.append(local)
                 elif img:
                     logger.warning(f"段{i + 1} 参考图不可用，已跳过: {img}")
+            # S12（P0）：参考图为空时不再静默沿用模板自带的 LoadImage 示例图——
+            # 示例图里的人物会污染角色外观，成片出现与剧本无关的人物。
+            # fail-fast：直接抛错让整次 H3 提交失败，上层 worker 感知并重试/跳过，
+            # 而不是烧完 GPU 才拿到一个含无关人物的成片。
+            if not local_refs:
+                raise RuntimeError(
+                    f"段{i + 1}（{seg.get('name') or f'seg_{i + 1}'}）无任何可用参考图，"
+                    f"已拒绝提交（S12：模板示例图会污染角色外观）。请补齐该段 "
+                    f"reference_images 后重试。"
+                )
             loaded: List[dict] = []
             slots = lay["ref_nodes"]
-            # 参考图不足时不再沿用模板自带的示例图（会污染角色外观），
-            # 用本段第一张参考图补齐空槽（纯单参考即重复同一张）。
-            fill_src = local_refs[0] if local_refs else None
+            # 参考图不足时用本段第一张参考图补齐空槽（纯单参考即重复同一张）。
+            fill_src = local_refs[0]
             up_cache: dict = {}
             for j in range(len(slots)):
                 is_fill = j >= len(local_refs)
                 rp = local_refs[j] if not is_fill else fill_src
-                if not rp:
-                    logger.warning(f"段{i + 1} 无参考图，参考槽 {slots[j]} 沿用模板默认图")
-                    continue
                 try:
                     if rp not in up_cache:
                         # 参考图上传到 ComfyUI input 目录（段实例用 LoadImage 读取）

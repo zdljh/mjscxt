@@ -91,6 +91,11 @@ _KEYWORD_RATIO: Sequence[Tuple[str, Tuple[int, int]]] = (
     ("square", (1, 1)),
 )
 
+#: 默认画幅：漫剧短视频主形态为竖屏 9:16（抖音/视频号）。
+#: G19 修复：风格串未含画幅关键词时，各生成入口以本值为底，
+#: 不再静默回落工作流模板里写死的 16:9 尺寸。
+DEFAULT_RATIO: Tuple[int, int] = (9, 16)
+
 
 def aspect_ratio(style) -> Optional[Tuple[int, int]]:
     """从风格串解析目标画幅，解析不到返回 None。

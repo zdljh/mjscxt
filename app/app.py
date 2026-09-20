@@ -237,6 +237,27 @@ def _safe_project(name: str) -> str:
     return project_store.safe_key(name)
 
 
+def _project_or_400(raw, field_name="project_name"):
+    """G4 收口：路由层「项目入参 → 安全键 / 400」的统一入口。
+
+    ⚠️ 不能写 `_safe_project(x) or 兜底`、也不能判 `_safe_project(x)` 的真值——
+    `safe_key('')` 返回**字面量 'project'**（真值），守卫恒不成立（死守卫），
+    漏传项目名会静默写进共享 `project` 命名空间。判空必须看**原始入参**
+    （与 api_qc_project_summary 的 G3 修复同一口径）。
+
+    返回 (project, error)：error 为 None 表示合法（project 已 safe_key）；
+    否则 error 是「缺少 {field}」的 (jsonify, 400) 响应，直接 return 它。
+    用法::
+
+        project, err = _project_or_400((data.get('project_name') or '').strip())
+        if err is not None:
+            return err
+    """
+    if not (isinstance(raw, str) and raw.strip()):
+        return "", (jsonify({"success": False, "error": f"缺少 {field_name}"}), 400)
+    return _safe_project(raw.strip()), None
+
+
 def _serve_safe(base_dir: str, filename: str, **send_kw):
     """目录穿越防护的 send_file 统一入口。
 
@@ -1346,9 +1367,10 @@ def _keyframe_sb_map(project_name: str, script: dict = None, storyboards=None,
 @app.route('/api/keyframes/plan', methods=['GET'])
 def api_keyframes_plan():
     """关键帧尾帧生成预检（不调用模型）"""
-    project = _safe_project(request.args.get('project_name') or '')
-    if not project:
-        return jsonify({"success": False, "error": "缺少 project_name"}), 400
+    # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
+    project, err = _project_or_400(request.args.get('project_name') or '')
+    if err is not None:
+        return err
     episode_no = request.args.get('episode_no')
     script = _load_script_for(project, episode_no)
     shots = script.get("shots") or []
@@ -1377,9 +1399,10 @@ def api_keyframes_plan():
 def api_keyframes_generate():
     """批量生成尾帧（Qwen Edit，以分镜图为首帧参考）——后台任务 + 断点续跑"""
     data = request.json or {}
-    project = _safe_project(data.get('project_name') or '')
-    if not project:
-        return jsonify({"success": False, "error": "缺少 project_name"}), 400
+    # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
+    project, err = _project_or_400(data.get('project_name') or '')
+    if err is not None:
+        return err
     script = _load_script_for(project, data.get('episode_no')) if not data.get('shots') \
         else {"shots": data.get('shots') or []}
     shots = script.get("shots") or []
@@ -1667,9 +1690,12 @@ def api_storyboard_shot_reorder():
     仅调整 shots 数组顺序与 shot_order 记录。
     """
     data = request.json or {}
-    project = _safe_project(data.get('project_name') or '')
+    # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
+    project, err = _project_or_400(data.get('project_name') or '')
     order = data.get('order') or []
-    if not project or not order:
+    if err is not None:
+        return err
+    if not order:
         return jsonify({"success": False, "error": "缺少 project_name / order"}), 400
     key = project_store.safe_key(project)
     episode_no = data.get('episode_no')
@@ -1704,9 +1730,10 @@ def api_storyboard_retry_shot():
     未传 shot 时按 shot_id 从剧本取。
     """
     data = request.json or {}
-    project = _safe_project(data.get('project_name') or '')
-    if not project:
-        return jsonify({"success": False, "error": "缺少 project_name"}), 400
+    # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
+    project, err = _project_or_400(data.get('project_name') or '')
+    if err is not None:
+        return err
     script = _load_script_for(project, data.get('episode_no'))
     shots = script.get("shots") or []
     shot = data.get('shot') or {}
@@ -1876,9 +1903,10 @@ def api_video_retry_shot():
     支持 mode：reference（默认，分镜图+主角锚点）/ keyframe（首尾帧插值）
     """
     data = request.json or {}
-    project = _safe_project(data.get('project_name') or '')
-    if not project:
-        return jsonify({"success": False, "error": "缺少 project_name"}), 400
+    # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
+    project, err = _project_or_400(data.get('project_name') or '')
+    if err is not None:
+        return err
     script = _load_script_for(project, data.get('episode_no'))
     shots = script.get("shots") or []
     shot = data.get('shot') or {}
@@ -2006,9 +2034,10 @@ def api_export_run():
     body: {project_name, episode_no?, formats?: ["jianying","fcpxml","srt","frames"]}
     """
     data = request.json or {}
-    project = _safe_project(data.get('project_name') or '')
-    if not project:
-        return jsonify({"success": False, "error": "缺少 project_name"}), 400
+    # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
+    project, err = _project_or_400(data.get('project_name') or '')
+    if err is not None:
+        return err
     script = _load_script_for(project, data.get('episode_no'))
     if not script:
         return jsonify({"success": False, "error": "剧本不存在"}), 404
@@ -2261,7 +2290,8 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
         }[asset_type]
 
         # 风格 / 画幅：本任务内所有资产共用（解析一次即可）
-        style_res = style_kit.resolve(style)
+        # G19：风格串未含画幅关键词时以默认 9:16 为底，不再静默回落模板 16:9
+        style_res = style_kit.resolve(style, default_ratio=style_kit.DEFAULT_RATIO)
         gen_style = style_res["style"]
         gen_size = style_res["size"]
         if style:
@@ -2890,7 +2920,8 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
     except (TypeError, ValueError):
         _episode = 1
     # 风格/画幅：整批分镜共用
-    _sb_style_res = style_kit.resolve(style)
+    # G19：风格串未含画幅关键词时以默认 9:16 为底，不再静默回落模板 16:9
+    _sb_style_res = style_kit.resolve(style, default_ratio=style_kit.DEFAULT_RATIO)
     _sb_style = _sb_style_res["style"]
     _sb_size = _sb_style_res["size"]
     if _sb_style:
@@ -3405,7 +3436,8 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
     """
     try:
         # 风格/画幅：整集共用一次解析
-        _style_res = style_kit.resolve(style)
+        # G19：风格串未含画幅关键词时以默认 9:16 为底，不再静默回落模板 16:9
+        _style_res = style_kit.resolve(style, default_ratio=style_kit.DEFAULT_RATIO)
         _size = _style_res.get("size")
         if style:
             app.logger.info("[视频] 风格=%s；画幅=%s", _style_res.get("style") or style,
@@ -3608,12 +3640,13 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
             ep_name = f"{episode_tag or 'episode'}_full.mp4"
 
             if not files:
+                _ep_err = result.get("error") or "整片生成失败（ComfyUI 未返回视频文件或整片 QC 全部不通过）"
                 with lock:
                     generation_state[task_id]["results"].append({
                         "success": False, "mode": "episode",
                         "segment_count": len(segs),
                         "qc_results": qc_results,
-                        "error": "整片生成失败（ComfyUI 未返回视频文件或整片 QC 全部不通过）",
+                        "error": _ep_err,
                     })
                 with lock:
                     generation_state[task_id].update({
@@ -9014,9 +9047,11 @@ def api_autopilot_plan_set(project_name):
 def api_autopilot_enable():
     """开启托管（可同时带生产配置）。novel_id 缺省时从项目注册表自动关联。"""
     data = request.json or {}
-    project = _safe_project(data.get('project') or data.get('project_name') or '')
-    if not project:
-        return jsonify({"success": False, "error": "缺少 project"}), 400
+    # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
+    project, err = _project_or_400(data.get('project') or data.get('project_name') or '',
+                                    field_name="project")
+    if err is not None:
+        return err
     novel_id = str(data.get('novel_id') or '').strip()
     if not novel_id:
         try:
@@ -9050,9 +9085,11 @@ def api_autopilot_enable():
 @_autopilot_guard
 def api_autopilot_disable():
     data = request.json or {}
-    project = _safe_project(data.get('project') or data.get('project_name') or '')
-    if not project:
-        return jsonify({"success": False, "error": "缺少 project"}), 400
+    # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
+    project, err = _project_or_400(data.get('project') or data.get('project_name') or '',
+                                   field_name="project")
+    if err is not None:
+        return err
     return jsonify({"success": True, "project": project,
                     "plan": autopilot.disable(project)})
 

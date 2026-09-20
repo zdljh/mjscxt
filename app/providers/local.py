@@ -127,9 +127,13 @@ class ComfyUIVideoProvider(VideoProvider):
 
     def generate_sequence(self, segments, filename_prefix, seed=None,
                           timeout_per_segment: int = 900) -> dict:
-        result = _comfy().ComfyUIClient().generate_h3_sequence(
-            segments=segments, filename_prefix=filename_prefix, seed=seed,
-            timeout_per_segment=timeout_per_segment)
+        try:
+            result = _comfy().ComfyUIClient().generate_h3_sequence(
+                segments=segments, filename_prefix=filename_prefix, seed=seed,
+                timeout_per_segment=timeout_per_segment)
+        except RuntimeError as e:
+            # S12：参考图为空被 fail-fast 拒绝提交 → 结构化失败，不裸抛
+            return {"ok": False, "files": [], "provider": self.name, "error": str(e)}
         if isinstance(result, dict):
             result.setdefault("provider", self.name)
             return result
@@ -150,9 +154,13 @@ class ComfyUIVideoProvider(VideoProvider):
             "reference_images": [start_frame, end_frame],
             "name": "keyframe",
         }
-        result = client.generate_h3_sequence(
-            segments=[seg], filename_prefix=filename_prefix_from(out_path), seed=seed,
-            timeout_per_segment=900)
+        try:
+            result = client.generate_h3_sequence(
+                segments=[seg], filename_prefix=filename_prefix_from(out_path), seed=seed,
+                timeout_per_segment=900)
+        except RuntimeError as e:
+            # S12：首帧/尾帧都不可用时 fail-fast 拒绝提交 → 结构化失败
+            return {"ok": False, "provider": self.name, "error": str(e)}
         files = (result or {}).get("files") or []
         if not files:
             return {"ok": False, "provider": self.name,
