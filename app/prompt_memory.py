@@ -103,6 +103,27 @@ def _norm(text: str) -> str:
     return re.sub(r"[\s]+", "", (text or "")).lower()
 
 
+def _split_kinds(kind: str = "", kinds: Optional[List[str]] = None) -> set:
+    """把 ``kind``（逗号分隔）与 ``kinds``（列表）合并归一为去重集合。"""
+    out: set = set()
+    for k in (kinds or []):
+        if k:
+            out.add(str(k).strip())
+    for k in str(kind or "").split(","):
+        k = k.strip()
+        if k:
+            out.add(k)
+    return out
+
+
+def _day_end(s: str) -> str:
+    """把「只到日期」的 ISO 串补成当天末，保证 ``until`` 是闭区间。"""
+    s = str(s or "").strip()
+    if len(s) == 10 and "T" not in s:
+        return s + "T23:59:59"
+    return s
+
+
 # ===================== 提示词指纹与素材提取 =====================
 
 def prompt_hash(prompt: str) -> str:
@@ -544,7 +565,7 @@ class PromptMemory:
             if total > 0.2:
                 scored.append((total, l))
         scored.sort(key=lambda x: x[0], reverse=True)
-        hints, seen = [], set()
+        hints, seen, used_ids = [], set(), set()
         for _, l in scored:
             for iss in (l.get("issues") or []):
                 text = self._render_hint(iss, style)
@@ -554,10 +575,17 @@ class PromptMemory:
                 if key and key not in seen:
                     seen.add(key)
                     hints.append(text)
+                    # 计数口径（§2.4.1）：只有「真正被渲染进 hints」的教训才算被召回。
+                    # 记下该条 lesson_id，函数返回前统一回写 use_count / last_used。
+                    lid = l.get("lesson_id")
+                    if lid:
+                        used_ids.add(lid)
                 if len(hints) >= max_hints:
                     break
             if len(hints) >= max_hints:
                 break
+        if used_ids:
+            self.mark_used(list(used_ids))
         return hints
 
     # ---------- 带优先级和上下文的召回（原增强版能力，折入） ----------
@@ -750,20 +778,95 @@ class PromptMemory:
     def stats(self) -> dict:
         with self._lock:
             by_kind: dict = {}
+            dead = 0
+            used_total = 0
             for l in self._lessons:
                 k = l.get("kind") or "?"
                 by_kind[k] = by_kind.get(k, 0) + 1
+                if (l.get("use_count") or 0) == 0:
+                    dead += 1
+                used_total += int(l.get("use_count") or 0)
             return {
                 "total": len(self._lessons),
                 "by_kind": by_kind,
+                "dead_lessons": dead,
+                "used_total": used_total,
                 "path": self._path,
             }
 
+    def dead_count(self) -> int:
+        """`use_count == 0` 的教训条数（「记了却从未被召回」的死教训）。"""
+        with self._lock:
+            return sum(1 for l in self._lessons if (l.get("use_count") or 0) == 0)
+
     def list(self, kind: str = "", limit: int = 50) -> list:
+        """返回最新在前的教训列表（**向后兼容**：旧调用 `list(kind, limit)` 仍返回 list）。
+
+        多维筛选 / 分页 / 统计请用 ``query()``（返回富结构 dict）。
+        """
         with self._lock:
             items = [dict(l) for l in self._lessons
                      if (not kind or l.get("kind") == kind)]
             return items[-limit:][::-1]         # 最新在前
+
+    def query(self, kind: str = "", kinds: Optional[List[str]] = None,
+              project: str = "", since: str = "", until: str = "",
+              q: str = "", limit: int = 50, offset: int = 0) -> dict:
+        """多维筛选 + 关键词检索 + 分页（供教训管理页 / API 使用）。
+
+        返回富结构：:
+
+            {"items": [...],        # 最新在前，已分页
+             "total": int,          # 未过滤前条数
+             "filtered": int,       # 应用全部过滤后条数（分页前）
+             "by_kind": {kind: n},  # 过滤后口径
+             "dead_lessons": int,   # 过滤后口径里 use_count==0 的条数}
+
+        ``kind`` 支持逗号分隔多值（如 ``"asset,storyboard"``），``kinds`` 列表同样支持。
+        ``since`` / ``until`` 按 ``ts`` 做 ISO 字符串比较；``until`` 只给到日期时按
+        「当天末」闭区间处理。``q`` 命中 ``issues ∪ terms ∪ reason ∪ prompt`` 任一即命中。
+        """
+        want = _split_kinds(kind, kinds)
+        qn = _norm(q or "")
+        until_s = _day_end(until)
+        with self._lock:
+            items = [dict(l) for l in self._lessons]
+        total = len(items)
+        if want:
+            items = [l for l in items if (l.get("kind") or "") in want]
+        if project:
+            items = [l for l in items if (l.get("project") or "") == project]
+        if since:
+            items = [l for l in items if str(l.get("ts") or "") >= str(since)]
+        if until_s:
+            items = [l for l in items if str(l.get("ts") or "") <= until_s]
+        if qn:
+            def _hit(l: dict) -> bool:
+                for key in ("issues", "terms"):
+                    if qn in _norm(" ".join(str(x) for x in (l.get(key) or []))):
+                        return True
+                if qn in _norm(str(l.get("reason") or "")):
+                    return True
+                if qn in _norm(str(l.get("prompt") or "")):
+                    return True
+                return False
+            items = [l for l in items if _hit(l)]
+        filtered = len(items)
+        by_kind: dict = {}
+        dead = 0
+        for l in items:
+            k = l.get("kind") or "?"
+            by_kind[k] = by_kind.get(k, 0) + 1
+            if (l.get("use_count") or 0) == 0:
+                dead += 1
+        # 最新在前（追加顺序：尾部最新）
+        items = items[::-1]
+        if limit and limit > 0:
+            page = items[offset:offset + limit]
+        else:
+            page = items[offset:]
+        return {"items": page, "total": total, "filtered": filtered,
+                "by_kind": by_kind, "dead_lessons": dead}
 
     # ---------- 带过滤条件的列表（原增强版能力，折入） ----------
     def list_with_context(self, kind: str = "", category: str = "",
@@ -790,6 +893,43 @@ class PromptMemory:
                 self._lessons = []
             self._flush()
             return before - len(self._lessons)
+
+    def delete_by_kind(self, kind: str) -> int:
+        """按 kind 删除（复用 ``clear(kind)``，语义一致）。"""
+        return self.clear(kind)
+
+    def delete(self, lesson_id: str) -> bool:
+        """按 ``lesson_id`` 删除单条并原子落盘；未命中返回 False。"""
+        lid = str(lesson_id or "").strip()
+        if not lid:
+            return False
+        with self._lock:
+            before = len(self._lessons)
+            self._lessons = [l for l in self._lessons
+                             if (l.get("lesson_id") or "") != lid]
+            removed = before - len(self._lessons)
+            if removed:
+                self._flush()
+            return removed > 0
+
+    def mark_used(self, lesson_ids: List[str]) -> int:
+        """命中回写：对每个命中的 ``lesson_id`` 做 ``use_count += 1``、
+        ``last_used = now``，全部命中后**原子落盘**。返回实际命中条数（去重后）。
+        """
+        ids = {str(x).strip() for x in (lesson_ids or []) if str(x).strip()}
+        if not ids:
+            return 0
+        now = _now()
+        hit = 0
+        with self._lock:
+            for l in self._lessons:
+                if (l.get("lesson_id") or "") in ids:
+                    l["use_count"] = int(l.get("use_count") or 0) + 1
+                    l["last_used"] = now
+                    hit += 1
+            if hit:
+                self._flush()
+        return hit
 
     def prune_empty(self) -> int:
         """清掉「无缺陷也无结论」的空教训，返回清理条数。
@@ -915,3 +1055,36 @@ def decay_lessons(root_dir: str = "") -> int:
     if not root_dir:
         return 0
     return get_enhanced_memory(root_dir).decay_old_lessons()
+
+
+def mark_used(lesson_ids: List[str], root_dir: str = "") -> int:
+    """模块级：命中回写 use_count / last_used（供生成链路或外部调用）。"""
+    if not root_dir:
+        return 0
+    return get_memory(root_dir).mark_used(lesson_ids)
+
+
+def delete_lesson(lesson_id: str, root_dir: str = "") -> bool:
+    """模块级：按 lesson_id 删除单条教训。"""
+    if not root_dir:
+        return False
+    return get_memory(root_dir).delete(lesson_id)
+
+
+def clear_lessons(kind: str = "", root_dir: str = "") -> int:
+    """模块级：清空某一环节（kind 为空则清空全部）。"""
+    if not root_dir:
+        return 0
+    return get_memory(root_dir).clear(kind)
+
+
+def query_lessons(kind: str = "", kinds: Optional[List[str]] = None,
+                  project: str = "", since: str = "", until: str = "",
+                  q: str = "", limit: int = 50, offset: int = 0,
+                  root_dir: str = "") -> dict:
+    """模块级：多维筛选 + 关键词检索 + 分页（返回富结构 dict）。"""
+    if not root_dir:
+        return {"items": [], "total": 0, "filtered": 0, "by_kind": {}, "dead_lessons": 0}
+    return get_memory(root_dir).query(kind=kind, kinds=kinds, project=project,
+                                      since=since, until=until, q=q,
+                                      limit=limit, offset=offset)
