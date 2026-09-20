@@ -171,13 +171,19 @@ def _seq(shot_id) -> int:
 
 
 def generate_end_frame(start_frame: str, prompt: str, out_path: str,
-                       seed: Optional[int] = None, timeout: int = 900) -> dict:
-    """以首帧为参考图，生成该镜头尾帧（Qwen Edit 2511 图像编辑链路）"""
+                       seed: Optional[int] = None, timeout: int = 900,
+                       client=None) -> dict:
+    """以首帧为参考图，生成该镜头尾帧（Qwen Edit 2511 图像编辑链路）
+
+    S-04：client 参数支持注入全局 ComfyUIClient（避免每镜新建实例、连接不复用）。
+    未传时退回新建（向后兼容）。
+    """
     try:
         import comfyui_client
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"comfyui_client 不可用：{e}"}
-    client = comfyui_client.ComfyUIClient()
+    if client is None:
+        client = comfyui_client.ComfyUIClient()
     prefix = os.path.splitext(os.path.basename(out_path))[0]
     try:
         result = client.generate_storyboard(
@@ -309,9 +315,13 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
                        chain_mode: str = DEFAULT_CHAIN_MODE,
                        verify_cb: Optional[Callable[[str, dict, dict], Tuple[bool, str]]] = None,
                        max_verify_retries: int = 0,
-                       preflight_cb: Optional[Callable[[str, dict, dict], dict]] = None
+                       preflight_cb: Optional[Callable[[str, dict, dict], dict]] = None,
+                       client=None,
                        ) -> dict:
     """批量生成尾帧（串行；单镜失败不影响其它镜）
+
+    S-04：client 参数透传给 generate_end_frame（默认 None 时退回新建实例，向后兼容）。
+    app.py 注入全局 comfyui_client 实例以复用连接与共享队列/熔断状态。
 
     chain_mode：跨镜链式（上一镜尾帧 = 下一镜首帧），见模块顶部说明。
     verify_cb(path, shot, item) -> (ok, reason)：可选的尾帧质检回调（由 app.py 注入
@@ -411,7 +421,7 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
         for attempt in range(attempts + 1):
             _seed = seed if attempt == 0 else random.randint(1, 2 ** 31 - 1)
             r = generate_end_frame(start, prompt, item["end_path"],
-                                   seed=_seed, timeout=timeout)
+                                   seed=_seed, timeout=timeout, client=client)
             if not r.get("ok") or verify_cb is None:
                 break
             try:

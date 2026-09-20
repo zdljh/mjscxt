@@ -116,7 +116,20 @@ def strip_audio(video_path: str, output_path: Optional[str] = None,
                 last_err = f"{method} 后仍检测到音轨"
                 continue
             if in_place:
-                os.replace(tmp_out, target)
+                try:
+                    os.replace(tmp_out, target)
+                except OSError as e:
+                    # S-02：Windows 文件锁（多任务场景：autopilot 跑图 + 前端查看同一视频）
+                    # os.replace 目标被占用会抛 OSError。保留 tmp_out 供下次清理，
+                    # 原文件音轨未剥离（保留原状），但标记 error 让调用方知晓。
+                    report["error"] = (f"剥离成功但 os.replace 失败（原文件保留音轨未变，"
+                                       f"tmp 残留 {os.path.basename(tmp_out)}）：{e}")
+                    report["ok"] = False
+                    report["changed"] = False
+                    report["method"] = method
+                    report["elapsed_sec"] = round(time.time() - t0, 2)
+                    logger.error(report["error"])
+                    return report
             report.update({"ok": True, "changed": True, "method": method,
                            "output": os.path.abspath(target),
                            "has_audio_after": False,
