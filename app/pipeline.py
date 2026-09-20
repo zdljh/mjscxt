@@ -574,7 +574,7 @@ def step_keyframe(ctx) -> dict:
         pct = 42 + int((done / max(total, 1)) * 40)
         ctx["progress"](f"尾帧 {done}/{total}", min(pct, 82), phase="keyframe")
 
-    _kf_verify, _kf_vretries = A._keyframe_qc_verifier(ctx["project_name"])
+    _kf_verify, _kf_vretries = A._keyframe_qc_verifier(ctx["project_name"], script=ctx.get("script"))
     # 尾帧提示词预检（生成前质检）：与手动链路保持同一覆盖（能自愈先自愈，成批不阻断）
     _kf_pre, _kf_pre_on = A._keyframe_prompt_preflight(ctx["project_name"])
     report = A.keyframe.generate_keyframes(

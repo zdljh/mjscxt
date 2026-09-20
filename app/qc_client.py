@@ -84,6 +84,47 @@ STYLE_CHECK_NOTE = (
     "「风格不符/画风不符」并输出 style_match=false。"
 )
 
+# 设定一致性核对（分镜质检带「本镜出现的角色 / 物品 / 场景」的设定图）：
+# 分镜图是**按参考图生成**的，但旧实现只把成品图单独送检 —— 模型手里没有锚点，
+# 「这个角色是不是长成了设定里的样子」只能靠它自己想象，实测「角色不像设定 /
+# 道具走形」这类问题要么被放过、要么被误判。这里把生成时用的参考图一并送检，
+# 让判定有据可依。与 WATERMARK_EXEMPT_NOTE / CRITICAL_RULE_NOTE 同一「运行时追加」
+# 机制：用户自定义的旧 image_prompt 也自动获得该能力。
+MAX_REF_IMAGES = 4     # 质检最多附带几张设定参考图（去重后）
+_REF_LABEL_PREFIX_RE = re.compile(r"^参考图\s*\d+\s*是")
+
+
+def build_ref_consistency_note(refs: list) -> str:
+    """生成「设定一致性核对」段落。
+
+    refs 为 [(label, path), ...]，label 形如「角色「方源」的外貌、服装与发型」。
+    ⚠️ 第 1 张图固定是待检成品图，因此设定图从「第 2 张」开始编号
+    （生成侧 label 里的「参考图N」是相对参考图自身的编号，必须剥掉，否则模型会数错图）。
+    """
+    items = []
+    for i, (label, _p) in enumerate(refs or [], start=2):
+        lab = _REF_LABEL_PREFIX_RE.sub("", str(label or "").strip()).strip()
+        items.append("  第 %d 张 = 设定图：%s" % (i, lab or "（未标注）"))
+    if not items:
+        return ""
+    return (
+        "\n【设定一致性核对·重要】本次按顺序传入 %d 张图：\n"
+        "  第 1 张 = 待检的分镜图（AI 生成结果）；\n%s\n"
+        "请**逐张**核对第 1 张里出现的角色 / 物品 / 场景是否与对应设定图一致：\n"
+        "  · 角色：脸型 / 五官 / 发型 / 发色 / 服装款式与配色 / 配饰 必须与设定一致；"
+        "出现「换脸 / 换装 / 发色不符 / 配饰丢失 / 年龄或气质明显不同」都算设定不符；\n"
+        "  · 物品：形状 / 材质 / 配色 / 纹样 必须与设定一致；"
+        "出现「形状走样 / 配色错误 / 纹样改变 / 材质感突变」都算设定不符；\n"
+        "  · 场景：主要结构与氛围一致即可，**机位与构图允许不同**，不得据此扣分；\n"
+        "  · 设定图是「三视图 / 多视图」时，分镜图与其中**任一视图**一致即算一致；\n"
+        "  · 参考图对应的角色 / 物品**没有出现在画面里**时（例如本镜只有场景），"
+        "不得因「画面里找不到」而扣分。\n"
+        "⚠️ 只要存在角色或物品**明显变形 / 走样 / 与设定不符**，必须在 issues 里逐条写明"
+        "（以「角色变形：…」或「物品变形：…」开头），并按上方硬性规则输出 pass=false 且 score ≤ 50。"
+        % (len(items) + 1, "\n".join(items))
+    )
+
+
 # 代码侧关键缺陷词表（命中即阻断，与模型分数无关）
 # 注意：不含「水印/字幕/logo/文字」——这些按 WATERMARK_EXEMPT_NOTE 不计缺陷。
 CRITICAL_ISSUE_KEYWORDS = (
@@ -387,6 +428,8 @@ CONFIG_KEYS = (
     "audio_min_speech_ratio", "audio_min_mean_db", "audio_max_drift",
     # 尾帧质检开关
     "keyframe_qc_enabled",
+    # 图片质检是否附带「本镜出现的角色/物品/场景」设定图做一致性核对（2026-09-20 新增）
+    "image_ref_compare",
     # 提示词预检（生成前质检，见 prompt_qc.py）。⚠️ 它不依赖质检接口，默认开启
     "prompt_enabled", "prompt_mode",
 )
@@ -416,6 +459,11 @@ def _empty_config() -> dict:
         "max_retries": 2,            # 不达标最大重试次数
         "video_frame_count": 3,      # 视频抽帧数量（1-6）
         "image_max_side": 1024,      # 送检前压缩的最长边（控制 token 与耗时）
+        # 图片质检是否附带「本镜出现的角色/物品/场景」的设定图：
+        # 分镜图是按参考图生成的，只送成品图的话模型没有锚点，「角色不像设定/道具变形」
+        # 这类问题只能靠猜。开启后按 shot.characters_in_shot / items_in_shot 顺序附带
+        # 最多 MAX_REF_IMAGES 张设定图，并要求逐张核对是否变形、与设定是否一致。
+        "image_ref_compare": True,
         "timeout": 180,              # 单次质检请求读超时（秒）
         "api_retries": API_RETRY_ATTEMPTS,   # 网络层额外重试次数（瞬时故障时退避重试，与 max_retries 重画无关）
         "api_backoff": API_RETRY_BACKOFF,    # 网络重试退避基数（秒），按 2 的幂增长、单次上限见 API_RETRY_MAX_SLEEP
@@ -562,7 +610,7 @@ def save_config(config_path: str, patch: dict, keep_key_if_blank: bool = True) -
                     f"{secret_store.ENV_KEY_MAP.get('qc', 'MJSCXT_API_KEY_QC')} 配置密钥。")
             cfg["api_key"] = ""
             continue
-        if k in ("enabled", "image_enabled", "video_enabled"):
+        if k in ("enabled", "image_enabled", "video_enabled", "image_ref_compare"):
             cfg[k] = bool(v)
         elif k in ("pass_score", "max_retries", "video_frame_count", "image_max_side",
                    "timeout", "api_retries"):
@@ -1420,10 +1468,16 @@ def parse_json_loose(content: str) -> dict:
 # ===================== 图片质检 =====================
 
 def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
-                override: dict = None, style: str = "") -> dict:
+                override: dict = None, style: str = "",
+                ref_images: list = None) -> dict:
     """单张图片质检。永不抛异常：失败时返回 ok=False 并带 error。
     override 仅用于「测试连通性」临时传参，不落盘。
-    style：目标风格串（用户与总控敲定），用于「风格达标」判定；为空则不做风格检测。"""
+    style：目标风格串（用户与总控敲定），用于「风格达标」判定；为空则不做风格检测。
+    ref_images：设定参考图 [(label, path), ...]（也可以是 {"label","path"} dict）——
+      生成侧用的那几张角色 / 物品 / 场景设定图。给了就一并送检，让模型能**逐个核对
+      「画面里的角色 / 物品是否与设定一致、有没有变形」**，而不是凭想象判。
+      受 cfg["image_ref_compare"]（默认 True）控制；不存在的文件与重复图（同一张被多个
+      槽位复用）自动跳过。"""
     cfg = cfg or _empty_config()
     if not cfg.get("enabled"):
         return {"ok": False, "skipped": True, "reason": "质检总开关未开启"}
@@ -1442,14 +1496,42 @@ def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
     prompt = prompt + WATERMARK_EXEMPT_NOTE + CRITICAL_RULE_NOTE + FRAMING_TOLERANCE_NOTE
     if style_norm:
         prompt = prompt + STYLE_CHECK_NOTE.replace("{style}", style_norm)
+    # ---- 设定一致性核对：把生成时用的参考图一并送检 ----
+    ref_list = []
+    if ref_images and cfg.get("image_ref_compare", True):
+        seen = {os.path.abspath(image_path)}
+        for item in ref_images:
+            if isinstance(item, dict):
+                label = item.get("label") or item.get("name") or ""
+                path = item.get("path") or item.get("file") or item.get("image")
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                label, path = item[0], item[1]
+            else:
+                continue
+            if not path or not os.path.isfile(path):
+                continue
+            ap = os.path.abspath(path)
+            if ap in seen:      # 同一张图被多个槽位复用（如主角色=次要角色）不重复送
+                continue
+            seen.add(ap)
+            ref_list.append((label, path))
+        ref_list = ref_list[:MAX_REF_IMAGES]
+    if ref_list:
+        prompt = prompt + build_ref_consistency_note(ref_list)
+    image_paths = [image_path] + [p for _l, p in ref_list]
     try:
-        verdict = _run_vision(ep, prompt, [image_path], cfg)
+        verdict = _run_vision(ep, prompt, image_paths, cfg)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"图片质检调用失败：{e}")
         return {"ok": False, "skipped": False, "error": str(e),
                 "api_attempts": getattr(e, "attempts", 1),
                 "retryable": getattr(e, "retryable", None)}
-    return _apply_style_gate(verdict, style_norm)
+    verdict = _apply_style_gate(verdict, style_norm)
+    # 把「带了几张设定图」透出来，便于前端/体检确认该能力真的生效（而不是静默没带）
+    verdict["ref_images_used"] = len(ref_list)
+    if ref_list:
+        verdict["ref_labels"] = [str(l)[:60] for l, _p in ref_list]
+    return verdict
 
 
 # ===================== 视频质检（ffmpeg 抽帧） =====================

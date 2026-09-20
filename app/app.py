@@ -1341,7 +1341,7 @@ def api_keyframes_generate():
     plan = keyframe.plan_keyframes(shots, sb_map, kf_dir, only_missing=only_missing,
                                    chain_mode=chain_mode)
     # 尾帧质检（可选）：默认跟随图片质检开关，不达标换 seed 重画，仍不通过则本镜判失败
-    _kf_verify, _kf_vretries = _keyframe_qc_verifier(project)
+    _kf_verify, _kf_vretries = _keyframe_qc_verifier(project, script=script)
     # 尾帧提示词预检（生成前质检）：能自愈的先自愈再出图；成批生成不阻断
     # （与资产 / 整集视频同一取舍 —— 为一条提示词打断整批代价过大）
     _kf_pre, _kf_pre_on = _keyframe_prompt_preflight(project)
@@ -1721,7 +1721,9 @@ def api_storyboard_retry_shot():
     shutil.copy2(files[0], scratch)
     if qc_on:
         verdict = qc_client.check_image(scratch, _qc_shot_desc(shot), qc_cfg,
-                                        style=(shot.get("style") or _rs_style))
+                                        style=(shot.get("style") or _rs_style),
+                                        ref_images=_qc_ref_images(
+                                            shot, char_idx, item_idx, scene_idx, refs))
         gate = _qc_gate(verdict)
         _qc_record_verdict(project, "image", shot_id, "单镜重跑质检",
                            1, seed, scratch, verdict, style=(shot.get("style") or _rs_style))
@@ -2860,7 +2862,9 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                             generation_state[task_id]["phase"] = f"图片质检中（镜头 {shot_id} · 第 {attempt + 1} 次）"
                             generation_state[task_id]["qc_phase"] = "checking"
                         verdict = qc_client.check_image(scratch_png, _qc_shot_desc(shot), qc_cfg,
-                                                        style=(shot.get("style") or _sb_style))
+                                                        style=(shot.get("style") or _sb_style),
+                                                        ref_images=_qc_ref_images(
+                                                            shot, char_idx, item_idx, scene_idx, refs))
                         rec = _qc_record_verdict(project_name, "image", shot_id, "图片质检",
                                                  attempt + 1, seed, scratch_png, verdict,
                                                  style=(shot.get("style") or _sb_style))
@@ -4983,7 +4987,44 @@ def _qc_shot_desc(shot: dict) -> str:
     return "；".join(parts)[:900] or "（无镜头描述）"
 
 
-def _keyframe_qc_verifier(project_name: str):
+def _qc_ref_images(shot: dict, char_idx: dict, item_idx: dict, scene_idx: dict,
+                   fallback_refs: list = None) -> list:
+    """为「图片质检」收集**本镜出现**的角色 / 物品 / 场景设定图 → [(label, path)]。
+
+    为什么要单独收集，而不直接复用生成侧的 `_allocate_storyboard_refs`：
+    生成侧只有 3 个参考图槽位（主角色 / 次要 / 场景），最多带 3 张；而质检的目的是
+    **逐个核对画面里的每个角色、每件物品有没有变形、是否与设定一致**，所以按
+    `shot.characters_in_shot` / `shot.items_in_shot` 全量收集（总数上限
+    `qc_client.MAX_REF_IMAGES`，在 check_image 内还会按路径去重）。
+
+    历史缺陷：分镜质检只把成品图单独送检，模型手里没有任何设定锚点，
+    「这个角色长得像不像设定」「这柄剑的形制对不对」只能靠它自己猜 ——
+    「角色不像设定 / 道具走形」这类问题要么被放过、要么被误判。
+    """
+    out, seen = [], set()
+
+    def _add(label, path):
+        if not path or path in seen:
+            return
+        seen.add(path)
+        out.append((label, path))
+
+    for n in (shot.get("characters_in_shot") or []):
+        _add(f"角色「{n}」的外貌、服装与发型", (char_idx.get(n) or {}).get("image"))
+    for n in (shot.get("items_in_shot") or []):
+        _add(f"物品「{n}」的形状、材质与配色", (item_idx.get(n) or {}).get("image"))
+    loc = shot.get("location")
+    if loc in scene_idx:
+        _add(f"场景「{loc}」的环境与氛围", (scene_idx.get(loc) or {}).get("image"))
+    if not out:
+        # 兜底：本镜没登记角色/物品时，用生成侧实际用的那几张（至少保住场景锚点）
+        for r in (fallback_refs or []):
+            if isinstance(r, (list, tuple)) and len(r) >= 3:
+                _add(str(r[1]), r[2])
+    return out[:qc_client.MAX_REF_IMAGES]
+
+
+def _keyframe_qc_verifier(project_name: str, script: dict = None):
     """尾帧质检回调（供 keyframe.generate_keyframes 的 verify_cb 注入）
 
     返回 (verify_cb, max_retries)；质检未开启或不可用时返回 (None, 0)，
@@ -5002,13 +5043,28 @@ def _keyframe_qc_verifier(project_name: str):
     if not qc_client.image_qc_ready(cfg):
         return None, 0
 
+    # 尾帧同样要核对「角色/物品有没有变形、是否与设定一致」：尾帧在链式模式下
+    # 会直接成为下一镜的首帧，一张走形的尾帧会顺着链污染后面所有镜。
+    # 这里按剧本预建一次资产索引（只建一次，逐镜复用）。
+    _kf_idx = None
+    try:
+        if script:
+            _kf_idx = (
+                _build_asset_index(script.get("characters") or [], project_name, "character"),
+                _build_asset_index(script.get("items") or [], project_name, "item"),
+                _build_asset_index(script.get("scenes") or [], project_name, "scene"),
+            )
+    except Exception as _e:  # noqa: BLE001
+        app.logger.warning(f"尾帧质检构建资产索引失败（本轮不带设定图）：{_e}")
+        _kf_idx = None
+
     def _verify(path: str, shot: dict, item: dict):
         desc = (_qc_shot_desc(shot)
                 + f"；本图是该镜的「尾帧」（动作结束瞬间），"
                   f"须与首帧保持同一人物、同一服装、同一场景与同一画风"
                 + ("，且须承接上一镜尾帧的画面" if item.get("chained") else ""))
-        verdict = qc_client.check_image(path, desc, cfg,
-                                        style=(shot.get("style") or ""))
+        verdict = qc_client.check_image(path, desc, cfg, style=(shot.get("style") or ""),
+                                        ref_images=(_qc_ref_images(shot, *_kf_idx) if _kf_idx else None))
         gate = _qc_gate(verdict)
         return bool(gate.get("accept")), gate.get("reason") or ""
 
