@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from typing import Dict, List, Optional
@@ -77,8 +78,17 @@ def probe_audio_info(path: str) -> Dict:
 def shot_timeline(script: Dict, videos_dir: str = "", segments: Optional[List[str]] = None) -> Dict:
     """按镜头顺序计算时间轴。
 
-    返回 ``{"shots": [...], "total_sec": float, "duration_source": "video"/"script"/"mixed"}``
+    返回 ``{"shots": [...], "total_sec": float, "duration_source": "video"/"script"/"mixed",
+    "episode_mode": bool, "episode_total_sec": float, "unmatched": int, "segment_count": int}``
     每个镜头：``{shot_id, index, start, duration, end, duration_source, video}``
+
+    S5 修复：镜头时间轴按 shot_id 对位（而非 list index 排序文件名）。
+    - 逐镜分段模式（每段 ``shot_01.mp4`` … ``shot_NN.mp4``）：通过
+      ``_shot_seq_num(shot_id)`` 归一化镜号到整数，从 ``shot_file`` 字典
+      取该镜对应分段的实测时长（缺失时回退剧本 duration）；
+    - 整集模式（只有 ``epNN_full.mp4`` 或 ``_full`` 后缀文件）：``episode_mode=True``，
+      按剧本时长逐镜铺 timeline，视频引用整片文件，绝不再把整片时长硬塞给第 1 镜。
+    返回 ``unmatched`` 表示有多少镜号在分段文件里找不到（缺镜 → 前端可提示）。
     """
     shots = (script or {}).get("shots") or []
     files: List[str] = []
@@ -87,31 +97,89 @@ def shot_timeline(script: Dict, videos_dir: str = "", segments: Optional[List[st
     elif videos_dir and os.path.isdir(videos_dir):
         files = sorted(os.path.join(videos_dir, f) for f in os.listdir(videos_dir)
                        if f.lower().endswith((".mp4", ".mov", ".mkv")))
-    real_durations: List[float] = []
+
+    # 按 shot 序号建分段映射（排除 _full / epNN_full 整片）
+    shot_file: Dict[int, str] = {}
+    full_files: List[str] = []
+    for p in files:
+        _base = os.path.basename(p)
+        _is_full = ("_full" in _base.lower())
+        if _is_full:
+            full_files.append(p)
+            continue
+        _seq = _shot_seq_num_from_filename(_base)
+        if _seq is not None:
+            shot_file[_seq] = p
+
+    real_durations: Dict[int, float] = {}
     for p in files:
         info = probe_media(p)
-        real_durations.append(round(float(info.get("duration") or 0), 3))
+        _d = round(float(info.get("duration") or 0), 3)
+        # 把实测时长归到对应 shot 序号（或记到 full 上）
+        _base = os.path.basename(p)
+        _seq = _shot_seq_num_from_filename(_base)
+        if _seq is not None:
+            real_durations[_seq] = _d
+        elif "_full" in _base.lower():
+            real_durations["__full__"] = _d
+
+    # S5：episode_mode = 有整片文件但没有逐镜分段
+    episode_mode = bool(full_files) and not shot_file
+    episode_total = real_durations.get("__full__", 0.0) if episode_mode else 0.0
 
     rows, t, srcs = [], 0.0, set()
+    unmatched = 0
     for i, shot in enumerate(shots):
-        real = real_durations[i] if i < len(real_durations) and real_durations[i] > 0 else None
+        snum = _shot_seq_num(shot.get("shot_id"))
+        real = real_durations.get(snum) if snum is not None else None
+        if episode_mode:
+            # 整集模式：视频引用整片，逐镜时长走剧本（不用分段）
+            real = None
+            video_ref = full_files[0] if full_files else ""
+        else:
+            video_ref = shot_file.get(snum, "") if snum is not None else ""
+            if snum is not None and snum not in shot_file:
+                unmatched += 1
         try:
             script_dur = float(shot.get("duration") or 0)
         except (TypeError, ValueError):
             script_dur = 0.0
         dur = real if real else (script_dur or 5.0)
-        src = "video" if real else "script"
-        srcs.add(src)
+        src = "video" if real else ("script" if dur == script_dur else "mixed")
+        if real:
+            srcs.add("video")
+        else:
+            srcs.add("script")
         rows.append({
             "shot_id": shot.get("shot_id", i + 1), "index": i,
             "start": round(t, 3), "duration": round(dur, 3), "end": round(t + dur, 3),
             "duration_source": src,
-            "video": files[i] if i < len(files) else "",
+            "video": video_ref,
         })
         t += dur
-    source = srcs.pop() if len(srcs) == 1 else ("mixed" if srcs else "script")
+    source = "mixed" if len(srcs) > 1 else (srcs.pop() if srcs else "script")
     return {"shots": rows, "total_sec": round(t, 3), "duration_source": source,
-            "segment_count": len(files)}
+            "episode_mode": episode_mode, "episode_total_sec": episode_total,
+            "unmatched": unmatched, "segment_count": len(files)}
+
+
+def _shot_seq_num(shot_id) -> Optional[int]:
+    """shot_id → 镜号（去非数字、取剩余数字串）。兼容 "shot_03" / "3" / "03"。"""
+    if shot_id is None:
+        return None
+    s = re.sub(r"\D", "", str(shot_id))
+    return int(s) if s else None
+
+
+def _shot_seq_num_from_filename(base: str) -> Optional[int]:
+    """从分段文件名提取镜号。'shot_01.mp4' → 1；'ep01_full.mp4' → None（整片）"""
+    if not base or "_full" in base.lower():
+        return None
+    s = re.search(r"shot[_\s]?(\d+)", base.lower())
+    if s:
+        return int(s.group(1))
+    s2 = re.search(r"(\d+)", base)
+    return int(s2.group(1)) if s2 else None
 
 
 def build_entries(lines: List[Dict], timeline: Dict, params: Optional[Dict] = None,
@@ -226,10 +294,27 @@ def mix_video_with_entries(video_path: str, entries: List[Dict], out_path: str,
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
     sr = int(p.get("sample_rate") or 48000)
 
-    cmd = [FFMPEG, "-y", "-v", "error", "-i", video_path, "-f", "lavfi"]
-    if vdur > 0:
-        cmd += ["-t", f"{vdur:.3f}"]
-    cmd += ["-i", f"anullsrc=r={sr}:cl=mono"]
+    # ⚠️ 静音底轨是 lavfi **无限源**：时长绝不允许「未定」。
+    #    旧写法把时长挂在输入选项 `-t` 上、且 `if vdur > 0` 才加 —— 一旦 ffprobe 取不到
+    #    视频时长（vdur == 0），`-t` 与结尾的 `-shortest` 会**双双缺席**，而 amix 用的是
+    #    `duration=first`（first 恰好就是这条无限底轨）→ ffmpeg 会一直往磁盘写，
+    #    实测曾一条命令把 C 盘写满 80GB（2026-09-19 事故）。
+    #    现在把时长写进 lavfi 滤镜参数 `d=`（权威、不依赖选项位置），并按
+    #    「视频实测时长 / 条目时间轴末端 + 1s 尾韵」取大值兜底，任何分支都有限。
+    tail_sec = 1.0
+    derived_sec = 0.0
+    for e in usable:
+        try:
+            derived_sec = max(derived_sec,
+                              float(e.get("start") or 0)
+                              + max(float(e.get("audio_dur") or 0), 0.5))
+        except (TypeError, ValueError):
+            continue
+    base_dur = max(vdur, derived_sec + tail_sec) if vdur > 0 else (derived_sec + tail_sec)
+    base_dur = max(base_dur, 1.0)
+
+    cmd = [FFMPEG, "-y", "-v", "error", "-i", video_path]
+    cmd += ["-f", "lavfi", "-i", f"anullsrc=r={sr}:cl=mono:d={base_dur:.3f}"]
     for e in usable:
         cmd += ["-i", e["audio_path"]]
 
@@ -270,8 +355,9 @@ def mix_video_with_entries(video_path: str, entries: List[Dict], out_path: str,
         cmd += ["-c:v", "copy"]
     cmd += ["-c:a", "aac", "-b:a", str(p.get("audio_bitrate") or "192k"),
             "-movflags", "+faststart"]
-    if vdur > 0:
-        cmd += ["-shortest"]
+    # 底轨已在滤镜参数里定长，`-shortest` 此时**恒安全**：成片长度 = min(底轨, 视频)。
+    # 旧代码 `if vdur > 0` 才加，等于把「写盘是否无限」交给了 ffprobe 的运气。
+    cmd += ["-shortest"]
     cmd += [out_path]
 
     started = time.time()

@@ -854,6 +854,12 @@ function QcTab({ projectKey }: { projectKey: string }) {
   const cfg = data?.config || {};
   const stats = data?.stats || { total: 0, passed: 0, failed: 0, retry_count: 0 };
   const records: any[] = Array.isArray(data?.history) ? data.history : [];
+  // 后端 history[].kind 是**质检品类**（图片/视频/尾帧/资产/音频/剧本/提示词），
+  // 此前一律渲染成「图像」，资产与提示词的记录显示得驴唇不对马嘴。
+  const KIND_LABEL: Record<string, string> = {
+    video: '视频', image: '图像', keyframe: '尾帧', asset: '资产',
+    audio: '音频', script: '剧本', prompt: '提示词',
+  };
 
   return (
     <div className="space-y-6">
@@ -949,25 +955,33 @@ function QcTab({ projectKey }: { projectKey: string }) {
             <div key={`${r.shot_id}-${r.kind}-${i}`} className="p-3 flex items-center gap-3">
               <span className="font-mono text-sm text-gray-900 dark:text-gray-200">{r.shot_id}</span>
               <span className="text-xs px-2 py-0.5 rounded bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400">
-                {r.kind === 'video' ? '视频' : '图像'}
+                {KIND_LABEL[r.kind] || r.kind || '质检'}
               </span>
               <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${verdictBadge(r.verdict)}`}>
-                {r.verdict === 'pass' ? '通过' : r.verdict === 'fail' ? '未通过' : String(r.verdict || '未知')}
+                {r.verdict === 'pass' ? '通过' : r.verdict === 'fail' ? '未通过'
+                  : r.verdict === 'error' ? '接口异常' : r.verdict === 'unknown' ? '待重试'
+                  : String(r.verdict || '未知')}
               </span>
               {typeof r.score === 'number' && (
-                <span className="text-xs text-gray-500 dark:text-gray-400">得分 {Math.round(r.score * 100)}</span>
+                // ⚠️ 后端 score 是 **0~100**（实测区间 15~98），不是 0~1 的比例。
+                //    这里此前无条件 *100，会把 82 分显示成「8200」。
+                <span className="text-xs text-gray-500 dark:text-gray-400">
+                  得分 {Math.round(r.score <= 1 ? r.score * 100 : r.score)}
+                </span>
               )}
               {r.timestamp && (
                 <span className="text-xs text-gray-400 dark:text-gray-500 ml-auto">{String(r.timestamp).replace('T', ' ').slice(0, 19)}</span>
               )}
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={testing === r.shot_id}
-                onClick={() => runTest(r.shot_id)}
-              >
-                {testing === r.shot_id ? '重测中…' : '重测'}
-              </Button>
+              {(r.kind === 'image' || r.kind === 'video') && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={testing === r.shot_id}
+                  onClick={() => runTest(r.shot_id)}
+                >
+                  {testing === r.shot_id ? '重测中…' : '重测'}
+                </Button>
+              )}
             </div>
           ))}
         </div>

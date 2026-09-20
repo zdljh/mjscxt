@@ -316,6 +316,7 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
                        verify_cb: Optional[Callable[[str, dict, dict], Tuple[bool, str]]] = None,
                        max_verify_retries: int = 0,
                        preflight_cb: Optional[Callable[[str, dict, dict], dict]] = None,
+                       qc_stop_cb: Optional[Callable[[list], Tuple[bool, str]]] = None,
                        client=None,
                        ) -> dict:
     """批量生成尾帧（串行；单镜失败不影响其它镜）
@@ -332,6 +333,9 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
         ``{"prompt": <自愈后的提示词>, "verdict": …, "repairs": [...]}``；本函数取其中的
         ``prompt`` 作为实际生成用提示词，并把精简结论记进结果。**不阻断**：尾帧是成批
         生成的，为一条提示词打断整批代价过大 —— 与资产/整集链路同一取舍。
+    qc_stop_cb(attempts) -> (bool, detail)：**重试止损**回调（G1，由 app.py 注入
+        ``qc_client.qc_retry_hopeless``）。连续两次缺陷特征完全相同即提前停止本镜
+        尾帧重画（尾帧在链式模式下是下一镜首帧，最贵的一处，换 seed 只是换骰子）。
     progress_cb(done, total, item) —— 每个镜头完成后回调一次
     """
     cm = norm_chain_mode(chain_mode)
@@ -352,6 +356,15 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
     by_shot = {str(s.get("shot_id", i + 1)): s for i, s in enumerate(shots or [])}
     plan_by_seq = {p["seq"]: p for p in plan}
     os.makedirs(keyframes_dir, exist_ok=True)
+
+    # S7 修复：尾帧先写暂存区 keyframe_scratch/<basename>，QC 通过才 move 到正式 keyframes/，
+    # 失败者不落地（避免坏图被下一轮"已存在"复用）。暂存目录与正式目录同级、不同名。
+    scratch_root = os.path.join(os.path.dirname(os.path.abspath(keyframes_dir)),
+                                "keyframe_scratch")
+    os.makedirs(scratch_root, exist_ok=True)
+
+    def _scratch_end(seq: int) -> str:
+        return os.path.join(scratch_root, f"shot_{seq:02d}_end.png")
 
     def _mirror(src: str, dst: str):
         """把实际使用的首帧镜像到 shot_NN_start.png（画布/导出/续跑统一取图）"""
@@ -417,24 +430,65 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
                 logger.warning(f"尾帧提示词预检回调异常（按原样生成）：{e}")
 
         attempts = max(0, int(max_verify_retries or 0)) if verify_cb else 0
+        # S7 修复：尾帧先写暂存区，质检通过才 move 到正式 keyframes/，失败者不落地
+        scratch_end = _scratch_end(seq)
+        end_p = item["end_path"]
         r: dict = {}
+        kf_attempts: List[dict] = []   # G1：本镜尾帧质检记录，供 _qc_retry_hopeless 止损判定
         for attempt in range(attempts + 1):
             _seed = seed if attempt == 0 else random.randint(1, 2 ** 31 - 1)
-            r = generate_end_frame(start, prompt, item["end_path"],
+            r = generate_end_frame(start, prompt, scratch_end,
                                    seed=_seed, timeout=timeout, client=client)
             if not r.get("ok") or verify_cb is None:
+                # verify_cb 未注入时无质检门（旧行为），保持"生成成功即落地"以兼容
+                # 无质检部署；但仍落正式目录（scratch → end_p 一致路径时直接生成）。
+                if verify_cb is None and r.get("ok") and os.path.abspath(scratch_end) != os.path.abspath(end_p):
+                    try:
+                        shutil.move(scratch_end, end_p)
+                    except Exception:  # noqa: BLE001
+                        pass
                 break
             try:
-                v_ok, v_reason = verify_cb(item["end_path"], shot, item)
+                v_ok, v_reason = verify_cb(scratch_end, shot, item)
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"尾帧质检回调异常（按通过处理）：{e}")
                 v_ok, v_reason = True, ""
             r["qc"] = {"ok": bool(v_ok), "reason": v_reason or "",
                        "attempt": attempt + 1}
+            # G1 止损：记录本镜质检特征（critical_issues/issues），连续相同则提前停
+            if not v_ok:
+                _qc_rec = {"attempt": attempt + 1, "reason": v_reason or "",
+                           "critical_issues": (r.get("qc") or {}).get("critical_issues") or [],
+                           "issues": (r.get("qc") or {}).get("issues") or []}
+                kf_attempts.append(_qc_rec)
             if v_ok:
+                # S7：质检通过 → 把暂存产物移入正式 keyframes/，并清理暂存
+                try:
+                    shutil.move(scratch_end, end_p)
+                except Exception as e:  # noqa: BLE001
+                    r.update({"ok": False, "error": f"尾帧移入正式目录失败：{e}"})
+                    break
                 break
+            # G1 止损铺开：尾帧连续 N 次缺陷一字不差 → 提前停止本镜尾帧重画（尾帧在
+            # 链式模式下是下一镜首帧，最贵的一处），换 seed 只是换骰子
+            if qc_stop_cb is not None and not v_ok:
+                _kf_stop, _kf_detail = qc_stop_cb(kf_attempts)
+                if _kf_stop:
+                    logger.warning(
+                        f"尾帧 shot {sid} 重试止损：连续 {len(kf_attempts)} 次缺陷相同"
+                        f"（{_kf_detail}），提前停止；建议改首帧/剧本字段后单独重跑")
+                    r["qc_retry_stopped"] = {"reason": "连续缺陷完全相同，已提前停止",
+                                              "features": _kf_detail,
+                                              "attempts": len(kf_attempts)}
+                    break
             if attempt >= attempts:
                 r.update({"ok": False, "error": f"尾帧未通过质检：{v_reason or '不符合要求'}"})
+                # S7：失败者不落地，清掉暂存残片，避免坏图被下一轮当"已存在"复用
+                try:
+                    if os.path.isfile(scratch_end):
+                        os.remove(scratch_end)
+                except Exception:  # noqa: BLE001
+                    pass
             else:
                 logger.info(f"尾帧 shot {sid} 质检不通过（{v_reason}），换 seed 重画")
 

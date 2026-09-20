@@ -199,6 +199,47 @@ def find_critical_issues(issues, keywords=None) -> list:
     return hits
 
 
+# G1 重试止损（共享模块）：本文件是叶子模块（只 import requests/audio_qc，
+# 不 import app / comfyui_client），因此把「连续重试缺陷特征提取 + 止损判定」
+# 放这里，供 app / comfyui_client / keyframe 以注入回调（qc_stop_cb）方式复用，
+# 规避 app ↔ comfyui_client 的循环依赖。
+
+def qc_retry_features(rec: dict) -> set:
+    """从一条质检记录里提取「缺陷特征集」，用于止损比对。
+
+    特征 = 该记录 critical_issues ∪ issues 的归一化文本集合。
+    同一缺陷在多轮重试里逐字复现 → 特征集相等 → 换 seed/换提示词无收益。
+    """
+    rec = rec or {}
+    feats: set = set()
+    for k in ("critical_issues", "issues"):
+        for it in (rec.get(k) or []):
+            s = str(it).strip()
+            if s:
+                feats.add(s[:200])
+    return feats
+
+
+def qc_retry_hopeless(attempts: list, streak: int = 2) -> tuple:
+    """连续 N 次重试的缺陷特征集完全相同 → 判定重试无收益（止损）。
+
+    返回 ``(stop: bool, detail: str)``：
+      - 最后 ``streak`` 条记录特征集相等且非空 → ``(True, "缺陷摘要")``；
+      - 特征集为空（模型没报具体缺陷）或不足 streak 条 → ``(False, "")``。
+
+    ⚠️ 只读特征比对，不做风格/关键缺陷二次判定 —— 后者由调用方（_qc_gate）负责。
+    """
+    if not attempts or len(attempts) < streak:
+        return False, ""
+    tail = list(attempts[-streak:])
+    feats = [qc_retry_features(r) for r in tail]
+    if not feats[0]:
+        return False, ""
+    if any(f != feats[0] for f in feats[1:]):
+        return False, ""
+    return True, "；".join(list(feats[0]))[:200]
+
+
 # 风格达标检测：用户与总控敲定的风格串（如「国漫风格，偏写实」）在成图/成片上
 # 是否被落实。此前质检只查「畸变/糊化/一致性」，完全不管风格，导致风格跑偏也不会
 # 触发「不达标 → 改提示词重生成」。这里把风格也纳入质检判定维度。
@@ -314,6 +355,8 @@ DEFAULT_IMAGE_PROMPT = (
     "6) 水印/角标/logo/字幕即使存在，也不计入缺陷、不扣分。\n"
     "目标风格：{style}\n"
     "镜头信息：{shot_desc}\n"
+    "判定线：score >= {pass_score} 且无关键缺陷 → pass=true，否则 pass=false"
+    "（请严格按合格线给 pass，不要凭直觉打分后由系统改判，避免模型判过、代码判不过的假失败）。\n"
     "请只输出一个 JSON 对象，不要任何解释文字，格式：\n"
     '{"score": 0-100 的整数, "pass": true 或 false, "style_match": true 或 false, '
     '"reason": "一句话结论", "issues": ["具体问题1", "具体问题2"]}'
@@ -329,6 +372,8 @@ DEFAULT_AUDIO_PROMPT = (
     "3) 波形上下是否被削成平直横线（说明增益过大导致爆音失真）；\n"
     "4) 是否存在异常高频噪声、周期性爆破或明显断续（说明音频损坏或拼接异常）。\n"
     "配音文本参考：{line_text}\n"
+    "判定线：score >= {pass_score} 且无关键缺陷 → pass=true，否则 pass=false"
+    "（请严格按合格线给 pass，不要凭直觉打分后由系统改判，避免模型判过、代码判不过的假失败）。\n"
     "请只输出一个 JSON 对象，不要任何解释文字，格式：\n"
     '{"score": 0-100 的整数, "pass": true 或 false, "reason": "一句话结论", "issues": ["具体问题1", "具体问题2"]}'
 )
@@ -343,6 +388,8 @@ DEFAULT_VIDEO_PROMPT = (
     "5) 水印/角标/logo/字幕即使存在，也不计入缺陷、不扣分。\n"
     "目标风格：{style}\n"
     "镜头信息：{shot_desc}\n"
+    "判定线：score >= {pass_score} 且无关键缺陷 → pass=true，否则 pass=false"
+    "（请严格按合格线给 pass，不要凭直觉打分后由系统改判，避免模型判过、代码判不过的假失败）。\n"
     "请只输出一个 JSON 对象，不要任何解释文字，格式：\n"
     '{"score": 0-100 的整数, "pass": true 或 false, "style_match": true 或 false, '
     '"reason": "一句话结论", "issues": ["具体问题1", "具体问题2"]}'
@@ -434,6 +481,8 @@ CONFIG_KEYS = (
     "keyframe_qc_enabled",
     # 图片质检是否附带「本镜出现的角色/物品/场景」设定图做一致性核对（2026-09-20 新增）
     "image_ref_compare",
+    # G9/O1 图片/视频客观层阈值（2026-09-20 新增）
+    "image_pixel_std_min", "video_max_drift",
     # 提示词预检（生成前质检，见 prompt_qc.py）。⚠️ 它不依赖质检接口，默认开启
     "prompt_enabled", "prompt_mode",
 )
@@ -468,6 +517,9 @@ def _empty_config() -> dict:
         # 这类问题只能靠猜。开启后按 shot.characters_in_shot / items_in_shot 顺序附带
         # 最多 MAX_REF_IMAGES 张设定图，并要求逐张核对是否变形、与设定是否一致。
         "image_ref_compare": True,
+        # G9/O1 客观层确定性闸门（图片黑图 stddev 下限 / 视频时长偏差上限）
+        "image_pixel_std_min": 8.0,  # 像素 stddev < 8 → 黑图/纯色图 fatal
+        "video_max_drift": 0.30,      # 视频 |实测-期望|/期望 > 30% → fatal
         "timeout": 180,              # 单次质检请求读超时（秒）
         "api_retries": API_RETRY_ATTEMPTS,   # 网络层额外重试次数（瞬时故障时退避重试，与 max_retries 重画无关）
         "api_backoff": API_RETRY_BACKOFF,    # 网络重试退避基数（秒），按 2 的幂增长、单次上限见 API_RETRY_MAX_SLEEP
@@ -548,39 +600,13 @@ def load_config(config_path: str) -> dict:
             cfg["model"] = env_model
     except Exception as e:  # noqa: BLE001
         logger.warning(f"质检密钥读取异常（回退 json）：{e}")
-    # 类型兜底
-    cfg["enabled"] = bool(cfg.get("enabled"))
-    cfg["image_enabled"] = bool(cfg.get("image_enabled", True))
-    cfg["video_enabled"] = bool(cfg.get("video_enabled", True))
-    try:
-        cfg["pass_score"] = max(0, min(100, int(cfg.get("pass_score", 70))))
-    except Exception:  # noqa: BLE001
-        cfg["pass_score"] = 70
-    try:
-        cfg["max_retries"] = max(0, min(10, int(cfg.get("max_retries", 2))))
-    except Exception:  # noqa: BLE001
-        cfg["max_retries"] = 2
-    try:
-        cfg["video_frame_count"] = max(1, min(6, int(cfg.get("video_frame_count", 3))))
-    except Exception:  # noqa: BLE001
-        cfg["video_frame_count"] = 3
-    try:
-        cfg["image_max_side"] = max(256, min(2048, int(cfg.get("image_max_side", 1024))))
-    except Exception:  # noqa: BLE001
-        cfg["image_max_side"] = 1024
-    try:
-        cfg["timeout"] = max(10, min(900, int(cfg.get("timeout", 180))))
-    except Exception:  # noqa: BLE001
-        cfg["timeout"] = 180
-    try:
-        cfg["api_retries"] = max(0, min(5, int(cfg.get("api_retries", API_RETRY_ATTEMPTS))))
-    except Exception:  # noqa: BLE001
-        cfg["api_retries"] = API_RETRY_ATTEMPTS
-    try:
-        cfg["api_backoff"] = max(0.0, min(30.0, float(cfg.get("api_backoff", API_RETRY_BACKOFF))))
-    except Exception:  # noqa: BLE001
-        cfg["api_backoff"] = API_RETRY_BACKOFF
-    return cfg
+    # 类型兜底：统一交给 `_normalize`（save_config / load_config_dict 用的是同一套规则）
+    # ⚠️ 审计 G2：这里原本手写了一份「简化版」归一化，且布尔项用的是裸 `bool()` ——
+    #    字符串 "false"/"0"/"no"/"off" 都是非空字符串 → 一律判 True（用户在页面或第三方
+    #    脚本里写 "false"，读回来反而是「开」）；而且它只覆盖 3 个开关，
+    #    audio_enabled / script_enabled / keyframe_qc_enabled / prompt_enabled 完全没归一化，
+    #    音频/剧本/尾帧质检的开关因此形同虚设。两份口径并存必然漂移，现收敛为单一实现。
+    return _normalize(cfg)
 
 
 def save_config(config_path: str, patch: dict, keep_key_if_blank: bool = True) -> dict:
@@ -615,11 +641,21 @@ def save_config(config_path: str, patch: dict, keep_key_if_blank: bool = True) -
             cfg["api_key"] = ""
             continue
         if k in ("enabled", "image_enabled", "video_enabled", "image_ref_compare"):
-            cfg[k] = bool(v)
+            # ⚠️ 审计 G2：这里原本是 `bool(v)` —— 字符串 "false"/"0"/"no"/"off"/"none"
+            #    都是**非空字符串**，`bool()` 一律判 True。用户在页面或第三方脚本里把开关
+            #    存成 "false"，读回来反而是「开」，开关形同虚设。
+            #    同文件 `_as_bool` 的 docstring 恰好记录了这条坑，只有 save_config 自己漏改。
+            #    非法值沿用当前（已归一化的）取值，绝不静默翻转开关。
+            cfg[k] = _as_bool(v, bool(cfg.get(k, False)))
         elif k in ("pass_score", "max_retries", "video_frame_count", "image_max_side",
                    "timeout", "api_retries"):
             try:
                 cfg[k] = int(v)
+            except Exception:  # noqa: BLE001
+                continue
+        elif k in ("image_pixel_std_min", "video_max_drift", "api_backoff"):
+            try:
+                cfg[k] = float(v)
             except Exception:  # noqa: BLE001
                 continue
         elif k == "api_backoff":
@@ -692,9 +728,21 @@ def _normalize(cfg: dict) -> dict:
     cfg["keyframe_qc_enabled"] = _as_bool(cfg.get("keyframe_qc_enabled"), True)
     # 提示词预检：默认开启；模式非法时回落到 repair（与 prompt_qc.prompt_qc_mode 同语义）
     cfg["prompt_enabled"] = _as_bool(cfg.get("prompt_enabled"), True)
+    # 图片质检是否附带设定图（save_config 的布尔组里也有它，读取侧必须同口径归一化）
+    cfg["image_ref_compare"] = _as_bool(cfg.get("image_ref_compare"), True)
     _pmode = str(cfg.get("prompt_mode") or "repair").strip().lower()
     cfg["prompt_mode"] = _pmode if _pmode in ("warn", "repair", "block") else "repair"
     cfg["endpoint_override"] = _normalize_override(cfg.get("endpoint_override"))
+    # G9/O1 图片客观层阈值：纯色/黑图 stddev 下限（float，默认 8.0，上限 50.0）
+    try:
+        cfg["image_pixel_std_min"] = max(0.0, min(50.0, float(cfg.get("image_pixel_std_min", 8.0))))
+    except Exception:  # noqa: BLE001
+        cfg["image_pixel_std_min"] = 8.0
+    # G9/O1 视频客观层阈值：时长偏差上限（float，默认 0.30，上限 5.0）
+    try:
+        cfg["video_max_drift"] = max(0.0, min(5.0, float(cfg.get("video_max_drift", 0.30))))
+    except Exception:  # noqa: BLE001
+        cfg["video_max_drift"] = 0.30
     for key, default, lo, hi in (("pass_score", 70, 0, 100), ("max_retries", 2, 0, 10),
                                  ("video_frame_count", 3, 1, 6), ("image_max_side", 1024, 256, 2048),
                                  ("timeout", 180, 10, 900),
@@ -743,7 +791,9 @@ def resolve_endpoint(cfg: dict, override: dict = None) -> dict:
     ep = {"base_url": (cfg.get("base_url") or "").strip(),
           "api_key": (cfg.get("api_key") or "").strip(),
           "model": (cfg.get("model") or "").strip(),
-          "disable_thinking": bool(cfg.get("disable_thinking", DISABLE_THINKING_DEFAULT)),
+          # ⚠️ 审计 G2 同型：不能裸 `bool()` —— "false"/"0"/"off" 都是非空字符串，一律判 True，
+          #    于是「关闭思考」的开关在字符串写法下永远关不掉。
+          "disable_thinking": _as_bool(cfg.get("disable_thinking"), DISABLE_THINKING_DEFAULT),
           "min_tokens_when_thinking": int(cfg.get("min_tokens_when_thinking")
                                           or MIN_TOKENS_WHEN_THINKING)}
     auto = bool(saved["base_url"] and saved["base_url"] == ep["base_url"]
@@ -1347,8 +1397,18 @@ def parse_verdict(content: str, pass_score: int) -> dict:
     if passed is None:
         passed = obj.get("passed")
     if isinstance(passed, str):
-        passed = passed.strip().lower() in ("true", "yes", "1", "pass", "达标", "合格")
+        # G11 修复：补全中文/英文/大小写变体白名单；识别不了 → None（未知），
+        # 而不是 False —— 否则"字段值写法差异"会变成 100% 假失败（合法结论被判不通过）。
+        # 归一化：去空白/小写/剥尾标点（。.!！），再比对白名单。
+        _s = _norm_bool_str(passed)
+        if _s in ("true", "yes", "1", "pass", "ok", "passed", "通过", "达标", "合格", "符合", "好"):
+            passed = True
+        elif _s in ("false", "no", "0", "fail", "failed", "不通过", "未通过", "不合格", "不达标", "差"):
+            passed = False
+        else:
+            passed = None
     if passed is None:
+        # 模型没给布尔结论（或无法识别）→ 退用分数兜底：score>=pass_score 视为通过。
         passed = (score is not None and score >= pass_score)
     issues = obj.get("issues") or []
     if isinstance(issues, str):
@@ -1356,7 +1416,17 @@ def parse_verdict(content: str, pass_score: int) -> dict:
     # P0：代码侧硬闸（关键缺陷阻断 + 分数不达标强制不通过），只收紧不放宽
     sm = obj.get("style_match")
     if isinstance(sm, str):
-        sm = sm.strip().lower() in ("true", "yes", "1", "pass", "一致", "符合")
+        # G11 修复：style_match 更脆弱——任何非白名单字符串原来都被折成 False，
+        # 而 False 在 _apply_style_gate 里被当作"明确的风格不符证据"强制失败。
+        # 现补全白名单；识别不了 → None（未知），交给 _apply_style_gate 的 issues
+        # 关键词兜底，不再凭"写法差异"误杀。
+        _sm = _norm_bool_str(sm)
+        if _sm in ("true", "yes", "1", "pass", "ok", "match", "一致", "符合", "相同", "匹配"):
+            sm = True
+        elif _sm in ("false", "no", "0", "fail", "failed", "不一致", "不符", "不匹配", "偏离", "跑偏"):
+            sm = False
+        else:
+            sm = None
     return _finalize_verdict({
         "passed": bool(passed) and (score is None or score >= pass_score),
         "score": score,
@@ -1365,6 +1435,17 @@ def parse_verdict(content: str, pass_score: int) -> dict:
         "raw": text[:1000],
         "style_match": sm if isinstance(sm, bool) else None,
     }, pass_score)
+
+
+def _norm_bool_str(v: str) -> str:
+    """归一化布尔型字符串：去首尾空白 → 小写 → 剥尾标点（。.!！?？~～）。
+
+    G11 辅助：让白名单比对对"通过。" / "Yes" / "ok!" 这类带尾标点/大小写的写法鲁棒。
+    """
+    s = str(v or "").strip().lower()
+    while s and s[-1] in "。.!！?？~～,，;；:：":
+        s = s[:-1]
+    return s.strip()
 
 
 def _run_vision(ep: dict, prompt: str, image_paths: list, cfg: dict) -> dict:
@@ -1535,6 +1616,22 @@ def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
     verdict["ref_images_used"] = len(ref_list)
     if ref_list:
         verdict["ref_labels"] = [str(l)[:60] for l, _p in ref_list]
+    # G9/O1 图片客观层（零模型依赖，与视频/音频客观层同构）：
+    # 全黑/全白/纯色（像素 stddev < 阈值）→ fatal 计入 critical_issues、blocked=True；
+    # 长宽比异常 → 非 fatal 计入 issues。AI 层失败也会透出（不因 AI 不可用漏掉黑图）。
+    obj = image_objective(image_path, cfg)
+    obj_fatal = list(obj.get("critical_issues") or [])
+    obj_issues = list(obj.get("issues") or [])
+    verdict["objective"] = obj
+    verdict["objective_fatal"] = obj_fatal
+    verdict["objective_issues"] = obj_issues
+    if obj_issues:
+        verdict["issues"] = list(verdict.get("issues") or []) + obj_issues
+    if obj_fatal:
+        verdict["critical_issues"] = list(verdict.get("critical_issues") or []) + obj_fatal
+        verdict["blocked"] = True
+        verdict["passed"] = False
+        verdict["score"] = min(int(verdict.get("score") or 0), 50)
     return verdict
 
 
@@ -1749,12 +1846,144 @@ def extract_frames(video_path: str, out_dir: str, count: int = 3,
     return result
 
 
+def _has_audio_stream(video_path: str) -> bool:
+    """探测视频是否含音频流（G9 确定性闸门：无音轨 → 计入 issues）。
+
+    ffprobe 不存在或探测失败 → 返回 False（与现状一致，仅不报缺音）；
+    能跑通 ffprobe 时，只要存在 audio codec 即返回 True。
+    """
+    fp = _ffprobe_exe()
+    if not fp or not os.path.isfile(video_path):
+        return False
+    try:
+        p = subprocess.run(
+            [fp, "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=codec_type", "-of", "default=nw=1:nk=1",
+             video_path],
+            capture_output=True, timeout=30)
+        out = _decode_io(p.stdout).strip()
+        return "audio" in out.lower()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"ffprobe 音频流探测失败：{e}")
+        return False
+
+
+def image_objective(image_path: str, cfg: dict = None) -> dict:
+    """图片质检客观层（G9/O1 确定性闸门，与 check_audio.quick_check 同构）。
+
+    零模型依赖，**永远执行**：
+      1) 文件存在 + 非空；
+      2) 像素 stddev 检查 —— 全黑 / 全白 / 纯色（std < 阈值）→ 致命缺陷；
+      3) 长宽比异常（aspect < 1/10 或 > 10）→ 告警。
+
+    永不抛异常：Pillow 不可用 / 读图失败 → 仅记录 error，不阻断后续。
+    """
+    cfg = cfg or _empty_config()
+    base = {"ok": True, "skipped": False, "blocked": False, "passed": False,
+            "score": 0, "issues": [], "critical_issues": [], "fatal": [],
+            "error": "", "metrics": {}}
+    if not image_path or not os.path.isfile(image_path):
+        base["fatal"].append(f"图片文件不存在：{image_path}")
+        base["blocked"] = True
+        base["critical_issues"] = list(base["fatal"])
+        base["reason"] = base["fatal"][0]
+        return base
+    try:
+        import PIL.Image, PIL.ImageStat  # noqa: N811
+    except Exception as e:  # noqa: BLE001
+        base["skipped"] = True
+        base["ai_skip_reason"] = f"Pillow 不可用（{e}），客观层跳过"
+        return base
+    try:
+        with PIL.Image.open(image_path) as im:
+            im_d = im.convert("RGB")
+            w, h = im_d.size
+            stat = PIL.ImageStat.Stat(im_d)
+            # stat.stddev[i] 是第 i 通道的标准差。纯色图三通道 std 均 < 2；正常分镜图 std > 30。
+            # 取三通道中最大的 stddev，等价于灰度 stddev，鲁棒。
+            if stat.stddev:
+                stddev = max(float(s) for s in stat.stddev)
+            else:
+                stddev = 0.0
+            aspect = float(w) / max(1, h)
+    except Exception as e:  # noqa: BLE001
+        base["skipped"] = True
+        base["ai_skip_reason"] = f"图片读取失败（{e}），客观层跳过"
+        base["error"] = str(e)
+        return base
+
+    # 像素 stddev 阈值：纯色/黑图 < 8；正常分镜图通常 > 30
+    std_th = float(cfg.get("image_pixel_std_min", 8.0))
+    if stddev < std_th:
+        base["fatal"].append(
+            f"画面疑似黑图/纯色图（像素 stddev={stddev:.1f} < {std_th:.0f}）")
+        base["blocked"] = True
+    # 长宽比异常（极瘦/极宽）：aspect < 1/10 或 > 10 → 非 fatal 告警
+    if aspect < 0.1 or aspect > 10:
+        base["issues"].append(
+            f"图片长宽比 {aspect:.2f} 异常（正常 0.5~2.0），可能是拼接/裁剪错误")
+    base["metrics"] = {"width": w, "height": h, "stddev": round(stddev, 2),
+                       "aspect": round(aspect, 4)}
+    base["critical_issues"] = list(base["fatal"])
+    base["score"] = max(0, 100 - (len(base["issues"]) * 5 + len(base["fatal"]) * 50))
+    base["passed"] = not base["fatal"]
+    return base
+
+
+def _video_objective_issues(video_path: str, expected_duration: float,
+                           cfg: dict, fr: dict) -> list:
+    """视频质检确定性闸门（G9/O1）：不依赖模型的硬指标检测。
+
+    返回 issues 列表，``check_video`` 会据此把 fatal 项塞进 critical_issues：
+      1) 时长偏差：``|fr.duration - expected| / expected > video_max_drift`` → fatal；
+         expected_duration 为空 / 0 → 跳过该项（调用方没传就不断言）。
+      2) 音轨：``_has_audio_stream(video_path) == False`` → fatal。
+      3) 抽帧时间戳 verified：``frame_meta[i].verified == False`` → 计入 issues。
+      4) fps 异常（< 8 或 > 60）→ 计入 issues。
+    """
+    issues: list = []
+    meta = fr.get("meta") or {}
+    fr_duration = float(meta.get("duration") or fr.get("duration") or 0.0)
+    fps = float(meta.get("fps") or 0.0)
+
+    # 1) 时长偏差
+    if expected_duration and expected_duration > 0 and fr_duration > 0:
+        drift_th = float(cfg.get("video_max_drift", 0.30))
+        drift = abs(fr_duration - float(expected_duration)) / float(expected_duration)
+        if drift > drift_th:
+            issues.append(
+                f"视频实测时长 {fr_duration:.2f}s 与期望 {float(expected_duration):.2f}s "
+                f"偏差 {drift*100:.0f}% 超阈值 {drift_th*100:.0f}%（H3 可能截断/补白）")
+
+    # 2) 音轨探测
+    if not _has_audio_stream(video_path):
+        issues.append("视频无音轨（H3 输出无声 / 未合轨），需检查 ComfyUI 音轨")
+
+    # 3) frame_meta.verified=False 计入 issues
+    unverified = sum(1 for fm in (fr.get("frame_meta") or [])
+                     if fm and not fm.get("verified"))
+    total_frames = len(fr.get("frame_meta") or [])
+    if total_frames and unverified == total_frames:
+        issues.append(f"全部 {total_frames} 帧时间戳均未通过校验（抽帧可能失败/丢帧）")
+    elif unverified:
+        issues.append(f"{unverified}/{total_frames} 帧时间戳未通过校验（可能存在丢帧）")
+
+    # 4) fps 异常
+    if fps and (fps < 8.0 or fps > 60.0):
+        issues.append(f"视频帧率 {fps:.1f} fps 异常（正常 24-30 fps）")
+
+    return issues
+
+
 def check_video(video_path: str, shot_desc: str = "", cfg: dict = None,
                 override: dict = None, frames_dir: str = None,
-                fallback_meta: dict = None, style: str = "") -> dict:
+                fallback_meta: dict = None, style: str = "",
+                expected_duration: float = None) -> dict:
     """视频质检：ffmpeg 抽帧 → 多模态判定。永不抛异常。
     override 仅用于「测试连通性」临时传参，不落盘。
-    style：目标风格串，用于「风格达标」判定；为空则不做风格检测。"""
+    style：目标风格串，用于「风格达标」判定；为空则不做风格检测。
+    expected_duration：期望时长（秒）—— G9/O1 确定性闸门：实测时长与期望偏差
+        超 video_max_drift（默认 30%）计入 issues；为空 / 0 时跳过该项判定。"""
     cfg = cfg or _empty_config()
     if not cfg.get("enabled"):
         return {"ok": False, "skipped": True, "reason": "质检总开关未开启"}
@@ -1777,6 +2006,7 @@ def check_video(video_path: str, shot_desc: str = "", cfg: dict = None,
     prompt = (cfg.get("video_prompt") or DEFAULT_VIDEO_PROMPT).replace(
         "{shot_desc}", shot_desc or "（无）").replace(
         "{frame_count}", str(len(fr["frames"]))).replace(
+        "{pass_score}", str(cfg.get("pass_score", 70))).replace(
         "{style}", style_norm or "（未指定）")
     ts_brief = "、".join(f"第{i + 1}帧 {fm['actual_ts']}s"
                         for i, fm in enumerate(fr.get("frame_meta") or []))
@@ -1784,23 +2014,44 @@ def check_video(video_path: str, shot_desc: str = "", cfg: dict = None,
     prompt = prompt + WATERMARK_EXEMPT_NOTE + CRITICAL_RULE_NOTE + FRAMING_TOLERANCE_NOTE
     if style_norm:
         prompt = prompt + STYLE_CHECK_NOTE.replace("{style}", style_norm)
+    # G9/O1 确定性闸门（视频客观层，零模型依赖）：命中致命缺陷（无音轨/时长超差/全帧未校验/fps异常）
+    # → blocked=True、passed=False，AI 层仍跑但不短路，避免误杀。
+    obj_issues = _video_objective_issues(video_path, expected_duration, cfg, fr)
+    obj_fatal = [s for s in obj_issues
+                 if ("无音轨" in s or "时长" in s or "帧率" in s or "未通过校验" in s)]
+    (fr.get("meta") or {}).update({"objective_issues": obj_issues,
+                                  "objective_fatal": obj_fatal})
     try:
         verdict = _run_vision(ep, prompt, fr["frames"], cfg)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"视频质检调用失败：{e}")
+        # AI 层失败也要透出客观层致命缺陷（不能让视频质检因 AI 不可用就漏掉无音轨/时长问题）
         return {"ok": False, "skipped": False, "error": str(e),
                 "api_attempts": getattr(e, "attempts", 1),
                 "retryable": getattr(e, "retryable", None),
                 "frames": fr["frames"], "duration": fr["duration"],
                 "frame_meta": fr.get("frame_meta") or [],
                 "timestamps": fr.get("timestamps") or [],
-                "video_meta": fr.get("meta") or {}}
+                "video_meta": fr.get("meta") or {},
+                "issues": list(obj_issues),
+                "critical_issues": list(obj_fatal),
+                "blocked": bool(obj_fatal),
+                "objective_only": True}
     verdict.update({"frames": fr["frames"], "duration": fr["duration"],
                     "frame_count": len(fr["frames"]),
                     "frame_meta": fr.get("frame_meta") or [],
                     "timestamps": fr.get("timestamps") or [],
                     "duration_source": (fr.get("meta") or {}).get("source"),
                     "video_meta": fr.get("meta") or {}})
+    # G9：把客观层 issues 并入 AI 层 verdict（AI 不报的客观缺陷仍保留；
+    # 客观 fatal 项命中关键缺陷词表的会被 find_critical_issues 进一步识别）
+    if obj_issues:
+        verdict["issues"] = list(verdict.get("issues") or []) + list(obj_issues)
+    if obj_fatal:
+        verdict["critical_issues"] = list(verdict.get("critical_issues") or []) + list(obj_fatal)
+        verdict["blocked"] = True
+        verdict["passed"] = False
+        verdict["objective_fatal"] = True
     return _apply_style_gate(verdict, style_norm)
 
 

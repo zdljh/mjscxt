@@ -25,9 +25,12 @@
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
+import threading
+import time
 from datetime import datetime
 
 from llm_client import build_chat_url, mask_key
@@ -43,6 +46,29 @@ _ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 def _store():
     return secret_store.get_store(_ROOT_DIR)
+
+
+# =====================================================================
+# 并发保护（审计 S8）
+# ---------------------------------------------------------------------
+# `save_module` / `clear_module` / `load_config` 的首次迁移都是
+# 「load_config → 改内存 → _write_file」的读改写，此前**零锁**。
+# 典型症状：快速连续保存「文本分析」和「质检」两个模块，后者用旧快照覆盖前者 ——
+# 用户看到「保存成功了但没生效」。另外 `_write_file` 曾用固定的 `.tmp` 名，
+# 并发写者会互相截断对方写了一半的临时文件，`os.replace` 发布出**损坏的 JSON**
+# （而 `_read_file` 解析失败只告警、返回 {}）→ 表现为「AI 设置全空、密钥丢失」。
+# =====================================================================
+
+_CONFIG_LOCK = threading.RLock()
+
+
+def _locked(fn):
+    """把读改写放回同一把可重入锁的临界区（函数级装饰，签名/文档不变）"""
+    @functools.wraps(fn)
+    def _wrapper(*args, **kwargs):
+        with _CONFIG_LOCK:
+            return fn(*args, **kwargs)
+    return _wrapper
 
 # 三个独立模块的键（顺序即前端展示顺序）
 MODULES = ("text", "qc", "chat")
@@ -117,20 +143,60 @@ def module_meta() -> dict:
 def _read_file(path: str) -> dict:
     if not path or not os.path.isfile(path):
         return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f) or {}
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"AI 设置读取失败（按未配置处理）：{e}")
-        return {}
+    # ⚠️ Windows 上 `_atomic_replace` 换目录项的瞬间，另一线程 open() 会抛
+    #    PermissionError（暂时拿不到 ≠ 文件坏了）。旧实现直接当读失败 → 返回 {}，
+    #    表现为「AI 设置全空 / 密钥丢失」，刷新又回来。这里退避重试。
+    err = None
+    for i in range(6):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f) or {}
+        except PermissionError as e:
+            err = e
+            time.sleep(0.02 * (i + 1))
+        except Exception as e:  # noqa: BLE001
+            err = e
+            break
+    logger.warning(f"AI 设置读取失败（按未配置处理）：{err}")
+    return {}
+
+
+def _atomic_replace(tmp: str, path: str) -> None:
+    """`os.replace` + Windows 共享冲突退避重试。
+
+    ⚠️ Windows 上若目标文件正被另一个线程/进程打开读取（例如 `load_index` 刚读完、
+    句柄尚未释放），`os.replace` 会抛 `PermissionError: [WinError 5] 拒绝访问`。
+    这属于「暂时拿不到」而不是「文件坏了」：直接失败会让新建项目/保存设置偶发 500
+    （实测并发读写时必现）。退避重试即可。
+    """
+    last = None
+    for i in range(8):
+        try:
+            _atomic_replace(tmp, path)
+            return
+        except PermissionError as e:        # WinError 5 / 32：目标被占用
+            last = e
+            time.sleep(0.02 * (i + 1))
+    raise last
 
 
 def _write_file(path: str, cfg: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    # ⚠️ 临时名必须每次唯一（固定 `.tmp` 会被并发写者互相截断，见文件头并发注释）
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.{os.urandom(3).hex()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _legacy_migratable(legacy_path: str) -> dict:
@@ -147,6 +213,7 @@ def _legacy_migratable(legacy_path: str) -> dict:
     return {}
 
 
+@_locked
 def load_config(config_path: str, legacy_path: str = None) -> dict:
     """读取统一 AI 设置；首次读取且 text 模块为空时，自动从旧 llm_config.json 迁移并落盘。
 
@@ -218,6 +285,7 @@ def get_module(cfg: dict, module: str) -> dict:
     return ep
 
 
+@_locked
 def save_module(config_path: str, module: str, base_url: str = None, model: str = None,
                 api_key: str = None, legacy_path: str = None,
                 reasoning_effort: str = None) -> dict:
@@ -273,6 +341,7 @@ def _has_plaintext_key(raw: dict) -> bool:
     return False
 
 
+@_locked
 def clear_module(config_path: str, module: str = None, legacy_path: str = None) -> dict:
     """清空单个模块；module 为空则清空全部三个模块（整体重置）。同步清除加密库中的密钥。"""
     cfg = load_config(config_path, legacy_path)
