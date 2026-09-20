@@ -247,6 +247,42 @@ def _nonempty(path: str) -> bool:
         return False
 
 
+def _playable(path: str) -> bool:
+    """G7：视频产物「可播放性」判据（取代「文件存在 + size>0」）。
+
+    一次超时/被杀留下的半截 mp4 往往远超 1KB，旧判据 `_nonempty` 会把半截文件
+    当「已完成」→ 后续步骤永久跳过、坏成片进验收。现在要求 ffprobe 能读出
+    **视频流且 duration>0** 才算就绪。
+
+    降级策略：ffprobe 二进制缺失时退回「存在 + 非空」（不能让工具链不齐导致
+    整条流水线误判全部未就绪而重烧全部镜头）；文件存在但 ffprobe 解析失败
+    / 无视频流 / 时长为 0 → 判未就绪（会重跑）。
+    仅用于 .mp4 等视频产物；图片类产物（分镜/尾帧 .png）仍用 `_nonempty`。
+    """
+    if not _nonempty(path):
+        return False
+    import shutil as _sh
+    import subprocess as _sp
+    if not _sh.which("ffprobe"):
+        return True  # ffprobe 不可用：降级为「存在 + 非空」，避免误伤全流水线
+    try:
+        r = _sp.run(["ffprobe", "-v", "error", "-show_entries",
+                     "stream=codec_type:format=duration", "-of", "json", path],
+                    capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            return False
+        d = json.loads(r.stdout or "{}")
+    except Exception:  # noqa: BLE001 - 解析失败 = 半截/损坏，判未就绪
+        return False
+    streams = d.get("streams") or []
+    has_video = any(s.get("codec_type") == "video" for s in streams)
+    try:
+        dur = float((d.get("format") or {}).get("duration") or 0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    return bool(has_video and dur > 0)
+
+
 def probe_script(ctx) -> bool:
     A = _A()
     p = A.novel_to_script.episode_script_path(A.SCRIPT_DIR, ctx["project_key"], ctx["episode_no"])
@@ -332,7 +368,7 @@ def probe_video(ctx) -> dict:
         tag = ctx.get("episode_tag") or f"ep{ctx['episode_no']:02d}"
         hit = None
         for cand in (f"{tag}_full.mp4", "episode_full.mp4"):
-            if _nonempty(os.path.join(d, cand)):
+            if _playable(os.path.join(d, cand)):
                 hit = cand
                 break
         return {"total": 1, "ready": 1 if hit else 0, "missing": [] if hit else ["整集"],
@@ -341,7 +377,7 @@ def probe_video(ctx) -> dict:
     missing = []
     for i, s in enumerate(shots):
         seq = A._shot_seq(s.get("shot_id", i + 1), i + 1)
-        if not _nonempty(os.path.join(d, f"shot_{seq:02d}.mp4")):
+        if not _playable(os.path.join(d, f"shot_{seq:02d}.mp4")):
             missing.append(s.get("shot_id", i + 1))
     return {"total": len(shots), "ready": len(shots) - len(missing),
             "missing": missing, "done": bool(shots) and not missing, "dir": d}
@@ -354,7 +390,7 @@ def final_path(ctx) -> str:
 
 def probe_final(ctx) -> dict:
     p = final_path(ctx)
-    return {"total": 1, "ready": 1 if _nonempty(p) else 0, "done": _nonempty(p), "file": p}
+    return {"total": 1, "ready": 1 if _playable(p) else 0, "done": _playable(p), "file": p}
 
 
 def dub_manifest_path(ctx) -> str:
@@ -388,7 +424,7 @@ def mix_output_path(ctx) -> str:
 
 def probe_mix(ctx) -> dict:
     p = mix_output_path(ctx)
-    return {"total": 1, "ready": 1 if _nonempty(p) else 0, "done": _nonempty(p), "file": p}
+    return {"total": 1, "ready": 1 if _playable(p) else 0, "done": _playable(p), "file": p}
 
 
 def upscale_path(ctx) -> str:
@@ -404,7 +440,7 @@ def upscale_path(ctx) -> str:
 
 def probe_upscale(ctx) -> dict:
     p = upscale_path(ctx)
-    return {"total": 1, "ready": 1 if _nonempty(p) else 0, "done": _nonempty(p), "file": p}
+    return {"total": 1, "ready": 1 if _playable(p) else 0, "done": _playable(p), "file": p}
 
 
 PROBES = {

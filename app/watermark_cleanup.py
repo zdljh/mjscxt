@@ -43,19 +43,26 @@ def probe_size(path: str) -> Tuple[int, int]:
     return int(wh[0]), int(wh[1])
 
 
-def probe_has_audio(path: str) -> bool:
+def probe_has_audio(path: str) -> Optional[bool]:
     """该视频是否含音频流（用于决定去水印时保留还是丢弃音轨）。
 
     2026-09-17：此前 clean_video 一律带 `-an`，把 H3 联合生成的环境音/打斗音效
     在落盘前就丢掉了（成片因此完全没有音效）。现在改成「有音轨就原样保留」。
+
+    G6（P1，2026-09-21）：改三态 `True / False / None`。
+    探测**异常**（ffprobe 超时/损坏/环境缺二进制但 available() 误判可用等）
+    返回 `None` —— 调用方**不得**把 None 当 False（旧写法 `except: return False`
+    会让「探测失败」等价「没有音轨」，随后 clean_video 加 `-an` 把原音轨丢掉）。
+    None 时调用方必须跳过改写并记录 error。
     """
     try:
         cmd = [FFPROBE_BIN, "-v", "error", "-select_streams", "a:0",
                "-show_entries", "stream=codec_name", "-of", "csv=p=0", path]
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         return out.returncode == 0 and bool(out.stdout.strip())
-    except Exception:  # pragma: no cover - 环境相关
-        return False
+    except Exception as e:  # pragma: no cover - 环境相关
+        logger.warning(f"probe_has_audio 探测异常（按未知处理，不丢音轨）: {e}")
+        return None
 
 
 def region_pixels(width: int, height: int,
@@ -146,8 +153,15 @@ def clean_video(path: str, region: Sequence[float] = DEFAULT_REGION,
         # 成功 replace 后置 None，失败/异常由 finally 清理。
         # ⚠️ 扩展名不再是 .mp4，必须显式 -f mp4 指定容器（ffmpeg 否则靠扩展名推断会失败）
         tmp = os.path.splitext(path)[0] + ".clean.tmp"
+        # G6：probe_has_audio 改三态。None（探测失败）时**绝不改写原文件**——
+        # 旧写法把 None 当 False 会加 -an 把原音轨丢掉，再补一条静音轨，
+        # 成片"看起来有音轨"实为全静音（历史事故同型）。
         has_audio = probe_has_audio(path)
         rec["has_audio"] = has_audio
+        if has_audio is None:
+            rec["error"] = "音轨探测失败（ffprobe 异常），为保护原音轨已跳过去水印改写"
+            logger.warning(f"clean_video 跳过：{path} 音轨探测失败，不动原文件")
+            return rec
         audio_args = ["-c:a", "copy"] if has_audio else ["-an"]
         cmd = [FFMPEG_BIN, "-y", "-v", "error", "-i", path, "-vf", filt,
                "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),

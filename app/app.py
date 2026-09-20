@@ -10,6 +10,7 @@ import time
 import random
 import shutil
 import threading
+import uuid
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, abort, redirect, send_from_directory
 from flask_cors import CORS
@@ -3263,12 +3264,24 @@ def api_generate_storyboards():
     item_idx = _build_asset_index(data.get('items', []), project_name, "item")
     scene_idx = _build_asset_index(data.get('scenes', []), project_name, "scene")
 
-    task_id = f"storyboard_{project_name}_{int(time.time())}"
+    # G5：任务 ID 用 uuid（秒级时间戳同秒双 POST 会覆盖 generation_state 且双线程并发抢同一目标路径）；
+    # 入口幂等：同项目已有 running 的分镜任务 → 复用其 task_id（reused=True），不重复开线程。
+    # 匹配用稳定的 step 字段（worker 运行中 phase 会变化，不能用 phase 判）。
     with lock:
+        _existing_sb = next((tid for tid, st in generation_state.items()
+                             if st.get("status") == "running"
+                             and st.get("project_name") == project_name
+                             and st.get("step") == "storyboard"), None)
+        if _existing_sb:
+            return jsonify({"task_id": _existing_sb, "status": "started", "reused": True,
+                            "total": len(shots), "overwrite": bool(data.get('overwrite')),
+                            "episode_stats": episode_stats})
+        task_id = f"storyboard_{project_name}_{uuid.uuid4().hex[:12]}"
         generation_state[task_id] = {
             "status": "running", "progress": 0, "total": len(shots),
             "current": 0, "phase": "分镜图生成", "results": [],
             "qc": _qc_brief("image"),
+            "project_name": project_name, "step": "storyboard",
             "refs_available": {
                 "characters": {k: bool(v["image"]) for k, v in char_idx.items()},
                 "items": {k: bool(v["image"]) for k, v in item_idx.items()},
@@ -3386,12 +3399,22 @@ def api_generate_videos():
     # ⑥ 视频链路自动引用剧本自动判定的镜头时长（缺 duration 时按项目配置兜底）
     episode_stats = _episode_schema_defaults(project_name, shots)
 
-    task_id = f"video_{project_name}_{int(time.time())}"
+    task_id = f"video_{project_name}_{uuid.uuid4().hex[:12]}"
     with lock:
+        # G5：同项目已有 running 的视频任务 → 复用（匹配 step="video"，与分镜任务互不误伤）
+        _existing_vid = next((tid for tid, st in generation_state.items()
+                              if st.get("status") == "running"
+                              and st.get("project_name") == project_name
+                              and st.get("step") == "video"), None)
+        if _existing_vid:
+            return jsonify({"success": True, "task_id": _existing_vid, "status": "started",
+                            "reused": True, "total": len(shots),
+                            "mode": mode, "project_name": project_name})
         generation_state[task_id] = {
             "status": "running", "progress": 0,
             "total": len(shots), "current": 0, "results": [],
             "phase": "视频生成", "qc": _qc_brief("video"),
+            "project_name": project_name, "step": "video",
             "episode_stats": episode_stats,
         }
 
@@ -8344,12 +8367,21 @@ def api_tts_generate():
     except Exception as e:  # noqa: BLE001
         app.logger.warning(f"音色映射保存失败：{e}")
 
-    task_id = f"dub_{project_name}_{int(time.time())}"
     plan_summary = {"script_path": resolved["script_path"], "script_source": resolved["source"],
                     "episode": episode, "line_count": plan["line_count"],
                     "characters": [{"name": c["name"], "voice": c["voice"],
                                     "line_count": c["line_count"]} for c in plan["characters"]]}
     with dub_lock:
+        # G5：同项目已有 running 的配音任务 → 复用（uuid 任务 ID 防止同秒覆盖）
+        _existing_dub = next((tid for tid, t in dub_tasks.items()
+                               if t.get("status") == "running"
+                               and t.get("project_name") == project_name), None)
+        if _existing_dub:
+            return jsonify({"success": True, "task_id": _existing_dub, "status": "started",
+                            "reused": True, "project_name": project_name, "episode": episode,
+                            "line_count": plan["line_count"], "plan": plan_summary,
+                            "out_dir": out_dir})
+        task_id = f"dub_{project_name}_{uuid.uuid4().hex[:12]}"
         dub_tasks[task_id] = {
             "status": "running", "progress": 0, "phase": "准备配音",
             "message": "正在准备配音…", "project_name": project_name,
@@ -8824,8 +8856,19 @@ def api_mix_generate():
         out_name += ".mp4"
     out_name = os.path.basename(out_name.replace("\\", "/"))
 
-    task_id = f"mix_{project_name}_{int(time.time())}"
+    task_id = f"mix_{project_name}_{uuid.uuid4().hex[:12]}"
     with mix_lock:
+        # G5：同一视频已有 running 的混音任务 → 复用（匹配 video_path：同项目可能有多个视频）
+        _existing_mix = next((tid for tid, t in mix_tasks.items()
+                               if t.get("status") == "running"
+                               and t.get("video_path") == prepared["video_path"]), None)
+        if _existing_mix:
+            return jsonify({"success": True, "task_id": _existing_mix, "status": "started",
+                            "reused": True, "project_name": project_name, "out_name": out_name,
+                            "line_count": len(prepared["entries"]), "mode": prepared["mode"],
+                            "warnings": prepared["warnings"],
+                            "video_path": prepared["video_path"],
+                            "out_dir": mix_out_dir(project_name)})
         mix_tasks[task_id] = {
             "task_id": task_id, "status": "running", "progress": 5,
             "phase": "准备音画对齐", "project_name": project_name,
