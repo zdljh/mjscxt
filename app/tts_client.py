@@ -446,6 +446,11 @@ def build_dub_plan(script: Dict, voice_map: Optional[Dict] = None,
     可在 voice_map["lines"][<shot_id>] 中按句覆盖角色 / 音色 / seed。
     """
     characters = script.get("characters") or []
+    # S-03：episode 也做 int 归一化兜底（调用方可能传字符串/None）
+    try:
+        episode = int(episode)
+    except (TypeError, ValueError):
+        episode = 1
     vmap = json.loads(json.dumps(voice_map or default_voice_map(characters, project, episode),
                                  ensure_ascii=False))
     vmap.setdefault("characters", {})
@@ -466,6 +471,12 @@ def build_dub_plan(script: Dict, voice_map: Optional[Dict] = None,
     lines: List[Dict] = []
     for shot in script.get("shots") or []:
         shot_id = shot.get("shot_id")
+        # S-03：shot_id 归一为 int（剧本 schema 里是 int，但旧版/手动编辑可能给字符串）。
+        # 直接 int(shot_id) 遇 "abc" / None 抛 ValueError → 配音计划 500。统一兜底 0。
+        try:
+            _sid_int = int(shot_id) if shot_id is not None else 0
+        except (TypeError, ValueError):
+            _sid_int = 0
         if shot_ids and str(shot_id) not in [str(s) for s in shot_ids]:
             continue
         cast = shot.get("characters_in_shot") or shot.get("characters") or []
@@ -511,14 +522,14 @@ def build_dub_plan(script: Dict, voice_map: Optional[Dict] = None,
                 voice = dict(voice, mode="design",
                              instruct=_emotion_instruct(emotion, desc))
             suffix = f"_{li + 1}" if multi else ""
-            out_name = (f"ep{int(episode):02d}_shot{int(shot_id):02d}{suffix}"
+            out_name = (f"ep{int(episode):02d}_shot{_sid_int:02d}{suffix}"
                         f"_{safe_name(char_name, 12)}.wav")
             out_path = os.path.join(out_dir_wav, out_name) if out_dir_wav else out_name
             if only_missing and out_dir_wav and os.path.exists(out_path) \
                     and os.path.getsize(out_path) > 0:
                 continue
             lines.append({
-                "line_id": f"ep{int(episode):02d}_shot{int(shot_id):02d}{suffix}",
+                "line_id": f"ep{int(episode):02d}_shot{_sid_int:02d}{suffix}",
                 "shot_id": shot_id,
                 "character": char_name,
                 "text": text,

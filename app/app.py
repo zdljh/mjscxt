@@ -234,6 +234,45 @@ def _safe_project(name: str) -> str:
     return project_store.safe_key(name)
 
 
+def _serve_safe(base_dir: str, filename: str, **send_kw):
+    """目录穿越防护的 send_file 统一入口。
+
+    返回 send_file(...) 或 403/404 的 Flask 响应；永不抛异常。
+    用法：``return _serve_safe(KEYFRAMES_DIR, filename)``。
+
+    防护原理（S-06）：
+    - 旧写法用 ``os.path.normpath(filename).startswith('..')`` 拦截穿越，
+      但 ``os.path.join(base, safe_path)`` 遇**绝对路径**（如 ``C:\\Windows``、``/etc/passwd``）
+      会丢弃 base 前缀直接返回绝对路径 → 穿越成功。
+    - 这里用 ``os.path.abspath`` 归一后校验目标路径必须落在 base_dir 之内
+      （前缀匹配 base_dir + 分隔符），从根上杜绝穿越。
+    """
+    base = os.path.abspath(base_dir)
+    target = os.path.abspath(os.path.join(base, filename or ""))
+    # 必须严格落在 base 之内：base 本身（目录）或 base + 分隔符 开头
+    if not (target == base or target.startswith(base + os.sep)):
+        return abort(403)
+    if not os.path.isfile(target):
+        return abort(404)
+    return send_file(target, **send_kw)
+
+
+def _serve_attachment(base_dir: str, filename: str, **send_kw):
+    """目录穿越防护的附件下载统一入口（as_attachment + download_name）。
+
+    与 _serve_safe 防护逻辑相同，但额外指定 as_attachment=True 与 download_name。
+    """
+    base = os.path.abspath(base_dir)
+    target = os.path.abspath(os.path.join(base, filename or ""))
+    if not (target == base or target.startswith(base + os.sep)):
+        return abort(403)
+    if not os.path.isfile(target):
+        return abort(404)
+    send_kw.setdefault("as_attachment", True)
+    send_kw.setdefault("download_name", os.path.basename(target))
+    return send_file(target, **send_kw)
+
+
 def _body() -> dict:
     """统一取请求 body，**永不抛异常**（返回 ``{}`` 兜底）
 
@@ -1364,13 +1403,7 @@ def api_keyframes_generate():
 @app.route('/api/keyframes/file/<path:filename>')
 def api_keyframes_file(filename):
     """关键帧图片访问：/api/keyframes/file/<项目>/shot_01_end.png"""
-    safe_path = os.path.normpath(filename)
-    if safe_path.startswith('..'):
-        abort(403)
-    filepath = os.path.join(KEYFRAMES_DIR, safe_path)
-    if os.path.isfile(filepath):
-        return send_file(filepath)
-    abort(404)
+    return _serve_safe(KEYFRAMES_DIR, filename)
 
 
 @app.route('/api/keyframes/list/<path:project_name>')
@@ -1918,15 +1951,7 @@ def api_export_list():
 @app.route('/api/export/download/<path:filename>')
 def api_export_download(filename):
     """导出产物下载（限导出根目录内）"""
-    safe_path = os.path.normpath(filename)
-    if safe_path.startswith('..'):
-        abort(403)
-    root = nle_export.EXPORT_DIR
-    filepath = os.path.join(root, safe_path)
-    if os.path.isfile(filepath):
-        return send_file(filepath, as_attachment=True,
-                         download_name=os.path.basename(filepath))
-    abort(404)
+    return _serve_attachment(nle_export.EXPORT_DIR, filename)
 
 
 # ==========================================================================
@@ -2861,13 +2886,7 @@ def api_storyboard_manifest(project_name):
 @app.route('/api/storyboards/file/<path:filename>')
 def api_storyboard_file(filename):
     """提供分镜图文件访问"""
-    safe_path = os.path.normpath(filename)
-    if safe_path.startswith('..'):
-        abort(403)
-    filepath = os.path.join(STORYBOARDS_DIR, safe_path)
-    if os.path.exists(filepath):
-        return send_file(filepath)
-    abort(404)
+    return _serve_safe(STORYBOARDS_DIR, filename)
 
 
 # ===== 步骤6：视频生成 =====
@@ -3434,39 +3453,21 @@ def api_generate_final():
 @app.route('/api/assets/<path:filename>')
 def api_asset_file(filename):
     """提供资产文件访问"""
-    safe_path = os.path.normpath(filename)
-    if safe_path.startswith('..'):
-        abort(403)
-    filepath = os.path.join(PROJECT_OUTPUT_DIR, "assets", safe_path)
-    if os.path.exists(filepath):
-        return send_file(filepath)
-    abort(404)
+    return _serve_safe(os.path.join(PROJECT_OUTPUT_DIR, "assets"), filename)
 
 
 @app.route('/api/videos/<path:filename>')
 def api_video_file(filename):
     """提供视频文件访问"""
-    safe_path = os.path.normpath(filename)
-    if safe_path.startswith('..'):
-        abort(403)
-    filepath = os.path.join(VIDEOS_DIR, safe_path)
-    if os.path.exists(filepath):
-        return send_file(filepath, conditional=True)
-    abort(404)
+    return _serve_safe(VIDEOS_DIR, filename, conditional=True)
 
 
 @app.route('/api/final/<path:filename>')
 def api_final_file(filename):
     """提供最终成片文件访问（新增：使成片可在页面内联播放/下载）"""
-    safe_path = os.path.normpath(filename)
-    if safe_path.startswith('..'):
-        abort(403)
-    filepath = os.path.join(FINAL_DIR, safe_path)
-    if os.path.exists(filepath):
-        # conditional=True 支持 Range 请求，视频可拖动进度条
-        return send_file(filepath, conditional=True,
-                         as_attachment=request.args.get('download') == '1')
-    abort(404)
+    # conditional=True 支持 Range 请求，视频可拖动进度条
+    return _serve_safe(FINAL_DIR, filename, conditional=True,
+                       as_attachment=request.args.get('download') == '1')
 
 
 # ===== 视频水印（C 项：可配置、默认关闭、支持「全视频移动」） =====
@@ -3582,14 +3583,8 @@ def api_watermark_list(project_name):
 
 @app.route('/api/watermark/file/<path:filename>', methods=['GET'])
 def api_watermark_file(filename):
-    safe_path = os.path.normpath(filename)
-    if safe_path.startswith('..'):
-        abort(403)
-    filepath = os.path.join(WATERMARK_DIR, safe_path)
-    if os.path.exists(filepath):
-        return send_file(filepath, conditional=True,
-                         as_attachment=request.args.get('download') == '1')
-    abort(404)
+    return _serve_safe(WATERMARK_DIR, filename, conditional=True,
+                       as_attachment=request.args.get('download') == '1')
 
 
 # ===== 视频超分（FlashVSR 真实实现，成片/片段 → 高分辨率） =====
@@ -3927,14 +3922,8 @@ def api_upscale_tasks():
 @app.route('/api/upscale/<path:filename>')
 def api_upscale_file(filename):
     """提供超分产物访问（支持 Range 拖动进度条与下载）"""
-    safe_path = os.path.normpath(filename)
-    if safe_path.startswith('..'):
-        abort(403)
-    filepath = os.path.join(UPSCALE_DIR, safe_path)
-    if os.path.exists(filepath):
-        return send_file(filepath, conditional=True,
-                         as_attachment=request.args.get('download') == '1')
-    abort(404)
+    return _serve_safe(UPSCALE_DIR, filename, conditional=True,
+                      as_attachment=request.args.get('download') == '1')
 
 
 @app.route('/api/script/fallback', methods=['POST'])
