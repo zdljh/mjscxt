@@ -410,14 +410,39 @@ export interface QCResponse {
 }
 
 // --- Episodes ---
+// ⚠️ 形状按 /api/episodes/<novel_id>（列表）真实返回校正（app.py api_list_episodes）：
+// 每集行 = novel_to_script.list_episodes 的字段 + _episode_progress 推导的 status/completed_shots，
+// 没有 created_at/updated_at，剧本正文不在列表行里。
 export interface Episode {
   episode_no: number;
   title?: string;
+  episode_title?: string;
+  chapter_index?: number;
   status: 'pending' | 'producing' | 'done' | 'failed';
   shot_count: number;
   completed_shots: number;
-  created_at?: string;
-  updated_at?: string;
+  generated_at?: string;
+  coverage_percent?: number | null;
+  [k: string]: unknown;
+}
+
+/** 单集详情（/api/episodes/<novel_id>/<ep>）：剧本正文在 `script` 嵌套对象下，
+ *  顶层没有 shots / script_content。 */
+export type EpisodeDetail = Episode & {
+  script?: {
+    episode_no?: number;
+    title?: string;
+    episode_title?: string;
+    shots?: any[];
+    shot_count?: number;
+    characters?: any[];
+    items?: any[];
+    scenes?: any[];
+    [k: string]: unknown;
+  };
+  episode_title?: string;
+  chapter_index?: number;
+  stats?: { shot_count?: number; [k: string]: unknown };
 }
 
 export interface EpisodeListResponse {

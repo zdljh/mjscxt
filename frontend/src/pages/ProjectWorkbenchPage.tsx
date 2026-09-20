@@ -271,13 +271,32 @@ function OverviewTab({
   }, [novelId]);
 
   // 加载单集详情
+  // ⚠️ 后端 /api/episodes/<novel>/<ep> 的剧本正文嵌在 `script` 对象下（shots/characters/items/scenes），
+  //    且列表行才带 status/completed_shots（_episode_progress 推导），详情接口本身不返回这两个字段。
+  //    这里摊平成视图直接可读的结构，并从已加载的剧集列表补进度字段，避免详情恒显「暂无剧本内容」。
   const loadEpisodeDetail = async (episodeNo: number) => {
     if (!novelId) return;
     setDetailLoading(true);
     setDetailError('');
     try {
       const detail = await episodesApi.get(novelId, episodeNo);
-      setEpisodeDetail(detail);
+      const script = (detail as any).script || {};
+      const shots: any[] = script.shots || [];
+      // 从剧集列表找本行进度（status / completed_shots / created_at）
+      const row = episodes.find((e: any) => e.episode_no === episodeNo);
+      const normalized: any = {
+        ...detail,
+        ...script,
+        episode_no: detail.episode_no ?? episodeNo,
+        title: detail.episode_title || detail.project_name || script.title,
+        chapter_title: detail.episode_title,
+        shots,
+        shot_count: (detail as any).stats?.shot_count || script.shot_count || shots.length,
+        status: row?.status ?? (detail as any).status ?? 'pending',
+        completed_shots: row?.completed_shots ?? (detail as any).completed_shots ?? 0,
+        created_at: row?.generated_at ?? (detail as any).created_at,
+      };
+      setEpisodeDetail(normalized);
       setSelectedEpisode(episodeNo);
     } catch (err) {
       setDetailError(err instanceof Error ? err.message : '加载详情失败');
@@ -363,35 +382,49 @@ function OverviewTab({
         <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
           <h4 className="font-semibold text-gray-900 dark:text-white mb-4">剧本内容</h4>
 
-          {episodeDetail.script_content ? (
-            <pre className="whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-300 font-mono bg-gray-50 dark:bg-gray-900 p-4 rounded-lg">
-              {episodeDetail.script_content}
-            </pre>
-          ) : episodeDetail.shots && episodeDetail.shots.length > 0 ? (
+          {(episodeDetail.shots && episodeDetail.shots.length > 0) ? (
             <div className="space-y-4">
               {episodeDetail.shots.map((shot: any, idx: number) => (
                 <div key={idx} className="border-l-4 border-indigo-500 pl-4 py-2">
-                  <div className="flex items-center gap-2 mb-1">
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
                     <span className="px-2 py-0.5 bg-indigo-100 dark:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 text-xs font-medium rounded">
-                      镜头 {shot.shot_no}
+                      镜头 {shot.shot_id ?? idx + 1}
                     </span>
-                    {shot.camera_angle && (
-                      <span className="text-xs text-gray-500 dark:text-gray-400">
-                        {shot.camera_angle}
-                      </span>
+                    {shot.camera && (
+                      <span className="text-xs text-gray-500 dark:text-gray-400">{shot.camera}</span>
+                    )}
+                    {shot.location && (
+                      <span className="text-xs text-gray-500 dark:text-gray-400">· {shot.location}</span>
+                    )}
+                    {shot.duration != null && (
+                      <span className="text-xs text-gray-400 dark:text-gray-500">· {shot.duration}s</span>
                     )}
                   </div>
-                  <p className="text-sm text-gray-700 dark:text-gray-300">{shot.description}</p>
-                  {shot.visual_prompt && (
+                  {shot.description && (
+                    <p className="text-sm text-gray-700 dark:text-gray-300">{shot.description}</p>
+                  )}
+                  {shot.dialogue_text && (
+                    <p className="text-sm text-gray-800 dark:text-gray-200 mt-1 pl-2 border-l-2 border-gray-300 dark:border-gray-600">
+                      {shot.dialogue_text}
+                    </p>
+                  )}
+                  {shot.visual_detail && (
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      视觉描述：{shot.visual_prompt}
+                      视觉描述：{shot.visual_detail}
+                    </p>
+                  )}
+                  {shot.audio_cues && (
+                    <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                      音效：{shot.audio_cues}
                     </p>
                   )}
                 </div>
               ))}
             </div>
           ) : (
-            <p className="text-gray-500 dark:text-gray-400 text-sm">暂无剧本内容</p>
+            <p className="text-gray-500 dark:text-gray-400 text-sm">
+              本集剧本暂无镜头数据（可能尚未生成，或该集还在生产中）。
+            </p>
           )}
         </div>
       </div>
