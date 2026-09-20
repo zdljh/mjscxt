@@ -558,6 +558,14 @@ def _normalize_override(raw) -> dict:
 
 # ===================== 配置读写 =====================
 
+# G13（P1）说明：质检配置「逐镜反复 load_config + Fernet 解密」的开销，**不在
+# load_config 里加全局 mtime 缓存**解决 —— 那样会破坏 load_config 的「纯重读」
+# 契约（verify_qc_bool_parse F5 断言 load_config 以 `return _normalize(cfg)` 收尾），
+# 且 Windows mtime 分辨率粗、写→读快循环会读脏。正确做法是「worker 进循环前读一次
+# 并复用」（资产 worker 已如此），本批已把分镜/视频 worker 的逐镜 load 上提。
+# load_config 本身保持纯重读，任何直接写文件 + 立即读的场景都拿到最新值。
+
+
 def load_config(config_path: str) -> dict:
     cfg = _empty_config()
     if os.path.isfile(config_path):
@@ -580,7 +588,12 @@ def load_config(config_path: str) -> dict:
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"质检密钥迁移失败（暂不阻断）：{e}")
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"质检配置读取失败（按默认值处理）：{e}")
+            # G14（P1）：文件**存在但解析失败** ≠ 文件不存在。
+            # 文件不存在是正常的（默认关闭）；文件损坏则必须 fail-loud——
+            # 否则静默回落 enabled=False 会让用户以为「我明明开了质检」却整条被跳过。
+            logger.error(f"质检配置文件损坏，解析失败（fail-loud，本次按默认关闭）：{e}")
+            cfg["_config_corrupt"] = True
+            cfg["_config_error"] = str(e)
     # 密钥取值：环境变量 > 加密库 > json（迁移后应为空）
     try:
         import secret_store
@@ -606,6 +619,8 @@ def load_config(config_path: str) -> dict:
     #    脚本里写 "false"，读回来反而是「开」）；而且它只覆盖 3 个开关，
     #    audio_enabled / script_enabled / keyframe_qc_enabled / prompt_enabled 完全没归一化，
     #    音频/剧本/尾帧质检的开关因此形同虚设。两份口径并存必然漂移，现收敛为单一实现。
+    # G14：若文件「存在但解析失败」，cfg 上带 _config_corrupt/_config_error，_normalize
+    #    只赋值已知键、不删除额外键，故损坏标记会随返回值带出，供 public_view 高亮。
     return _normalize(cfg)
 
 
@@ -856,8 +871,12 @@ def reset_endpoint(config_path: str) -> dict:
 def public_view(cfg: dict) -> dict:
     ep = resolve_endpoint(cfg)
     ready = bool(cfg.get("enabled") and ep["base_url"] and ep["api_key"] and ep["model"])
-    view = {k: v for k, v in cfg.items() if k != "api_key"}
+    view = {k: v for k, v in cfg.items()
+            if k not in ("api_key", "_config_corrupt", "_config_error")}
     view.update({
+        # G14：配置文件「存在但损坏」的 fail-loud 标记，让 UI 如实提示而非静默关闭质检
+        "config_corrupt": bool(cfg.get("_config_corrupt")),
+        "config_error": str(cfg.get("_config_error") or ""),
         "has_api_key": bool(cfg.get("api_key")),
         "api_key_masked": mask_key(cfg.get("api_key") or ""),
         "effective_base_url": ep["base_url"],

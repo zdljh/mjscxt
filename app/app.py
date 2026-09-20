@@ -2362,7 +2362,7 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                 # 由后面的生成+质检链路兜底（空提示词本就出不来可用资产）。
                 prompt_zh, _pf_asset, _pgate_asset = _prompt_preflight(
                     "asset", prompt_zh, ctx=asset, style=(asset.get("style") or gen_style or ""),
-                    project_name=project_name)
+                    project_name=project_name, cfg=qc_cfg)   # G13：复用 worker 级配置
                 if not _pgate_asset.get("accept"):
                     app.logger.warning("资产「%s」参考图提示词预检未通过（%s）：%s",
                                        name, _pgate_asset.get("label"), _pgate_asset.get("reason"))
@@ -2950,6 +2950,13 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             app.logger.warning(f"读取旧分镜清单失败（忽略，不影响本次生成）：{_e}")
     app.logger.info("[分镜断点续跑] overwrite=%s；待处理 %d 镜（已存在者将跳过）",
                     overwrite, len(shots))
+    # G13（P1）：质检配置 worker 级读一次，本批所有镜头共用（对齐资产 worker 2302）。
+    # 旧代码逐镜 _qc_load_cfg()（每次 load JSON + Fernet 解密 secrets.enc），单集 56 镜 ≈
+    # 上百次读盘；改为进循环前读一次，既省开销又避免「同批任务新旧配置混用」（审计 G13）。
+    qc_cfg = _qc_load_cfg()
+    qc_on = qc_client.image_qc_ready(qc_cfg)
+    qc_declared = bool(qc_cfg.get("enabled") and qc_cfg.get("image_enabled"))
+    max_retries = int(qc_cfg.get("max_retries", 0)) if qc_on else 0
     try:
         for i, shot in enumerate(shots):
             shot_id = shot.get("shot_id", i + 1)
@@ -3011,7 +3018,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     prompt, _pf_item, _pgate_item = _prompt_preflight(
                         "storyboard", prompt, ctx=shot,
                         style=(shot.get("style") or _sb_style), ref_count=len(refs),
-                        project_name=project_name)
+                        project_name=project_name, cfg=qc_cfg)   # G13：复用 worker 级配置
                     item["prompt"] = prompt
                     item["prompt_qc"] = _pf_item.get("verdict")
                     item["prompt_qc_repairs"] = _pf_item.get("repairs") or []
@@ -3027,10 +3034,8 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     self_healed_prompt = prompt
 
                     # ---------- 图片 AI 质检（不达标自动重生成） ----------
-                    qc_cfg = _qc_load_cfg()
-                    qc_on = qc_client.image_qc_ready(qc_cfg)
-                    qc_declared = bool(qc_cfg.get("enabled") and qc_cfg.get("image_enabled"))
-                    max_retries = int(qc_cfg.get("max_retries", 0)) if qc_on else 0
+                    # G13：qc_cfg/qc_on/qc_declared/max_retries 已在 worker 级读一次（见上方），
+                    # 本批所有镜头共用，不再逐镜 _qc_load_cfg()。
                     attempts = []
                     # O3：第 1 轮也用真实随机 seed 并始终注入（不再 None 走模板默认常量），
                     # 使 manifest.shots[*].qc.history[0].seed 不再为 null，产物可复现、可追溯。
@@ -3510,7 +3515,7 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
             app.logger.info(f"[keyframe] 尾帧就绪 {len(set(kf_end_map.values()))}/{len(shots)} 镜"
                             f"；链式模式 {_cm}，串帧 {sum(1 for v in kf_start_map.values() if v) // 2} 镜")
 
-        def _shot_segment(shot, seq):
+        def _shot_segment(shot, seq, qc_cfg=None):
             """把一个分镜转成 H3 工作流的一个「段」（提示词 + 时长 + 参考图）
 
             keyframe 模式：参考图 = [首帧(分镜图), 尾帧]，让 H3 在两端之间插值运动；
@@ -3552,7 +3557,8 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
             prompt, _pf_seg, _pgate_seg = _prompt_preflight(
                 "h3", prompt, ctx=shot,
                 style=(shot.get("style") or _style_res.get("style") or ""),
-                expect_refs=bool(refs), project_name=project_name)
+                expect_refs=bool(refs), project_name=project_name,
+                cfg=qc_cfg)   # G13：复用 worker 级质检配置，避免逐镜再读盘+解密
             seg = {"prompt": prompt, "duration": dur, "reference_images": refs,
                    "name": f"shot_{seq:02d}"}
             if _pf_seg.get("repairs") or (_pf_seg.get("verdict") or {}).get("issues"):
@@ -3567,20 +3573,22 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
 
         # ---------- 模式 episode：整集 N 段一次生成（H3 原生衔接）+ 整片 QC 门控 ----------
         if mode == 'episode':
-            segs, shot_meta_map = [], []
-            for i, shot in enumerate(shots):
-                shot_id = shot.get('shot_id', i + 1)
-                seq = _shot_seq(shot_id, i + 1)
-                seg, sb_local = _shot_segment(shot, seq)
-                segs.append(seg)
-                shot_meta_map.append({"shot_id": shot_id, "seq": seq,
-                                      "duration": seg["duration"],
-                                      "used_storyboard": bool(sb_local)})
-            # 质检配置（与 per_shot 保持一致）
+            # G13：质检配置 worker 级读一次，本集所有段共用（上提到循环前，供 _shot_segment
+            # 内的提示词预检复用，避免逐段再 _qc_load_cfg() 读盘+解密）。
             qc_cfg = _qc_load_cfg()
             qc_on = qc_client.video_qc_ready(qc_cfg)
             qc_declared = bool(qc_cfg.get("enabled") and qc_cfg.get("video_enabled"))
             max_retries = int(qc_cfg.get("max_retries", 0)) if qc_on else 0
+            segs, shot_meta_map = [], []
+            for i, shot in enumerate(shots):
+                shot_id = shot.get('shot_id', i + 1)
+                seq = _shot_seq(shot_id, i + 1)
+                seg, sb_local = _shot_segment(shot, seq, qc_cfg)
+                segs.append(seg)
+                shot_meta_map.append({"shot_id": shot_id, "seq": seq,
+                                      "duration": seg["duration"],
+                                      "used_storyboard": bool(sb_local)})
+            # 质检开关结论已在上方 worker 级算好（与 per_shot 保持一致）
             eff_style = (shot.get("style") if shot else None) or _style_res.get("style") or ""
             # [教训][video] 诊断（§2.3.5）：qc_off = 质检总开关/类型开关/接口任一未就绪
             # → 整片 QC 门控不会注入（qc_fn=None），本模式**根本不写教训库**，如实打点。
@@ -3712,6 +3720,13 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                 })
             return
 
+        # G13（P1）：per_shot 分支的质检配置 worker 级读一次，本批所有镜头共用（对齐资产
+        # worker）。旧代码逐镜 _qc_load_cfg() 反复读盘 + Fernet 解密，现上提省开销、避免
+        # 同批新旧配置混用。注意 episode 分支在上已单独读一次并 return，二者互不影响。
+        qc_cfg = _qc_load_cfg()
+        qc_on = qc_client.video_qc_ready(qc_cfg)
+        qc_declared = bool(qc_cfg.get("enabled") and qc_cfg.get("video_enabled"))
+        max_retries = int(qc_cfg.get("max_retries", 0)) if qc_on else 0
         for i, shot in enumerate(shots):
             shot_id = shot.get('shot_id', i + 1)
             seq = _shot_seq(shot_id, i + 1)
@@ -3745,15 +3760,13 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                 })
 
             try:
-                seg, sb_local = _shot_segment(shot, seq)
+                seg, sb_local = _shot_segment(shot, seq, qc_cfg)   # G13：传 worker 级配置
                 shot_refs = seg["reference_images"]
                 prompt = seg["prompt"]
 
                 # ---------- 视频 AI 质检（抽帧送检，不达标自动重生成） ----------
-                qc_cfg = _qc_load_cfg()
-                qc_on = qc_client.video_qc_ready(qc_cfg)
-                qc_declared = bool(qc_cfg.get("enabled") and qc_cfg.get("video_enabled"))
-                max_retries = int(qc_cfg.get("max_retries", 0)) if qc_on else 0
+                # G13：qc_cfg/qc_on/qc_declared/max_retries 已在 per_shot worker 级读一次（见上方），
+                # 本批所有镜头共用，不再逐镜 _qc_load_cfg()。
                 if not qc_on:
                     # [教训][video] 诊断（§2.3.5）：qc_off = 质检总开关/类型开关/接口任一未就绪
                     # → per_shot 模式直接按原行为入库，**根本不质检**，自然无 video 教训可沉淀。
@@ -4678,8 +4691,9 @@ def _save_ai_module(data: dict):
     # 背景：质检链路读的是 qc_config.json（另一个文件 + 加密库 "qc" 槽），与 AI 设置的
     #       ai_config.json / "ai.qc" 槽是两套完全独立的数据。不同步就会出现
     #       「在 AI 设置改了模型，质检却仍旧模型」——实测这正是用户改了不生效的根因。
-    # 质检链路每次都调 qc_client.load_config(QC_CONFIG_PATH) 重新读盘（无缓存），
-    # 所以这里落盘后**无需重启**，下一个镜头的质检就吃新配置。
+    # load_config 是纯重读（无缓存）：落盘后下一个镜头的 load_config 就会读到新配置，
+    # 所以这里写完后**无需重启**，下一个镜头的质检就吃新配置（G13 已改走「worker 级
+    # 读一次并复用」，不在 load_config 里缓存，此处逐镜调用不受影响）。
     sync_note, sync_error = "", ""
     if module == "qc":
         try:
@@ -5199,7 +5213,8 @@ class _PromptQCBlocked(RuntimeError):
 
 
 def _prompt_preflight(kind: str, prompt: str, *, ctx=None, style: str = "",
-                      ref_count=None, expect_refs=None, project_name: str = "") -> tuple:
+                      ref_count=None, expect_refs=None, project_name: str = "",
+                      cfg: dict = None) -> tuple:
     """生成前提示词预检 + 确定性自愈（统一入口）。
 
     返回 ``(应交给生成端的提示词, preflight 结果, 闸门结论)``。
@@ -5207,12 +5222,15 @@ def _prompt_preflight(kind: str, prompt: str, *, ctx=None, style: str = "",
     ``project_name``：可选；给出时会在预检**之前**先召回 ``kind="prompt"`` 的历史教训
     并叠加，把「历史上被预检判死的输入模式」变成显式补丁后再进预检（US-7）。
 
+    ``cfg``：G13（P1）可选，传入 worker 级已读取的质检配置则直接复用，避免逐镜再
+    触发一次 ``_qc_load_cfg()``（读 JSON + Fernet 解密）；不传则按需自读（向后兼容）。
+
     ⚠️ **一律 fail-open**：预检自身异常时按「原样放行」处理并记 warning。
     这一层是新增的保险，绝不能因为它自己出问题就把整集生产卡死。
     """
     text = str(prompt or "")
     try:
-        cfg = _qc_load_cfg()
+        cfg = cfg if cfg is not None else _qc_load_cfg()
         if project_name:
             # 召回叠加在原始提示词上（自愈前）；调用方已保留 orig_prompt 作稳定 phash 键。
             text = prompt_memory.learned_prompt(

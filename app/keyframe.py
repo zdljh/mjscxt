@@ -329,6 +329,11 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
     verify_cb(path, shot, item) -> (ok, reason)：可选的尾帧质检回调（由 app.py 注入
         QC 实现）。返回 False 时会换 seed 重画，最多 max_verify_retries 次；
         仍不通过则本镜判失败（链式会让后续镜自动回退到自己的分镜图，不会连环污染）。
+        ⚠️ G18（P1）统一口径：质检回调**抛异常**时按 **fail-closed**（阻断）处理——
+        本镜尾帧不交付（r["ok"]=False，r["qc"]["qc_skipped_due_to_error"]=True），清掉
+        暂存残片并 break。与图片（storyboard）/视频 QC 对"质检接口异常"的口径一致
+        （二者同样是"保留暂存、不交付、不重试"）；尾帧在链式模式下是下一镜首帧，
+        一张未被质检的图会顺链污染后面所有镜，故绝不 fail-open 静默放过。
     preflight_cb(prompt, shot, item) -> dict：**生成前**提示词预检回调（由 app.py 注入
         ``prompt_qc.preflight``，与 verify_cb 同一注入风格）。返回
         ``{"prompt": <自愈后的提示词>, "verdict": …, "repairs": [...]}``；本函数取其中的
@@ -466,8 +471,23 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
             try:
                 v_ok, v_reason = verify_cb(scratch_end, shot, item)
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"尾帧质检回调异常（按通过处理）：{e}")
-                v_ok, v_reason = True, ""
+                # G18（P1）：与图片/视频质检统一口径 —— 质检回调异常 **fail-closed**（阻断），
+                # 不再 fail-open（按通过处理）。尾帧在链式模式下会成为下一镜首帧，一张"没被
+                # 质检过"的坏图顺着链污染后面所有镜；且图片/视频链路对质检异常都是
+                # 「保留暂存、不交付、不重试」，尾帧若仍按通过则是三套口径并存（审计 G18）。
+                # 回调抛异常是质检侧自身故障（非"不达标"结论），重试只会再抛，直接止损并
+                # 如实标记 qc_skipped_due_to_error=True，供 UI 高亮，绝不静默放过。
+                logger.error(f"尾帧质检回调异常（G18 fail-closed 阻断，本镜尾帧不交付）：{e}")
+                r["qc"] = {"ok": False, "reason": f"质检回调异常（fail-closed）：{e}",
+                           "attempt": attempt + 1, "qc_skipped_due_to_error": True}
+                r.update({"ok": False,
+                          "error": f"尾帧质检回调异常，按 fail-closed 阻断本镜尾帧交付：{e}"})
+                try:
+                    if os.path.isfile(scratch_end):
+                        os.remove(scratch_end)
+                except Exception:  # noqa: BLE001
+                    pass
+                break
             r["qc"] = {"ok": bool(v_ok), "reason": v_reason or "",
                        "attempt": attempt + 1}
             # G1 止损：记录本镜质检特征（critical_issues/issues），连续相同则提前停
