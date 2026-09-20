@@ -6,7 +6,7 @@ import type {
   Novel, NovelsResponse,
   Task, TasksResponse,
   Character, Relation,
-  Memory, MemoryStats, PromptLesson,
+  Memory, MemoryStats, PromptLesson, LessonQuery, LessonPage,
   AppSettings, I18nData,
   AnalyticsData,
   KeyframePlanResponse,
@@ -290,14 +290,63 @@ export const memoryApi = {
       promptLessons: Number(s.prompt_lessons ?? 0),
     };
   },
-  /** 质检教训库（生成链路自动学习成果；与手动记忆是两套数据） */
-  lessons: async (params?: { kind?: string; limit?: number }): Promise<PromptLesson[]> => {
+  /**
+   * 质检教训库（生成链路自动学习成果；与手动记忆是两套数据）。
+   *
+   * 返回完整分页信封（total/filtered/by_kind/dead_lessons/lessons），供页面做
+   * 「死教训数」统计卡与「加载更多」分页。关键词过滤走 `q`，
+   * ⚠️ 不复用 /memory/lessons/search（那是「按 prompt 召回试算」，语义不同）。
+   */
+  lessons: async (params?: LessonQuery): Promise<LessonPage> => {
     const qs = new URLSearchParams();
     if (params?.kind) qs.set('kind', params.kind);
-    if (params?.limit) qs.set('limit', String(params.limit));
+    if (params?.project) qs.set('project', params.project);
+    if (params?.since) qs.set('since', params.since);
+    if (params?.until) qs.set('until', params.until);
+    if (params?.q) qs.set('q', params.q);
+    if (params?.limit != null) qs.set('limit', String(params.limit));
+    if (params?.offset != null) qs.set('offset', String(params.offset));
     const q = qs.toString() ? `?${qs.toString()}` : '';
-    const d = await request<{ lessons?: PromptLesson[] }>(`/memory/lessons${q}`);
-    return d?.lessons || [];
+    const d = await request<{
+      success?: boolean;
+      total?: number;
+      filtered?: number;
+      offset?: number;
+      limit?: number;
+      by_kind?: Record<string, number>;
+      dead_lessons?: number;
+      lessons?: PromptLesson[];
+    }>(`/memory/lessons${q}`);
+    return {
+      total: Number(d?.total ?? 0),
+      filtered: Number(d?.filtered ?? 0),
+      by_kind: d?.by_kind || {},
+      dead_lessons: Number(d?.dead_lessons ?? 0),
+      lessons: Array.isArray(d?.lessons) ? d.lessons : [],
+    };
+  },
+  /** 删除单条教训（DELETE /api/memory/lessons/<lesson_id>；未命中 404） */
+  deleteLesson: (lessonId: string) =>
+    request<{ success: boolean; deleted?: number; lesson_id?: string }>(
+      `/memory/lessons/${encodeURIComponent(lessonId)}`,
+      { method: 'DELETE' }
+    ),
+  /** 清空某一环节的全部教训（POST /api/memory/lessons/clear body {kind}） */
+  clearLessons: (kind: string) =>
+    request<{ success: boolean; cleared?: number; kind?: string }>('/memory/lessons/clear', {
+      method: 'POST',
+      body: JSON.stringify({ kind }),
+    }),
+  /** 教训库统计（GET /api/memory/stats 的 `lessons` 节点） */
+  lessonStats: async () => {
+    const d = await request<{ success?: boolean; lessons?: Record<string, unknown> }>('/memory/stats');
+    const l = (d?.lessons || {}) as Record<string, unknown>;
+    return {
+      total: Number(l.total ?? 0),
+      by_kind: (l.by_kind || {}) as Record<string, number>,
+      dead_lessons: Number(l.dead_lessons ?? 0),
+      used_total: Number(l.used_total ?? 0),
+    };
   },
   /** 试算：给定提示词会召回哪些历史修正建议（把「自动学习」变得可见可验证） */
   recall: async (params: { kind: string; prompt: string; project?: string; style?: string }) => {

@@ -169,6 +169,46 @@ export interface PromptLesson {
   reason?: string;
   score?: number | null;
   terms?: string[];
+  /** 确定性主键（T01 数据契约）：删除/召回计数回写的锚点，形如 "L"+sha1 前 16 位 */
+  lesson_id?: string;
+  /** 被生成链路自动引用（召回）的次数；0 = 从未被召回（即「死教训」） */
+  use_count?: number;
+  /** 最近一次被召回的时间（ISO）；从未被召回为 null */
+  last_used?: string | null;
+  /** 问题类别（categorize_issue 推断，或 record_with_context 显式传入） */
+  category?: string;
+  /** 优先级：high / medium / low */
+  priority?: string;
+  /** 来源上下文（record_with_context 传入的键值，如 project_name/style/episode_no） */
+  context?: Record<string, unknown>;
+}
+
+/** 教训库查询参数（GET /api/memory/lessons 的 query 契约，见设计文档 §3.4） */
+export interface LessonQuery {
+  /** 环节多值，逗号分隔（如 "asset,storyboard"）；缺省 = 全部 */
+  kind?: string;
+  project?: string;
+  /** 起始时间（ISO，含） */
+  since?: string;
+  /** 结束时间（ISO，含） */
+  until?: string;
+  /** 关键词检索（走 q；⚠️ 不复用 /memory/lessons/search —— 那是「按 prompt 召回试算」） */
+  q?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** 教训库分页结果（GET /api/memory/lessons 返回信封体） */
+export interface LessonPage {
+  /** 全库总数（未过滤前） */
+  total: number;
+  /** 应用筛选后命中的条数 */
+  filtered: number;
+  /** 各环节分布（当前 kind 筛选口径） */
+  by_kind: Record<string, number>;
+  /** 死教训数（use_count === 0 的条数） */
+  dead_lessons: number;
+  lessons: PromptLesson[];
 }
 
 // --- Settings ---
