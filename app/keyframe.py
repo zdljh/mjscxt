@@ -316,6 +316,7 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
                        verify_cb: Optional[Callable[[str, dict, dict], Tuple[bool, str]]] = None,
                        max_verify_retries: int = 0,
                        preflight_cb: Optional[Callable[[str, dict, dict], dict]] = None,
+                       recall_cb: Optional[Callable[[str, dict, dict], str]] = None,
                        client=None,
                        ) -> dict:
     """批量生成尾帧（串行；单镜失败不影响其它镜）
@@ -333,6 +334,10 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
         ``prompt`` 作为实际生成用提示词，并把精简结论记进结果。**不阻断**：尾帧是成批
         生成的，为一条提示词打断整批代价过大 —— 与资产/整集链路同一取舍。
     progress_cb(done, total, item) —— 每个镜头完成后回调一次
+    recall_cb(orig_prompt, shot, item) -> str：质检不达标**重试时**改写的提示词回调
+        （由 app.py 注入 prompt_memory.learned_prompt，召回 kind="keyframe" 的历史教训）。
+        仅 attempt>0 时调用；返回空串/None 时保持原 prompt，默认 None → 整段跳过、
+        零行为变更。`orig_prompt` 是 preflight 自愈**之前**的确定性串（稳定 phash 键）。
     """
     cm = norm_chain_mode(chain_mode)
     plan = plan_keyframes(shots, sb_map, keyframes_dir,
@@ -386,6 +391,9 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
 
         _mirror(start, start_frame_link_path(keyframes_dir, seq))
         prompt = build_end_frame_prompt(shot, chained=chained)
+        # 原始提示词：必须在 preflight 自愈**之前**捕获（作为教训库稳定 phash 键）。
+        # recall_cb 重写的是「下一次生成」用的 prompt，而不是覆盖 orig_prompt。
+        orig_prompt = prompt
 
         # ---- 生成前预检（与资产 / 分镜 / 视频同一条链路）----
         # 尾帧是「以首帧为参考图的图生图」，提示词缺锚定语义就会换脸换服装；链式模式下
@@ -420,6 +428,12 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
         r: dict = {}
         for attempt in range(attempts + 1):
             _seed = seed if attempt == 0 else random.randint(1, 2 ** 31 - 1)
+            # 质检不达标后的重试（attempt>0）：先召回历史教训改写提示词，再换 seed 重画。
+            # recall_cb 返回空串/None 时保持原 prompt（行为不变）；默认 None → 整段跳过。
+            if attempt > 0 and recall_cb is not None:
+                _recalled = recall_cb(orig_prompt, shot, item)
+                if _recalled:
+                    prompt = _recalled
             r = generate_end_frame(start, prompt, item["end_path"],
                                    seed=_seed, timeout=timeout, client=client)
             if not r.get("ok") or verify_cb is None:

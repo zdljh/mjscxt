@@ -44,8 +44,13 @@ class ScriptGenerator:
                        episodes: int = 1,
                        duration_per_episode: int = 60,
                        style: str = "古风仙侠",
-                       target_audience: str = "年轻观众") -> Dict:
-        """生成完整剧本；云端失败或无 Key 时自动回退到本地兜底剧本"""
+                       target_audience: str = "年轻观众",
+                       lessons_hint: str = "") -> Dict:
+        """生成完整剧本；云端失败或无 Key 时自动回退到本地兜底剧本
+
+        lessons_hint：历史质检教训文案（可选，空串 → 零行为变更），由重试链路注入，
+        追加到生成提示词末尾，供模型规避已发生过的缺陷。
+        """
 
         if self.provider != "anthropic":
             raise ValueError(f"不支持的 LLM 提供商: {self.provider}")
@@ -58,7 +63,8 @@ class ScriptGenerator:
             raise RuntimeError("ANTHROPIC_API_KEY 未设置，且未找到本地兜底剧本，无法生成剧本")
 
         try:
-            return self._generate_with_claude(theme, episodes, duration_per_episode, style, target_audience)
+            return self._generate_with_claude(theme, episodes, duration_per_episode,
+                                              style, target_audience, lessons_hint)
         except Exception as e:
             logger.error(f"Claude 生成剧本失败: {e}")
             fallback = self.load_fallback_script()
@@ -112,10 +118,26 @@ class ScriptGenerator:
         
         for attempt in range(max_qc_retries):
             logger.info(f"剧本生成尝试 {attempt + 1}/{max_qc_retries}")
-            
+
+            # 重试前召回历史教训（首版 attempt==0 不必召回）。
+            # 用上一版剧本的 JSON 串作稳定 phash 键（与下方 record_with_context 同键）。
+            lessons_hint = ""
+            if attempt > 0:
+                try:
+                    lessons_hint = prompt_memory.learned_prompt(
+                        kind="script",
+                        prompt=json.dumps(last_script, ensure_ascii=False)[:2000],
+                        project=project_name or "unknown",
+                        root_dir=PROJECT_OUTPUT_DIR,
+                    )
+                except Exception:
+                    lessons_hint = ""
+
             # 生成剧本
             try:
-                script = self.generate_script(theme, episodes, duration_per_episode, style, target_audience)
+                script = self.generate_script(theme, episodes, duration_per_episode,
+                                              style, target_audience,
+                                              lessons_hint=lessons_hint)
                 last_script = script
             except Exception as e:
                 logger.error(f"剧本生成失败: {e}")
@@ -257,8 +279,13 @@ class ScriptGenerator:
         return None
 
     def _generate_with_claude(self, theme: str, episodes: int,
-                               duration: int, style: str, audience: str) -> Dict:
-        """使用 Claude API 生成剧本"""
+                               duration: int, style: str, audience: str,
+                               lessons_hint: str = "") -> Dict:
+        """使用 Claude API 生成剧本
+
+        lessons_hint：历史质检教训，追加在 JSON 格式说明**之后**、结尾（不破坏 JSON
+        输出格式要求）；空串 → 零行为变更。
+        """
 
         prompt = f"""你是一个专业的AI漫剧编剧。请为以下主题生成详细的分镜脚本。
 
@@ -333,6 +360,9 @@ class ScriptGenerator:
 3. scenes：提取剧情涉及的主要场景，通常3-6个
 4. shots：至少10-15个分镜，每个分镜5-8秒，标注出场角色和物品
 5. 输出必须是合法的JSON格式，不要包含任何注释"""
+
+        if lessons_hint:
+            prompt += f"\n\n【历史质检教训，务必规避（不要照抄进正文）】\n{lessons_hint}"
 
         message = self.client.messages.create(
             model=CLAUDE_MODEL,
