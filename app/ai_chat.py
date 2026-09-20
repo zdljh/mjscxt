@@ -8,13 +8,36 @@ AI 对话（创作总控）：多轮对话敲定漫剧创作设定，并把确�
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
 import re
+import threading
+import time
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+# =====================================================================
+# 并发保护（审计 S8）
+# ---------------------------------------------------------------------
+# 会话历史/项目设定都是「load → 改内存 → save」的读改写，此前**零锁**。
+# 典型症状：AI 对话连发两条消息，两条都基于同一份旧历史 → 后写的把前一条覆盖掉
+# （用户看到「我发的消息只留下最后一条」）；并且 `_write_json` 曾用固定 `.tmp` 名，
+# 并发写者互相截断对方写了一半的临时文件 → `os.replace` 发布出损坏 JSON。
+# =====================================================================
+
+_CHAT_LOCK = threading.RLock()
+
+
+def _locked(fn):
+    """把读改写放回同一把可重入锁的临界区（函数级装饰，签名/文档不变）"""
+    @functools.wraps(fn)
+    def _wrapper(*args, **kwargs):
+        with _CHAT_LOCK:
+            return fn(*args, **kwargs)
+    return _wrapper
 
 HISTORY_MAX_MESSAGES = 40      # 会话历史最多保留的消息条数（超出丢弃最早）
 CONTEXT_MESSAGES = 20          # 每次请求送入模型的最大历史消息条数
@@ -63,20 +86,60 @@ def _ensure_dir(path: str) -> None:
 def _read_json(path: str, default: dict) -> dict:
     if not path or not os.path.isfile(path):
         return default
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f) or default
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"读取 {os.path.basename(path)} 失败（按默认值处理）：{e}")
-        return default
+    # ⚠️ Windows 上 `_atomic_replace` 换目录项的瞬间，另一线程 open() 会抛
+    #    PermissionError（暂时拿不到 ≠ 文件坏了）。旧实现直接返回默认值 →
+    #    表现为「聊天记录突然清空」。这里退避重试。
+    err = None
+    for i in range(6):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f) or default
+        except PermissionError as e:
+            err = e
+            time.sleep(0.02 * (i + 1))
+        except Exception as e:  # noqa: BLE001
+            err = e
+            break
+    logger.warning(f"读取 {os.path.basename(path)} 失败（按默认值处理）：{err}")
+    return default
+
+
+def _atomic_replace(tmp: str, path: str) -> None:
+    """`os.replace` + Windows 共享冲突退避重试。
+
+    ⚠️ Windows 上若目标文件正被另一个线程/进程打开读取（例如 `load_index` 刚读完、
+    句柄尚未释放），`os.replace` 会抛 `PermissionError: [WinError 5] 拒绝访问`。
+    这属于「暂时拿不到」而不是「文件坏了」：直接失败会让新建项目/保存设置偶发 500
+    （实测并发读写时必现）。退避重试即可。
+    """
+    last = None
+    for i in range(8):
+        try:
+            _atomic_replace(tmp, path)
+            return
+        except PermissionError as e:        # WinError 5 / 32：目标被占用
+            last = e
+            time.sleep(0.02 * (i + 1))
+    raise last
 
 
 def _write_json(path: str, data: dict) -> None:
     _ensure_dir(path)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    # ⚠️ 临时名必须每次唯一（固定 `.tmp` 会被并发写者互相截断，见文件头并发注释）
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.{os.urandom(3).hex()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 # ===================== 会话历史 =====================
@@ -155,6 +218,7 @@ def _legacy_canonical_key(data: dict) -> str:
     return canonical_project_key(str(data.get("active_project") or "")) or "default"
 
 
+@_locked
 def save_history(path: str, history: dict) -> dict:
     history["messages"] = _clean_messages(history.get("messages"))[-HISTORY_MAX_MESSAGES:]
     for k, v in (history.get("projects") or {}).items():
@@ -186,6 +250,7 @@ def drop_last_message(history: dict, project: str = "") -> dict:
     return history
 
 
+@_locked
 def clear_history(path: str, keep_settings: bool = True, project: str = "") -> dict:
     """清空会话（指定 project 时只清该项目的历史，不动别的项目）"""
     history = load_history(path)
@@ -335,6 +400,7 @@ def load_settings_file(path: str) -> dict:
     return data
 
 
+@_locked
 def save_project_settings(path: str, project_name: str, settings: dict) -> dict:
     """把确认后的创作设定落盘为项目配置（同项目覆盖更新，保留其它项目）"""
     data = load_settings_file(path)

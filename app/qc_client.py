@@ -548,39 +548,13 @@ def load_config(config_path: str) -> dict:
             cfg["model"] = env_model
     except Exception as e:  # noqa: BLE001
         logger.warning(f"质检密钥读取异常（回退 json）：{e}")
-    # 类型兜底
-    cfg["enabled"] = bool(cfg.get("enabled"))
-    cfg["image_enabled"] = bool(cfg.get("image_enabled", True))
-    cfg["video_enabled"] = bool(cfg.get("video_enabled", True))
-    try:
-        cfg["pass_score"] = max(0, min(100, int(cfg.get("pass_score", 70))))
-    except Exception:  # noqa: BLE001
-        cfg["pass_score"] = 70
-    try:
-        cfg["max_retries"] = max(0, min(10, int(cfg.get("max_retries", 2))))
-    except Exception:  # noqa: BLE001
-        cfg["max_retries"] = 2
-    try:
-        cfg["video_frame_count"] = max(1, min(6, int(cfg.get("video_frame_count", 3))))
-    except Exception:  # noqa: BLE001
-        cfg["video_frame_count"] = 3
-    try:
-        cfg["image_max_side"] = max(256, min(2048, int(cfg.get("image_max_side", 1024))))
-    except Exception:  # noqa: BLE001
-        cfg["image_max_side"] = 1024
-    try:
-        cfg["timeout"] = max(10, min(900, int(cfg.get("timeout", 180))))
-    except Exception:  # noqa: BLE001
-        cfg["timeout"] = 180
-    try:
-        cfg["api_retries"] = max(0, min(5, int(cfg.get("api_retries", API_RETRY_ATTEMPTS))))
-    except Exception:  # noqa: BLE001
-        cfg["api_retries"] = API_RETRY_ATTEMPTS
-    try:
-        cfg["api_backoff"] = max(0.0, min(30.0, float(cfg.get("api_backoff", API_RETRY_BACKOFF))))
-    except Exception:  # noqa: BLE001
-        cfg["api_backoff"] = API_RETRY_BACKOFF
-    return cfg
+    # 类型兜底：统一交给 `_normalize`（save_config / load_config_dict 用的是同一套规则）
+    # ⚠️ 审计 G2：这里原本手写了一份「简化版」归一化，且布尔项用的是裸 `bool()` ——
+    #    字符串 "false"/"0"/"no"/"off" 都是非空字符串 → 一律判 True（用户在页面或第三方
+    #    脚本里写 "false"，读回来反而是「开」）；而且它只覆盖 3 个开关，
+    #    audio_enabled / script_enabled / keyframe_qc_enabled / prompt_enabled 完全没归一化，
+    #    音频/剧本/尾帧质检的开关因此形同虚设。两份口径并存必然漂移，现收敛为单一实现。
+    return _normalize(cfg)
 
 
 def save_config(config_path: str, patch: dict, keep_key_if_blank: bool = True) -> dict:
@@ -615,7 +589,12 @@ def save_config(config_path: str, patch: dict, keep_key_if_blank: bool = True) -
             cfg["api_key"] = ""
             continue
         if k in ("enabled", "image_enabled", "video_enabled", "image_ref_compare"):
-            cfg[k] = bool(v)
+            # ⚠️ 审计 G2：这里原本是 `bool(v)` —— 字符串 "false"/"0"/"no"/"off"/"none"
+            #    都是**非空字符串**，`bool()` 一律判 True。用户在页面或第三方脚本里把开关
+            #    存成 "false"，读回来反而是「开」，开关形同虚设。
+            #    同文件 `_as_bool` 的 docstring 恰好记录了这条坑，只有 save_config 自己漏改。
+            #    非法值沿用当前（已归一化的）取值，绝不静默翻转开关。
+            cfg[k] = _as_bool(v, bool(cfg.get(k, False)))
         elif k in ("pass_score", "max_retries", "video_frame_count", "image_max_side",
                    "timeout", "api_retries"):
             try:
@@ -692,6 +671,8 @@ def _normalize(cfg: dict) -> dict:
     cfg["keyframe_qc_enabled"] = _as_bool(cfg.get("keyframe_qc_enabled"), True)
     # 提示词预检：默认开启；模式非法时回落到 repair（与 prompt_qc.prompt_qc_mode 同语义）
     cfg["prompt_enabled"] = _as_bool(cfg.get("prompt_enabled"), True)
+    # 图片质检是否附带设定图（save_config 的布尔组里也有它，读取侧必须同口径归一化）
+    cfg["image_ref_compare"] = _as_bool(cfg.get("image_ref_compare"), True)
     _pmode = str(cfg.get("prompt_mode") or "repair").strip().lower()
     cfg["prompt_mode"] = _pmode if _pmode in ("warn", "repair", "block") else "repair"
     cfg["endpoint_override"] = _normalize_override(cfg.get("endpoint_override"))
@@ -743,7 +724,9 @@ def resolve_endpoint(cfg: dict, override: dict = None) -> dict:
     ep = {"base_url": (cfg.get("base_url") or "").strip(),
           "api_key": (cfg.get("api_key") or "").strip(),
           "model": (cfg.get("model") or "").strip(),
-          "disable_thinking": bool(cfg.get("disable_thinking", DISABLE_THINKING_DEFAULT)),
+          # ⚠️ 审计 G2 同型：不能裸 `bool()` —— "false"/"0"/"off" 都是非空字符串，一律判 True，
+          #    于是「关闭思考」的开关在字符串写法下永远关不掉。
+          "disable_thinking": _as_bool(cfg.get("disable_thinking"), DISABLE_THINKING_DEFAULT),
           "min_tokens_when_thinking": int(cfg.get("min_tokens_when_thinking")
                                           or MIN_TOKENS_WHEN_THINKING)}
     auto = bool(saved["base_url"] and saved["base_url"] == ep["base_url"]

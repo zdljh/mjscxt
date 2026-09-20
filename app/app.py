@@ -2246,242 +2246,263 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
 
         for i, asset in enumerate(assets):
             name = asset.get('name', f'{asset_type}_{i+1}')
+            try:
             
-            # 物品过滤：只生成重要道具的参考图
-            if asset_type == 'item':
-                importance = asset.get('importance', '')
-                if importance and importance != '重要':
-                    app.logger.info(f"跳过临时道具 '{name}'（importance={importance}），不生成参考图")
-                    results.append({"name": name, "status": "skipped", "reason": f"临时道具，importance={importance}"})
-                    continue
+                # 物品过滤：只生成重要道具的参考图
+                if asset_type == 'item':
+                    importance = asset.get('importance', '')
+                    if importance and importance != '重要':
+                        app.logger.info(f"跳过临时道具 '{name}'（importance={importance}），不生成参考图")
+                        results.append({"name": name, "status": "skipped", "reason": f"临时道具，importance={importance}"})
+                        continue
             
-            prompt_zh = asset.get('reference_prompt_zh', asset.get('prompt_zh', asset.get('appearance', '')))
+                prompt_zh = asset.get('reference_prompt_zh', asset.get('prompt_zh', asset.get('appearance', '')))
 
-            with lock:
-                generation_state[task_id].update({
-                    "current": i + 1, "progress": int((i + 1) / total * 100),
-                    "current_asset": name, "phase": "基础图"
-                })
+                with lock:
+                    generation_state[task_id].update({
+                        "current": i + 1, "progress": int((i + 1) / total * 100),
+                        "current_asset": name, "phase": "基础图"
+                    })
 
-            asset_dir = os.path.join(base_dir, project_name, name)
-            os.makedirs(asset_dir, exist_ok=True)
-            scratch_dir = os.path.join(scratch_root, f"{asset_type}_{name}")
-            os.makedirs(scratch_dir, exist_ok=True)
-            qc_desc = f"资产类型：{asset_type}；资产名称：{name}；资产设定：{str(prompt_zh)[:400]}"
+                asset_dir = os.path.join(base_dir, project_name, name)
+                os.makedirs(asset_dir, exist_ok=True)
+                scratch_dir = os.path.join(scratch_root, f"{asset_type}_{name}")
+                os.makedirs(scratch_dir, exist_ok=True)
+                qc_desc = f"资产类型：{asset_type}；资产名称：{name}；资产设定：{str(prompt_zh)[:400]}"
 
-            # ---------- 阶段1：基础图（生成 → 质检 → 重生成 → 阻断判定） ----------
-            base_dst = os.path.join(asset_dir, "base.png")
-            base_attempts = []
-            base_gate = None
-            base_ok = False
-            base_files = []
-            seed = None
-            orig_asset_prompt = prompt_zh     # 教训库稳定键（改写后的提示词不参与指纹）
-            # ---- 提示词预检（生成前质检）----
-            # 资产是「一对多」批量生成（一个项目几十个角色/物品/场景），与整集同理不做硬阻断：
-            # 单条提示词有问题就自愈 + 记录，不让整批资产生成中断。缺失/过短这类致命缺陷
-            # 由后面的生成+质检链路兜底（空提示词本就出不来可用资产）。
-            prompt_zh, _pf_asset, _pgate_asset = _prompt_preflight(
-                "asset", prompt_zh, ctx=asset, style=(asset.get("style") or gen_style or ""))
-            if not _pgate_asset.get("accept"):
-                app.logger.warning("资产「%s」参考图提示词预检未通过（%s）：%s",
-                                   name, _pgate_asset.get("label"), _pgate_asset.get("reason"))
-            for attempt in range(max_retries + 1):
-                if attempt > 0:
-                    seed = random.randint(1, 2 ** 31 - 1)
-                    # 从教训库召回「上一轮质检哪里不对」，据此改写提示词再生成
-                    # ⚠️ 基准用 orig_asset_prompt，避免建议块一轮轮累积
-                    try:
-                        suggestions = prompt_memory.suggest(
-                            kind="asset",
-                            prompt=orig_asset_prompt,
-                            project=project_name,
-                            root_dir=PROJECT_OUTPUT_DIR
-                        )
-                        learned = prompt_memory.learned_prompt(
-                            kind="asset",
-                            prompt=orig_asset_prompt,
-                            project=project_name,
-                            root_dir=PROJECT_OUTPUT_DIR,
-                            style=_qc_style_of(project_name),
-                        )
-                        if learned and learned != orig_asset_prompt:
-                            prompt_zh = learned
-                            app.logger.info("资产 %s 第 %d 次重试，按质检教训改写提示词：%s",
-                                            name, attempt + 1, suggestions[:2])
-                        else:
-                            prompt_zh = orig_asset_prompt
-                            app.logger.info("资产 %s 第 %d 次重试，暂无可用教训，仅换种子",
-                                            name, attempt + 1)
-                    except Exception as mem_err:
-                        app.logger.warning(f"读取记忆模块失败: {mem_err}")
+                # ---------- 阶段1：基础图（生成 → 质检 → 重生成 → 阻断判定） ----------
+                base_dst = os.path.join(asset_dir, "base.png")
+                base_attempts = []
+                base_gate = None
+                base_ok = False
+                base_files = []
+                seed = None
+                orig_asset_prompt = prompt_zh     # 教训库稳定键（改写后的提示词不参与指纹）
+                # ---- 提示词预检（生成前质检）----
+                # 资产是「一对多」批量生成（一个项目几十个角色/物品/场景），与整集同理不做硬阻断：
+                # 单条提示词有问题就自愈 + 记录，不让整批资产生成中断。缺失/过短这类致命缺陷
+                # 由后面的生成+质检链路兜底（空提示词本就出不来可用资产）。
+                prompt_zh, _pf_asset, _pgate_asset = _prompt_preflight(
+                    "asset", prompt_zh, ctx=asset, style=(asset.get("style") or gen_style or ""))
+                if not _pgate_asset.get("accept"):
+                    app.logger.warning("资产「%s」参考图提示词预检未通过（%s）：%s",
+                                       name, _pgate_asset.get("label"), _pgate_asset.get("reason"))
+                for attempt in range(max_retries + 1):
+                    if attempt > 0:
+                        seed = random.randint(1, 2 ** 31 - 1)
+                        # 从教训库召回「上一轮质检哪里不对」，据此改写提示词再生成
+                        # ⚠️ 基准用 orig_asset_prompt，避免建议块一轮轮累积
+                        try:
+                            suggestions = prompt_memory.suggest(
+                                kind="asset",
+                                prompt=orig_asset_prompt,
+                                project=project_name,
+                                root_dir=PROJECT_OUTPUT_DIR
+                            )
+                            learned = prompt_memory.learned_prompt(
+                                kind="asset",
+                                prompt=orig_asset_prompt,
+                                project=project_name,
+                                root_dir=PROJECT_OUTPUT_DIR,
+                                style=_qc_style_of(project_name),
+                            )
+                            if learned and learned != orig_asset_prompt:
+                                prompt_zh = learned
+                                app.logger.info("资产 %s 第 %d 次重试，按质检教训改写提示词：%s",
+                                                name, attempt + 1, suggestions[:2])
+                            else:
+                                prompt_zh = orig_asset_prompt
+                                app.logger.info("资产 %s 第 %d 次重试，暂无可用教训，仅换种子",
+                                                name, attempt + 1)
+                        except Exception as mem_err:
+                            app.logger.warning(f"读取记忆模块失败: {mem_err}")
                     
-                    _set_phase(f"{name} 基础图质检不达标，修改提示词后重新生成（第 {attempt}/{max_retries} 次）",
-                               "regenerating")
-                base_files = gen_base(prompt_zh, seed=seed, style=gen_style, size=gen_size)
-                if not base_files:
-                    base_attempts.append({"attempt": attempt + 1, "seed": seed, "stage": "基础图生成",
-                                          "ok": False, "error": "基础图生成失败"})
-                    base_gate = {"accept": False, "blocked": True, "skipped": False,
-                                 "label": "生成失败", "reason": "基础图生成失败", "critical_issues": []}
-                    break
-                scratch_base = os.path.join(scratch_dir, f"base_try{attempt + 1}.png")
-                shutil.copy2(base_files[0], scratch_base)
-                if not qc_on:
-                    if qc_declared:
-                        # 已声明开启质检但接口不可用：明确阻断（图仅留在暂存区），不静默放行
+                        _set_phase(f"{name} 基础图质检不达标，修改提示词后重新生成（第 {attempt}/{max_retries} 次）",
+                                   "regenerating")
+                    base_files = gen_base(prompt_zh, seed=seed, style=gen_style, size=gen_size)
+                    if not base_files:
+                        base_attempts.append({"attempt": attempt + 1, "seed": seed, "stage": "基础图生成",
+                                              "ok": False, "error": "基础图生成失败"})
                         base_gate = {"accept": False, "blocked": True, "skipped": False,
-                                     "label": "质检接口未就绪",
-                                     "reason": "已开启图片质检但质检接口不可用"
-                                               "（qc_config.json 缺 base_url / api_key / model）",
-                                     "critical_issues": []}
+                                     "label": "生成失败", "reason": "基础图生成失败", "critical_issues": []}
                         break
-                    base_gate = {"accept": True, "blocked": False, "skipped": True,
-                                 "label": "质检未开启", "reason": "图片质检未开启（跳过）",
-                                 "critical_issues": []}
-                    base_ok = True
-                    break
-                _set_phase(f"{name} 基础图质检中（第 {attempt + 1} 次）", "checking")
-                verdict = qc_client.check_image(scratch_base, qc_desc, qc_cfg, style=gen_style)
-                app.logger.info(f"[资产质检] base {asset_type}/{name} 第{attempt + 1}次 → "
-                                f"{verdict.get('call_url')} model={verdict.get('model')} "
-                                f"ok={verdict.get('ok')} passed={verdict.get('passed')} "
-                                f"score={verdict.get('score')} style_mismatch={verdict.get('style_mismatch')} "
-                                f"latency={verdict.get('latency_ms')}ms")
-                base_attempts.append(_qc_record_verdict(project_name, "asset_image", f"{name}_base",
-                                                        "资产基础图质检", attempt + 1, seed,
-                                                        scratch_base, verdict, style=gen_style))
-                base_gate = _qc_gate(verdict)
-                if base_gate["accept"]:
-                    base_ok = True
-                    break
-                if not verdict.get("ok"):
-                    break     # 质检接口异常，重生成无意义
-                # ★ 立刻沉淀：让同一次循环的下一次重试就能召回这条缺陷
-                _record_qc_lesson(project_name, "asset", orig_asset_prompt, base_attempts[-1])
-            if not base_ok:
-                # 把「基础图哪里不对」沉淀进教训库（供下次重生成时改写提示词）
-                if base_attempts and isinstance(base_attempts[-1], dict):
-                    _record_qc_lesson(project_name, "asset", prompt_zh, base_attempts[-1])
-
-                results.append({
-                    "name": name, "success": False, "dir": asset_dir, "stage": "基础图",
-                    "qc_blocked": bool(base_gate and base_gate.get("blocked")),
-                    "error": (f"基础图未通过质检（{base_gate['label']}）：{base_gate['reason']}"
-                              if base_gate else "基础图生成失败"),
-                    "qc": _qc_summary(base_attempts, qc_declared, qc_on,
-                                      int(qc_cfg.get("max_retries", 0))),
-                })
-                continue
-            # 质检达标 → 正式入库
-            if base_attempts:
-                shutil.copy2(base_attempts[-1]["file"], base_dst)
-            else:
-                shutil.copy2(base_files[0], base_dst)
-
-            # ---------- 阶段2：多视角（逐视角质检 → 整组重生成 → 不达标阻断） ----------
-            view_paths = {"base": base_dst}
-            view_attempts = {}
-            view_gate = {}
-            view_src = {}
-            views = {}
-            vseed = None
-            for attempt in range(max_retries + 1):
-                if attempt > 0:
-                    vseed = random.randint(1, 2 ** 31 - 1)
-                    _set_phase(f"{name} 多视角质检不达标，重新生成（第 {attempt}/{max_retries} 次）",
-                               "regenerating")
-                views = comfyui_client.generate_multiview(
-                    base_image_path=base_dst, asset_type=asset_type, asset_name=name,
-                    base_prompt_zh=prompt_zh, seed=vseed, style=gen_style, size=gen_size) or {}
-                view_src = {}
-                for vk, vp in views.items():
-                    sp = os.path.join(scratch_dir, f"{vk}_try{attempt + 1}.png")
-                    shutil.copy2(vp, sp)
-                    view_src[vk] = sp
-                if not views:
-                    break
-                if not qc_on:
-                    if qc_declared:
-                        # 已声明开启质检但接口不可用：明确阻断（图仅留在暂存区），不静默放行
-                        for vk in views:
-                            view_gate[vk] = {"accept": False, "blocked": True, "skipped": False,
-                                             "label": "质检接口未就绪",
-                                             "reason": "已开启图片质检但质检接口不可用"
-                                                       "（qc_config.json 缺 base_url / api_key / model）",
-                                             "critical_issues": []}
-                        break
-                    for vk in views:
-                        view_gate[vk] = {"accept": True, "blocked": False, "skipped": True,
-                                         "label": "质检未开启", "reason": "图片质检未开启（跳过）",
+                    scratch_base = os.path.join(scratch_dir, f"base_try{attempt + 1}.png")
+                    shutil.copy2(base_files[0], scratch_base)
+                    if not qc_on:
+                        if qc_declared:
+                            # 已声明开启质检但接口不可用：明确阻断（图仅留在暂存区），不静默放行
+                            base_gate = {"accept": False, "blocked": True, "skipped": False,
+                                         "label": "质检接口未就绪",
+                                         "reason": "已开启图片质检但质检接口不可用"
+                                                   "（qc_config.json 缺 base_url / api_key / model）",
                                          "critical_issues": []}
-                    break
-                round_pass = True
-                api_error = False
-                for vk, sp in view_src.items():
-                    _set_phase(f"{name} 多视角质检中（{vk} · 第 {attempt + 1} 次）", "checking")
-                    verdict = qc_client.check_image(sp, qc_desc + f"；视角：{vk}", qc_cfg,
-                                                    style=gen_style)
-                    app.logger.info(f"[资产质检] view {asset_type}/{name}/{vk} 第{attempt + 1}次 → "
+                            break
+                        base_gate = {"accept": True, "blocked": False, "skipped": True,
+                                     "label": "质检未开启", "reason": "图片质检未开启（跳过）",
+                                     "critical_issues": []}
+                        base_ok = True
+                        break
+                    _set_phase(f"{name} 基础图质检中（第 {attempt + 1} 次）", "checking")
+                    verdict = qc_client.check_image(scratch_base, qc_desc, qc_cfg, style=gen_style)
+                    app.logger.info(f"[资产质检] base {asset_type}/{name} 第{attempt + 1}次 → "
                                     f"{verdict.get('call_url')} model={verdict.get('model')} "
                                     f"ok={verdict.get('ok')} passed={verdict.get('passed')} "
                                     f"score={verdict.get('score')} style_mismatch={verdict.get('style_mismatch')} "
                                     f"latency={verdict.get('latency_ms')}ms")
-                    view_attempts.setdefault(vk, []).append(
-                        _qc_record_verdict(project_name, "asset_image", f"{name}_{vk}",
-                                           f"资产多视角质检（{vk}）", attempt + 1, vseed, sp, verdict,
-                                           style=gen_style))
-                    gate = _qc_gate(verdict)
-                    view_gate[vk] = gate
-                    if not gate["accept"]:
-                        round_pass = False
-                        if not verdict.get("ok"):
-                            api_error = True
-                if round_pass:
-                    break
-                if api_error:
-                    break     # 质检接口异常，重生成无意义
+                    base_attempts.append(_qc_record_verdict(project_name, "asset_image", f"{name}_base",
+                                                            "资产基础图质检", attempt + 1, seed,
+                                                            scratch_base, verdict, style=gen_style))
+                    base_gate = _qc_gate(verdict)
+                    if base_gate["accept"]:
+                        base_ok = True
+                        break
+                    if not verdict.get("ok"):
+                        break     # 质检接口异常，重生成无意义
+                    # ★ 立刻沉淀：让同一次循环的下一次重试就能召回这条缺陷
+                    _record_qc_lesson(project_name, "asset", orig_asset_prompt, base_attempts[-1])
+                if not base_ok:
+                    # 把「基础图哪里不对」沉淀进教训库（供下次重生成时改写提示词）
+                    if base_attempts and isinstance(base_attempts[-1], dict):
+                        _record_qc_lesson(project_name, "asset", prompt_zh, base_attempts[-1])
 
-            blocked_views = []
-            saved_views = []
-            for vk in view_src.keys():
-                gate = view_gate.get(vk) or {"accept": False, "blocked": True, "skipped": False,
-                                             "label": "生成失败", "reason": "多视角图生成失败",
-                                             "critical_issues": []}
-                if gate["accept"] and os.path.isfile(view_src[vk]):
-                    view_dst = os.path.join(asset_dir, f"{vk}.png")
-                    shutil.copy2(view_src[vk], view_dst)
-                    view_paths[vk] = view_dst
-                    saved_views.append(vk)
+                    results.append({
+                        "name": name, "success": False, "dir": asset_dir, "stage": "基础图",
+                        "qc_blocked": bool(base_gate and base_gate.get("blocked")),
+                        "error": (f"基础图未通过质检（{base_gate['label']}）：{base_gate['reason']}"
+                                  if base_gate else "基础图生成失败"),
+                        "qc": _qc_summary(base_attempts, qc_declared, qc_on,
+                                          int(qc_cfg.get("max_retries", 0))),
+                    })
+                    continue
+                # 质检达标 → 正式入库
+                if base_attempts:
+                    shutil.copy2(base_attempts[-1]["file"], base_dst)
                 else:
-                    blocked_views.append({"view": vk, "label": gate["label"],
-                                          "reason": gate["reason"],
-                                          "critical_issues": gate["critical_issues"]})
-            if not saved_views and not blocked_views:
-                blocked_views.append({"view": "-", "label": "生成失败",
-                                      "reason": "多视角图全部生成失败", "critical_issues": []})
+                    shutil.copy2(base_files[0], base_dst)
 
-            all_attempts = list(base_attempts)
-            for recs in view_attempts.values():
-                all_attempts.extend(recs)
-            results.append({
-                "name": name,
-                "success": not blocked_views,
-                "dir": asset_dir,
-                "views": list(view_paths.keys()),
-                "qc_blocked": bool(blocked_views),
-                "qc_blocked_views": blocked_views,
-                "error": ("多视角质检阻断：" + "、".join(f"{b['view']}（{b['label']}）"
-                                                        for b in blocked_views)) if blocked_views else None,
-                "qc": _qc_summary(all_attempts, qc_declared, qc_on,
-                                  int(qc_cfg.get("max_retries", 0))),
-                "qc_base": _qc_summary(base_attempts, qc_declared, qc_on,
-                                       int(qc_cfg.get("max_retries", 0))),
-                "qc_views": {vk: _qc_summary(recs, qc_declared, qc_on,
-                                             int(qc_cfg.get("max_retries", 0)))
-                             for vk, recs in view_attempts.items()},
-            })
+                # ---------- 阶段2：多视角（逐视角质检 → 整组重生成 → 不达标阻断） ----------
+                view_paths = {"base": base_dst}
+                view_attempts = {}
+                view_gate = {}
+                view_src = {}
+                views = {}
+                vseed = None
+                for attempt in range(max_retries + 1):
+                    if attempt > 0:
+                        vseed = random.randint(1, 2 ** 31 - 1)
+                        _set_phase(f"{name} 多视角质检不达标，重新生成（第 {attempt}/{max_retries} 次）",
+                                   "regenerating")
+                    views = comfyui_client.generate_multiview(
+                        base_image_path=base_dst, asset_type=asset_type, asset_name=name,
+                        base_prompt_zh=prompt_zh, seed=vseed, style=gen_style, size=gen_size) or {}
+                    view_src = {}
+                    for vk, vp in views.items():
+                        sp = os.path.join(scratch_dir, f"{vk}_try{attempt + 1}.png")
+                        shutil.copy2(vp, sp)
+                        view_src[vk] = sp
+                    if not views:
+                        break
+                    if not qc_on:
+                        if qc_declared:
+                            # 已声明开启质检但接口不可用：明确阻断（图仅留在暂存区），不静默放行
+                            for vk in views:
+                                view_gate[vk] = {"accept": False, "blocked": True, "skipped": False,
+                                                 "label": "质检接口未就绪",
+                                                 "reason": "已开启图片质检但质检接口不可用"
+                                                           "（qc_config.json 缺 base_url / api_key / model）",
+                                                 "critical_issues": []}
+                            break
+                        for vk in views:
+                            view_gate[vk] = {"accept": True, "blocked": False, "skipped": True,
+                                             "label": "质检未开启", "reason": "图片质检未开启（跳过）",
+                                             "critical_issues": []}
+                        break
+                    round_pass = True
+                    api_error = False
+                    for vk, sp in view_src.items():
+                        _set_phase(f"{name} 多视角质检中（{vk} · 第 {attempt + 1} 次）", "checking")
+                        verdict = qc_client.check_image(sp, qc_desc + f"；视角：{vk}", qc_cfg,
+                                                        style=gen_style)
+                        app.logger.info(f"[资产质检] view {asset_type}/{name}/{vk} 第{attempt + 1}次 → "
+                                        f"{verdict.get('call_url')} model={verdict.get('model')} "
+                                        f"ok={verdict.get('ok')} passed={verdict.get('passed')} "
+                                        f"score={verdict.get('score')} style_mismatch={verdict.get('style_mismatch')} "
+                                        f"latency={verdict.get('latency_ms')}ms")
+                        view_attempts.setdefault(vk, []).append(
+                            _qc_record_verdict(project_name, "asset_image", f"{name}_{vk}",
+                                               f"资产多视角质检（{vk}）", attempt + 1, vseed, sp, verdict,
+                                               style=gen_style))
+                        gate = _qc_gate(verdict)
+                        view_gate[vk] = gate
+                        if not gate["accept"]:
+                            round_pass = False
+                            if not verdict.get("ok"):
+                                api_error = True
+                    if round_pass:
+                        break
+                    if api_error:
+                        break     # 质检接口异常，重生成无意义
 
+                blocked_views = []
+                saved_views = []
+                for vk in view_src.keys():
+                    gate = view_gate.get(vk) or {"accept": False, "blocked": True, "skipped": False,
+                                                 "label": "生成失败", "reason": "多视角图生成失败",
+                                                 "critical_issues": []}
+                    if gate["accept"] and os.path.isfile(view_src[vk]):
+                        view_dst = os.path.join(asset_dir, f"{vk}.png")
+                        shutil.copy2(view_src[vk], view_dst)
+                        view_paths[vk] = view_dst
+                        saved_views.append(vk)
+                    else:
+                        blocked_views.append({"view": vk, "label": gate["label"],
+                                              "reason": gate["reason"],
+                                              "critical_issues": gate["critical_issues"]})
+                if not saved_views and not blocked_views:
+                    blocked_views.append({"view": "-", "label": "生成失败",
+                                          "reason": "多视角图全部生成失败", "critical_issues": []})
+
+                all_attempts = list(base_attempts)
+                for recs in view_attempts.values():
+                    all_attempts.extend(recs)
+                results.append({
+                    "name": name,
+                    "success": not blocked_views,
+                    "dir": asset_dir,
+                    "views": list(view_paths.keys()),
+                    "qc_blocked": bool(blocked_views),
+                    "qc_blocked_views": blocked_views,
+                    "error": ("多视角质检阻断：" + "、".join(f"{b['view']}（{b['label']}）"
+                                                            for b in blocked_views)) if blocked_views else None,
+                    "qc": _qc_summary(all_attempts, qc_declared, qc_on,
+                                      int(qc_cfg.get("max_retries", 0))),
+                    "qc_base": _qc_summary(base_attempts, qc_declared, qc_on,
+                                           int(qc_cfg.get("max_retries", 0))),
+                    "qc_views": {vk: _qc_summary(recs, qc_declared, qc_on,
+                                                 int(qc_cfg.get("max_retries", 0)))
+                                 for vk, recs in view_attempts.items()},
+                })
+
+            except Exception as _asset_err:  # noqa: BLE001
+                # ⚠️ 审计 S11：旧代码这里没有 try —— `generate_multiview` 上传基础图失败会
+                #    raise RuntimeError，`queue_prompt` 遇 5xx/超时也会抛。任一处抛出 →
+                #    整个批次被标 failed，`results`（已成功资产的结果）全部丢弃：
+                #    20 个资产在第 7 个时来一次连接抖动，前 6 个已入库的成果用户也看不见。
+                app.logger.error("资产「%s」生成失败（已隔离，继续后续资产）：%s: %s",
+                                 name, type(_asset_err).__name__, _asset_err)
+                results.append({
+                    "name": name, "success": False,
+                    "dir": os.path.join(base_dir, project_name, name),
+                    "stage": "异常中断", "qc_blocked": False,
+                    "error": f"{type(_asset_err).__name__}: {_asset_err}",
+                })
+                with lock:
+                    generation_state[task_id].update({
+                        "current": i + 1,
+                        "progress": int((i + 1) / total * 100),
+                        "phase": f"{name} 生成异常（已跳过）",
+                    })
+                continue
         blocked_count = sum(1 for r in results if r.get("qc_blocked"))
         with lock:
             generation_state[task_id].update({
@@ -2491,8 +2512,12 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
             })
     except Exception as e:
         app.logger.error(f"资产生成失败: {e}")
+        _partial = locals().get("results") or []   # 审计 S11：已成功的部分结果不能丢
         with lock:
-            generation_state[task_id].update({"status": "failed", "error": str(e)})
+            generation_state[task_id].update({
+                "status": "failed", "error": str(e), "results": _partial,
+                "success_count": sum(1 for r in _partial if r.get("success")),
+            })
 
 
 @app.route('/api/assets/generate', methods=['POST'])
@@ -3670,17 +3695,8 @@ def api_generate_final():
         return jsonify({"error": "剧本文件不存在"}), 400
 
     try:
-        output = video_processor.generate_final_video(script_path, project_name)
-        if not output:
-            return jsonify({"error": "没有可合并的视频片段，请先完成步骤5的视频生成"}), 400
-        filename = os.path.basename(output)
-        resp = {
-            "success": True,
-            "output_path": output,                       # 保留原字段（本地绝对路径）
-            "filename": filename,
-            "url": f"/api/final/{project_name}/{filename}"   # 新增：前端可直接播放/下载的 URL
-        }
-        # 整集成片落盘 → 自动登记进「成品验收」队列（用户只需看这里）
+        # 集号与剧本一起解析：合成必须知道是第几集（审计 S4 —— 旧代码合成完才读集号，
+        # 而合成函数压根没有集号入参，于是第 2 集及以后合成的是第 1 集的片段）
         ep_no = 0
         try:
             with open(script_path, "r", encoding="utf-8") as f:
@@ -3689,6 +3705,24 @@ def api_generate_final():
                         or (_sc.get('metadata') or {}).get('episode_no') or 0)
         except Exception:  # noqa: BLE001 - 剧本读不到就退回第 1 集
             ep_no = 0
+        output = video_processor.generate_final_video(script_path, project_name, ep_no or 1)
+        if not output:
+            return jsonify({"error": f"没有可合并的视频片段（第 {ep_no or 1} 集），"
+                                     "请先完成步骤5的视频生成"}), 400
+        filename = os.path.basename(output)
+        # URL 按「相对 FINAL_DIR 的路径」拼，避免成片落在项目子目录时 404
+        try:
+            rel_path = os.path.relpath(output, FINAL_DIR).replace(os.sep, "/")
+        except ValueError:
+            rel_path = f"{project_name}/{filename}"
+        resp = {
+            "success": True,
+            "output_path": output,                       # 保留原字段（本地绝对路径）
+            "episode_no": ep_no or 1,
+            "filename": filename,
+            "url": f"/api/final/{rel_path}"              # 前端可直接播放/下载的 URL
+        }
+        # 整集成片落盘 → 自动登记进「成品验收」队列（用户只需看这里）
         reg = register_final_deliverable(
             project_name, ep_no or 1, output,
             meta={"source": "final_video", "script": os.path.basename(script_path)})
@@ -5714,78 +5748,84 @@ def _resolve_audio_qc_target(project: str, source: str = ''):
 
 @app.route('/api/qc/project-summary', methods=['GET'])
 def api_qc_project_summary():
-    """项目级 QC 聚合：列出所有镜头的质检状态，供前端总览页使用"""
-    project = _safe_project(request.args.get('project', ''))
-    if not project:
+    """项目级 QC 聚合：列出所有质检项的最新结论，供前端总览页使用
+
+    ⚠️ 审计 G3：本接口此前**恒返回空统计**（线上 149 个质检历史文件一个都统计不到），
+    根因有三处，缺一不可：
+      ① `project = _safe_project(request.args.get('project', ''))` 后面接
+         `if not project:` —— `_safe_project('')` 返回**字面量 'project'**（真值），
+         守卫恒不成立（死守卫）。漏传项目名不会报错，而是聚合到共享 `project` 命名空间。
+         判空必须看**原始入参**。
+      ② 它枚举的是 `QC_DIR` 下以 `shot_` 开头的**目录**，而真实落盘路径是
+         `QC_DIR/<项目>/<kind>_<键>.json` —— 一个都匹配不到，于是总览页永远
+         「0 通过 / 0 失败」，用户以为质检从未运行过。
+      ③ `read_history` 返回 `{"records": [...]}` 字典、记录里的字段是
+         `passed` / `time`，**没有** `verdict` / `timestamp`。旧代码把 dict 当 list 用
+         （`hist[-1]`）并按 `verdict` 判通过 —— 即使目录判对了也统计不出来。
+    """
+    raw = (request.args.get('project') or '').strip()
+    if not raw:
         return jsonify({"success": False, "error": "缺少 project 参数"}), 400
-    shots = []
-    passed = 0
-    failed = 0
-    retry_count = 0
+    project = _safe_project(raw)
+
     qc_cfg = _qc_load_cfg()
-    # 扫描所有 shot_xxx 目录
-    for entry in os.listdir(QC_DIR):
-        shot_dir = os.path.join(QC_DIR, entry)
-        if not os.path.isdir(shot_dir) or not entry.startswith('shot_'):
-            continue
-        for kind in ('image', 'video'):
-            hist_path = qc_client.history_path(QC_DIR, project, kind, entry)
-            hist = qc_client.read_history(QC_DIR, project, kind, entry)
-            if hist:
-                latest = hist[-1] if isinstance(hist, list) else hist
-                score = latest.get('score', 0) if isinstance(latest, dict) else 0
-                verdict = latest.get('verdict', 'unknown') if isinstance(latest, dict) else 'unknown'
-                ts = latest.get('timestamp', '') if isinstance(latest, dict) else ''
-                err = latest.get('error', '') if isinstance(latest, dict) else ''
-                shots.append({
-                    'shot_id': entry,
-                    'kind': kind,
-                    'score': score,
-                    'verdict': verdict,
-                    'timestamp': ts,
-                    'error': err,
-                })
-                if verdict == 'pass':
-                    passed += 1
-                elif verdict == 'fail':
-                    failed += 1
-                else:
-                    retry_count += 1
-    # 如果有历史但没有匹配到项目下的 shot，尝试按目录前缀匹配项目名
-    if not shots:
-        for entry in sorted(os.listdir(QC_DIR), reverse=True):
-            shot_dir = os.path.join(QC_DIR, entry)
-            if not os.path.isdir(shot_dir):
+    qc_dir = os.path.join(QC_DIR, project)
+    shots: list = []
+    passed = failed = retry_count = 0
+
+    if os.path.isdir(qc_dir):
+        for fn in sorted(os.listdir(qc_dir)):
+            if not fn.lower().endswith('.json'):
                 continue
-            for kind in ('image', 'video'):
-                hist_path = qc_client.history_path(QC_DIR, project, kind, entry)
-                hist = qc_client.read_history(QC_DIR, project, kind, entry)
-                if hist:
-                    latest = hist[-1] if isinstance(hist, list) else hist
-                    score = latest.get('score', 0) if isinstance(latest, dict) else 0
-                    verdict = latest.get('verdict', 'unknown') if isinstance(latest, dict) else 'unknown'
-                    ts = latest.get('timestamp', '') if isinstance(latest, dict) else ''
-                    err = latest.get('error', '') if isinstance(latest, dict) else ''
-                    shots.append({
-                        'shot_id': entry,
-                        'kind': kind,
-                        'score': score,
-                        'verdict': verdict,
-                        'timestamp': ts,
-                        'error': err,
-                    })
-                    if verdict == 'pass':
-                        passed += 1
-                    elif verdict == 'fail':
-                        failed += 1
-                    else:
-                        retry_count += 1
+            # 文件名形如 <kind>_<键>.json（image_1.json / asset_image_七转蛊仙_base.json）
+            kind, sep, shot_key = fn[:-5].partition('_')
+            if not sep or not shot_key:
+                continue
+            try:
+                with open(os.path.join(qc_dir, fn), 'r', encoding='utf-8') as f:
+                    data = json.load(f) or {}
+            except Exception as e:  # noqa: BLE001 - 单条坏文件不该拖垮总览
+                app.logger.warning("质检历史读取失败（已跳过）：%s：%s", fn, e)
+                continue
+            records = data.get('records') or []
+            latest = records[-1] if (records and isinstance(records[-1], dict)) else {}
+            # 通过与否以记录里的 `passed` 为准；接口异常（ok=False）单独归入「待重试」
+            if latest.get('passed') is True or data.get('last_passed') is True:
+                verdict = 'pass'
+            elif latest.get('ok') is False:
+                verdict = 'error'
+            elif latest.get('passed') is False or data.get('last_passed') is False:
+                verdict = 'fail'
+            else:
+                verdict = 'unknown'
+            shots.append({
+                'shot_id': shot_key,
+                'kind': kind,
+                'stage': latest.get('stage') or '',
+                'score': latest.get('score'),
+                'verdict': verdict,
+                'timestamp': latest.get('time') or data.get('updated_at') or '',
+                'attempts': int(data.get('total_attempts') or len(records) or 0),
+                'error': latest.get('error') or '',
+                'reason': latest.get('reason') or '',
+                'file': latest.get('file') or '',
+            })
+            if verdict == 'pass':
+                passed += 1
+            elif verdict == 'fail':
+                failed += 1
+            else:
+                retry_count += 1
+
     view = qc_client.public_view(qc_cfg)
     return jsonify({
         "success": True,
+        "project": project,
         "config": view,
-        "stats": {"total": passed + failed + retry_count, "passed": passed, "failed": failed, "retry_count": retry_count},
+        "stats": {"total": len(shots), "passed": passed, "failed": failed,
+                  "retry_count": retry_count},
         "history": shots,
+        "qc_dir": qc_dir,
     })
 
 

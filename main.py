@@ -27,18 +27,29 @@ def open_in_browser(url):
     threading.Timer(1, lambda: webbrowser.open(url)).start()
 
 def run_web_mode(port, host):
-    """运行Web模式"""
-    from serve import main
-    print(f"🚀 漫剧工坊启动: http://{host}:{port}")
+    """运行Web模式，返回进程退出码
+
+    ⚠️ 审计 G20：`serve.main()` 是**无参**函数 —— host/port 由环境变量 `APP_HOST` /
+    `APP_PORT` 读取（见 `app/serve.py` 的 `_safe_run`）。旧代码写 `main(port, host)`，
+    传给一个不收参数的函数两个位置参数 → 打包成 EXE / 桌面入口启动即
+    `TypeError: main() takes 0 positional arguments but 2 were given`。
+    日常都走 `run_app.bat`（`python app/serve.py`），这条入口从未被真正跑过，所以一直没暴露。
+    现在改为先把参数写进环境变量，再调用无参 `main()`。
+    """
+    import serve
+    host = str(host or "127.0.0.1")
+    os.environ["APP_HOST"] = host
+    os.environ["APP_PORT"] = str(int(port or 5000))
+    print(f"🚀 漫剧工坊启动: http://{host}:{os.environ['APP_PORT']}")
     print("按 Ctrl+C 停止服务")
-    main(port, host)
+    return serve.main()
 
 def run_desktop_mode(port):
     """运行桌面模式 - 使用内置浏览器或Electron包装"""
     url = f"http://{port}"
     print(f"🖥️  桌面模式启动: {url}")
     open_in_browser(url)
-    run_web_mode(port, '127.0.0.1')
+    return run_web_mode(port, '127.0.0.1')
 
 def main():
     args = parse_args()
@@ -49,9 +60,8 @@ def main():
     output_dir.mkdir(exist_ok=True)
     
     if args.desktop:
-        run_desktop_mode(args.port)
-    else:
-        run_web_mode(args.port, args.host)
+        return run_desktop_mode(args.port)
+    return run_web_mode(args.port, args.host)
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

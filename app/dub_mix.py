@@ -226,10 +226,27 @@ def mix_video_with_entries(video_path: str, entries: List[Dict], out_path: str,
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
     sr = int(p.get("sample_rate") or 48000)
 
-    cmd = [FFMPEG, "-y", "-v", "error", "-i", video_path, "-f", "lavfi"]
-    if vdur > 0:
-        cmd += ["-t", f"{vdur:.3f}"]
-    cmd += ["-i", f"anullsrc=r={sr}:cl=mono"]
+    # ⚠️ 静音底轨是 lavfi **无限源**：时长绝不允许「未定」。
+    #    旧写法把时长挂在输入选项 `-t` 上、且 `if vdur > 0` 才加 —— 一旦 ffprobe 取不到
+    #    视频时长（vdur == 0），`-t` 与结尾的 `-shortest` 会**双双缺席**，而 amix 用的是
+    #    `duration=first`（first 恰好就是这条无限底轨）→ ffmpeg 会一直往磁盘写，
+    #    实测曾一条命令把 C 盘写满 80GB（2026-09-19 事故）。
+    #    现在把时长写进 lavfi 滤镜参数 `d=`（权威、不依赖选项位置），并按
+    #    「视频实测时长 / 条目时间轴末端 + 1s 尾韵」取大值兜底，任何分支都有限。
+    tail_sec = 1.0
+    derived_sec = 0.0
+    for e in usable:
+        try:
+            derived_sec = max(derived_sec,
+                              float(e.get("start") or 0)
+                              + max(float(e.get("audio_dur") or 0), 0.5))
+        except (TypeError, ValueError):
+            continue
+    base_dur = max(vdur, derived_sec + tail_sec) if vdur > 0 else (derived_sec + tail_sec)
+    base_dur = max(base_dur, 1.0)
+
+    cmd = [FFMPEG, "-y", "-v", "error", "-i", video_path]
+    cmd += ["-f", "lavfi", "-i", f"anullsrc=r={sr}:cl=mono:d={base_dur:.3f}"]
     for e in usable:
         cmd += ["-i", e["audio_path"]]
 
@@ -270,8 +287,9 @@ def mix_video_with_entries(video_path: str, entries: List[Dict], out_path: str,
         cmd += ["-c:v", "copy"]
     cmd += ["-c:a", "aac", "-b:a", str(p.get("audio_bitrate") or "192k"),
             "-movflags", "+faststart"]
-    if vdur > 0:
-        cmd += ["-shortest"]
+    # 底轨已在滤镜参数里定长，`-shortest` 此时**恒安全**：成片长度 = min(底轨, 视频)。
+    # 旧代码 `if vdur > 0` 才加，等于把「写盘是否无限」交给了 ffprobe 的运气。
+    cmd += ["-shortest"]
     cmd += [out_path]
 
     started = time.time()

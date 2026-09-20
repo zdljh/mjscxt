@@ -2,6 +2,7 @@
 视频后期处理 - FlashVSR 超分辨率 + FFmpeg 合并
 """
 import os
+import re
 import subprocess
 import logging
 import shutil
@@ -14,6 +15,59 @@ from config import COMFYUI_URL, PROJECT_OUTPUT_DIR, VIDEOS_DIR, FINAL_DIR
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ===================== 集号 / 片段目录（审计 S4：与 app._ep_dir 同口径） =====================
+# 写入侧（app.py 的 _ep_dir）遵守「第 1 集平铺、第 2 集起 epNN/」；本模块原先完全不知道集号，
+# 于是 `generate_final_video` 只 listdir 平铺目录 → 多集项目合成第 2 集时会拿到第 1 集的片段。
+_SHOT_RE = re.compile(r"^shot_(\d+)")
+
+
+def _episode_no_of(script: dict, fallback=None) -> int:
+    """从剧本里取集号（metadata.episode_no > 顶层 episode_no > 兜底），最小 1"""
+    if isinstance(script, dict):
+        meta = script.get("metadata") or {}
+        for v in (meta.get("episode_no"), script.get("episode_no"), fallback):
+            try:
+                if v is None or v == "":
+                    continue
+                n = int(v)
+                if n > 0:
+                    return n
+            except (TypeError, ValueError):
+                continue
+    try:
+        return max(1, int(fallback or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _ep_videos_dir(project: str, ep: int) -> str:
+    """该集视频片段目录（第 1 集 = 平铺目录，第 2 集起 epNN/）"""
+    base = os.path.join(PROJECT_OUTPUT_DIR, "videos", project)
+    return os.path.join(base, f"ep{ep:02d}") if int(ep) > 1 else base
+
+
+def _ordered_shot_files(videos_dir: str, ep: int) -> List[str]:
+    """按**镜头号数字**顺序取逐镜片段（而非文件名字典序）。
+
+    显式排除整集成片 `*_full.mp4`（否则会把整集和它的各镜一起拼，产出内容重复的成片，
+    体积够大能骗过 100KB/2s 硬闸）；一个逐镜片段都没有时，才回退采用整集成片。
+    """
+    try:
+        names = os.listdir(videos_dir)
+    except OSError:
+        return []
+    media = [f for f in names if f.lower().endswith((".mp4", ".mov", ".mkv"))]
+    shots = sorted((f for f in media if _SHOT_RE.match(f) and not f.endswith("_full.mp4")),
+                   key=lambda f: int(_SHOT_RE.match(f).group(1)))
+    if shots:
+        return [os.path.join(videos_dir, f) for f in shots]
+    # 整集模式（video_mode=episode）磁盘上只有一支 *full*.mp4，直接采用
+    for cand in (f"ep{int(ep):02d}_full.mp4", "episode_full.mp4"):
+        if cand in media:
+            return [os.path.join(videos_dir, cand)]
+    fulls = [f for f in media if f.endswith("_full.mp4")]
+    return [os.path.join(videos_dir, fulls[0])] if fulls else []
 
 
 # ===================== 音轨工具（H3 出片音轨策略见 config：H3_EMIT_AUDIO / H3_STRIP_AUDIO） =====================
@@ -432,30 +486,44 @@ class VideoPostProcessor:
             res["output_path"] = os.path.abspath(output_path)
         return res
 
-    def generate_final_video(self, script_path: str, project_name: str) -> str:
-        """生成最终视频"""
+    def generate_final_video(self, script_path: str, project_name: str,
+                             episode_no=None) -> str:
+        """生成最终视频（**按集**合成：第 1 集平铺、第 2 集起 epNN/）
+
+        审计 S4 修复：
+        1. 旧签名没有 `episode_no`，只 `listdir` 平铺目录 —— 多集项目点「生成成片」时，
+           第 2 集及以后**完全漏掉**（拿到的是第 1 集的片段），而接口照样返回 success:true
+           并把它登记进「成品验收」队列。现在集号取「入参 > 剧本 episode_no > 1」，
+           目录口径与写入侧 `app._ep_dir` 一致；
+        2. 文件名带上集号（`epNN_final.mp4`），与 `pipeline.final_path` / 集进度推导
+           （`app.py` 的 `ep{ep:02d}_final.mp4`）统一 —— 此前手合成的成片叫 `<项目>.mp4`，
+           托管侧的 `probe_final` 永远看不见；
+        3. 只取逐镜 `shot_NN.*` 且按镜头号数字排序（排除 `*_full.mp4`，避免整集与各镜
+           一起拼出内容重复的成片）；
+        4. `concat_videos` 失败会返回 `""`，旧代码**忽略返回值**照样返回一个不存在的路径
+           → 这里把失败上抛为 `""`。
+        """
         with open(script_path, 'r', encoding='utf-8') as f:
             script = json.load(f)
 
-        videos_dir = os.path.join(PROJECT_OUTPUT_DIR, "videos", project_name)
+        ep = _episode_no_of(script, episode_no)
+        videos_dir = _ep_videos_dir(project_name, ep)
         final_dir = os.path.join(PROJECT_OUTPUT_DIR, "final", project_name)
         os.makedirs(videos_dir, exist_ok=True)
         os.makedirs(final_dir, exist_ok=True)
 
-        # 获取所有视频片段
-        video_files = sorted([
-            os.path.join(videos_dir, f)
-            for f in os.listdir(videos_dir)
-            if f.endswith('.mp4')
-        ])
-
+        # 获取该集的视频片段（按镜头号排序；无逐镜片段时回退整集成片）
+        video_files = _ordered_shot_files(videos_dir, ep)
         if not video_files:
-            logger.warning("没有找到视频片段")
+            logger.warning(f"没有找到第 {ep} 集的视频片段：{videos_dir}")
             return ""
 
         # 合并视频
-        output_path = os.path.join(final_dir, f"{project_name}.mp4")
-        self.concat_videos(video_files, output_path)
+        output_path = os.path.join(final_dir, f"ep{ep:02d}_final.mp4")
+        if not self.concat_videos(video_files, output_path):
+            # ⚠️ 必须判返回值：否则拼失败时对外抛出一个**不存在**的 URL，还被登记成交付物
+            logger.error(f"第 {ep} 集成片拼接失败（未产出有效文件）：{output_path}")
+            return ""
 
         # 添加字幕（dialogue 兼容结构化 [{speaker,text}] 与旧字符串）
         from dialogue_utils import dialogue_text
@@ -474,9 +542,9 @@ class VideoPostProcessor:
 
         if subtitles:
             self.add_subtitles(output_path, subtitles,
-                             os.path.join(final_dir, f"{project_name}_subtitles.mp4"))
+                             os.path.join(final_dir, f"ep{ep:02d}_final_subtitles.mp4"))
 
-        logger.info(f"最终视频: {output_path}")
+        logger.info(f"第 {ep} 集最终视频: {output_path}")
         return output_path
 
     def get_output_status(self, project_name: str) -> Dict:

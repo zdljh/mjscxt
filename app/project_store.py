@@ -20,10 +20,13 @@
 """
 from __future__ import annotations
 
+import functools
 import json
+import logging
 import os
 import re
 import shutil
+import threading
 import time
 from datetime import datetime
 
@@ -40,6 +43,33 @@ INDEX_VERSION = 1
 KEY_MAX_LEN = 50
 
 ASSET_KINDS = ("characters", "items", "scenes")
+
+logger = logging.getLogger(__name__)
+
+
+# =====================================================================
+# 并发保护（审计 S8）
+# ---------------------------------------------------------------------
+# 本模块所有 CRUD 都是「load_index → 改内存 → save_index」的读改写，此前**零锁**
+# （grep `Lock|RLock` 命中 0）。两个并发请求（例：新建项目 + 绑定剧本）各自读到同一份
+# 旧快照，后写覆盖先写 —— 新建的项目凭空消失、episode_count 回退。
+# 另外 `_write_json` 曾用**固定**的 `.tmp` 名：A 写了一半、B 以 "w" 截断重写，A 再
+# `os.replace` → 发布出去的是**交错/截断的 JSON**；而 `load_index` 解析失败后
+# **静默返回空索引** → 用户所有项目从列表里消失（数据仍在磁盘，界面却看不到，
+# `get_project` 也找不到，托管 `enabled_projects()` 直接为空）。
+# 用 RLock：`save_index` / `load_index` 自身也加锁，靠可重入避免同线程自锁。
+# =====================================================================
+
+_INDEX_LOCK = threading.RLock()
+
+
+def _locked(fn):
+    """把整个「读改写」放回同一把可重入锁的临界区里（函数级装饰，签名/文档不变）"""
+    @functools.wraps(fn)
+    def _wrapper(*args, **kwargs):
+        with _INDEX_LOCK:
+            return fn(*args, **kwargs)
+    return _wrapper
 
 
 # =====================================================================
@@ -82,19 +112,61 @@ def paths(key: str) -> dict:
 
 
 def _read_json(path: str, default):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return default
+    """读 JSON：对 Windows 的**瞬时共享冲突**做退避重试。
+
+    ⚠️ 与 `_atomic_replace` 配对：Windows 上 `os.replace` 换目录项的那一瞬间，
+    另一个线程 `open()` 同一路径会抛 `PermissionError`。旧实现把 OSError 一律
+    当「读失败」→ 返回默认值（空索引）→ 用户看到「所有项目突然消失」，刷新又回来。
+    这不是文件坏了，是暂时拿不到；退避重试后仍失败才降到默认值。
+    """
+    for i in range(6):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except PermissionError:
+            time.sleep(0.02 * (i + 1))
+        except (OSError, ValueError):
+            return default
+    logger.warning("读取 %s 反复被占用（已重试 6 次），按未配置处理", os.path.basename(path))
+    return default
+
+
+def _atomic_replace(tmp: str, path: str) -> None:
+    """`os.replace` + Windows 共享冲突退避重试。
+
+    ⚠️ Windows 上若目标文件正被另一个线程/进程打开读取（例如 `load_index` 刚读完、
+    句柄尚未释放），`os.replace` 会抛 `PermissionError: [WinError 5] 拒绝访问`。
+    这属于「暂时拿不到」而不是「文件坏了」：直接失败会让新建项目/保存设置偶发 500
+    （实测并发读写时必现）。退避重试即可。
+    """
+    last = None
+    for i in range(8):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as e:        # WinError 5 / 32：目标被占用
+            last = e
+            time.sleep(0.02 * (i + 1))
+    raise last
 
 
 def _write_json(path: str, data) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    # ⚠️ 临时名必须**每次唯一**：固定 `.tmp` 会被并发写者互相截断（见文件头并发注释）
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.{os.urandom(3).hex()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())        # 先落盘再 replace，避免断电后只剩空文件
+        _atomic_replace(tmp, path)      # 同分区 replace 原子 + Windows 占用重试
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)          # 失败不留垃圾临时文件
+        except OSError:
+            pass
+        raise
 
 
 def new_project_id() -> str:
@@ -105,6 +177,7 @@ def new_project_id() -> str:
 # 注册表读写
 # =====================================================================
 
+@_locked
 def load_index() -> dict:
     data = _read_json(PROJECT_INDEX_PATH, None)
     if not isinstance(data, dict):
@@ -116,6 +189,7 @@ def load_index() -> dict:
     return data
 
 
+@_locked
 def save_index(index: dict) -> dict:
     index["version"] = INDEX_VERSION
     index["updated_at"] = now_str()
@@ -145,6 +219,7 @@ def get_project(ref: str) -> dict | None:
     return None
 
 
+@_locked
 def ensure_project_for_novel(novel_id: str, novel_name: str = "",
                              config: dict = None) -> dict:
     """小说 → 项目 一一对应：已有则复用，没有则按小说名新建独立项目。
@@ -174,6 +249,7 @@ def find_by_novel(novel_id: str) -> dict | None:
 # 项目 CRUD
 # =====================================================================
 
+@_locked
 def create_project(name: str, novel_id: str = "", novel_name: str = "",
                    config: dict = None, key: str = None, pid: str = None,
                    note: str = "") -> dict:
@@ -221,6 +297,7 @@ def create_project(name: str, novel_id: str = "", novel_name: str = "",
     return rec
 
 
+@_locked
 def update_project(ref: str, **fields) -> dict | None:
     index = load_index()
     for rec in index.get("projects", []):
@@ -257,6 +334,7 @@ def read_config(ref: str) -> dict:
     return merged
 
 
+@_locked
 def update_config(ref: str, patch: dict) -> dict:
     rec = get_project(ref)
     if not rec:
@@ -350,6 +428,7 @@ def _match_project_entries(root: str, names: list) -> list:
     return hit
 
 
+@_locked
 def delete_project(ref: str, confirm: bool = False) -> dict:
     """删除项目 = 移入回收站（output/projects/_trash/…），非物理删除，可手工还原。
 
@@ -443,6 +522,7 @@ def script_stats(script_path: str) -> dict:
     }
 
 
+@_locked
 def bind_script(ref: str, script_path: str, stats: dict = None) -> dict | None:
     """把剧本归属到项目：登记 script_path / 分集清单 / 镜头数与总时长（不移动文件）"""
     rec = get_project(ref)
@@ -680,6 +760,7 @@ def _strip_ts(name: str) -> str:
     return re.sub(r"_\d{8}_\d{6}$", "", stem)
 
 
+@_locked
 def migrate_legacy(force: bool = False) -> dict:
     """扫描磁盘上的历史产物/剧本/配置，为尚未登记的数据补齐项目归属（不搬动任何文件）。"""
     index = load_index()

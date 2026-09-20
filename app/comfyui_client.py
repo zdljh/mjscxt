@@ -22,6 +22,7 @@ import json
 import time
 import copy
 import shutil
+import random
 import logging
 import threading
 import requests
@@ -91,6 +92,37 @@ VIRTUAL_NODE_TYPES = {
 }
 # 正向提示词判定：出现这些词视为负向提示词
 NEGATIVE_HINTS = ("模糊", "水印", "blurry", "watermark", "low quality", "worst quality", "低质量", "噪点")
+
+# ⚠️ 「关键词命中」不足以判定负向槽位：正向提示词**主动**写「画面中不得出现任何文字、
+#    字幕、水印、logo」这类否定式约束是常态（见 build_storyboard_prompt 的收尾段），
+#    其中的「水印」二字是正向语义。若按裸关键词把它判成负向槽位，后果有两个方向：
+#      ① _harden_no_watermark 会把 NO_WATERMARK_NEGATIVE_EXTRA（一整串裸负面词）追加到
+#         **正向**提示词里 → 模型反而把「水印/logo/文字/AI生成」当正向内容画出来；
+#      ② clean_conflict_negative_tokens 会在**正向**提示词里删掉 CONFLICT_NEGATIVE_TOKENS。
+#    实测（2026-09-20 同一进程日志）：「负向追加水印排除词」489 次 vs「正向追加无水印声明」
+#    143 次 = 77% 的槽位被误判；同期分镜质检反复报「画面出现金色文字」。
+#    判据：命中 NEGATIVE_HINTS，**且不是**否定式正向前缀。
+_NEG_CONSTRAINT_RE = re.compile(
+    r"(不得|严禁|禁止|不要|避免|杜绝|切勿|不含|不包含|没有|无)"
+    r"[^，。；;、]{0,16}"
+    r"(水印|文字|字幕|logo|标识|签名|日期戳|模糊|噪点|low quality|blurry|watermark)",
+    re.IGNORECASE,
+)
+
+
+def _is_negative_slot(value: str) -> bool:
+    """该提示词槽位是否为「负向槽位」（本模块 4 处提示词节点判定共用同一判据）。
+
+    ⚠️ 不要退回成裸关键词命中 —— 那会把正向的「不得出现…水印」判成负向槽位
+    （实测导致 77% 的正向提示词被追加裸负面词）。
+    """
+    if not value:
+        return False
+    if _NEG_CONSTRAINT_RE.search(value):
+        return False        # 「不得出现 X」= 正向约束，不是负向槽位
+    low = value.lower()
+    return any(h.lower() in low for h in NEGATIVE_HINTS)
+
 
 # C 项⑧：图片链路**彻底无水印**（不修改 ComfyUI 工作流文件，仅在本模块提交前对内存中的
 # API prompt 做强化）：
@@ -764,9 +796,8 @@ class ComfyUIClient:
                 value = inputs.get(field)
                 if not isinstance(value, str) or not value.strip():
                     continue
-                low = value.lower()
-                if not any(h.lower() in low for h in NEGATIVE_HINTS):
-                    continue    # 正向槽位不动
+                if not _is_negative_slot(value):
+                    continue    # 正向槽位不动（含「不得出现…水印」这类否定式正向约束）
                 new = value
                 removed: List[str] = []
                 for tok in CONFLICT_NEGATIVE_SORTED:
@@ -837,8 +868,7 @@ class ComfyUIClient:
                 # 幂等：已加固过的槽位直接跳过（否则正向后缀里的"水印"二字会被误判为负向）
                 if NO_WATERMARK_POSITIVE_SUFFIX in value or NO_WATERMARK_NEGATIVE_EXTRA in value:
                     continue
-                low = value.lower()
-                is_negative = any(h.lower() in low for h in NEGATIVE_HINTS)
+                is_negative = _is_negative_slot(value)
                 if is_negative:
                     if NO_WATERMARK_NEGATIVE_EXTRA in value:
                         continue
@@ -890,8 +920,8 @@ class ComfyUIClient:
             if node.get("class_type") not in class_types:
                 continue
             texts = [str(v) for v in (node.get("inputs") or {}).values() if isinstance(v, str)]
-            joined = " ".join(texts).lower()
-            if not any(h.lower() in joined for h in NEGATIVE_HINTS):
+            joined = " ".join(texts)
+            if not _is_negative_slot(joined):
                 candidates.append(nid)
         if not candidates:
             # 全部命中负向词时，退化为「id 最大的那个」
@@ -908,8 +938,8 @@ class ComfyUIClient:
             if node.get("class_type") not in class_types:
                 continue
             texts = [str(v) for v in (node.get("inputs") or {}).values() if isinstance(v, str)]
-            joined = " ".join(texts).lower()
-            if any(h.lower() in joined for h in NEGATIVE_HINTS):
+            joined = " ".join(texts)
+            if _is_negative_slot(joined):
                 hits.append(nid)
         if not hits:
             return None
@@ -1688,8 +1718,13 @@ class ComfyUIClient:
         for attempt in range(max_retries + 1):
             attempts_used = attempt + 1
             if attempt > 0:
-                cur_seed = None   # 重试换随机种子，避免重复失败结果
-                logger.info(f"[H3-episode] 第 {attempt + 1} 次整片重试（随机种子）")
+                # ⚠️ 必须是真随机数，不能写 None：_inject_seed 对 None 直接 `return []`
+                #    （= 不注入），于是沿用工作流 JSON 里的**字面量 seed**；而前端的
+                #    `control_after_generate: randomize` 属于 widgets_values，API 模式不提交。
+                #    实测（2026-09-20）：这让三次"重试"提交完全相同的 prompt+参考图+seed，
+                #    产物逐字节相同 —— 22~44 段 H3 一次跑几十分钟，属纯白烧 GPU。
+                cur_seed = random.randint(1, 2 ** 31 - 1)
+                logger.info(f"[H3-episode] 第 {attempt + 1} 次整片重试（换种子 {cur_seed}）")
 
             # ---------- 生成（N 段一个工作流 → 单个连续成片） ----------
             result = None
