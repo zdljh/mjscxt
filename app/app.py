@@ -1243,7 +1243,21 @@ def _collect_asset_refs(project: str) -> tuple:
     前端一旦传了结构不完整的对象（例如直接传剧本里的 characters，只有
     reference_prompt_zh 而没有 front/base 键），参考图会静默丢失、
     视频退化成无角色锚点——这类静默降级比报错更难发现。
+
+    S6 修复：判据与 pipeline.probe_assets 对齐 ——
+      1) 扩展名白名单 (".png", ".jpg", ".jpeg", ".webp")，不再只认 4 个固定文件名；
+      2) 同一目录下取第一张非空图片（兼容 ComfyUI 直接输出 base_123.png 等非标名）；
+      3) 找不到任何图片 → 返回空 dict，**绝不静默 take-first**（由调用方决策报错/跳过）。
     """
+    _ASSET_IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+
+    def _first_nonempty_image(d: str) -> str:
+        for fn in sorted(os.listdir(d)):
+            p = os.path.join(d, fn)
+            if fn.lower().endswith(_ASSET_IMG_EXTS) and os.path.isfile(p) and os.path.getsize(p) > 0:
+                return p
+        return ""
+
     def _scan(root: str) -> list:
         out = []
         base = os.path.join(root, _safe_project(project))
@@ -1253,12 +1267,15 @@ def _collect_asset_refs(project: str) -> tuple:
             d = os.path.join(base, name)
             if not os.path.isdir(d):
                 continue
+            # S6 候选顺序：front/base 固定名优先，否则取目录内第一张非空图片
             ref = ""
             for cand in ("front.png", "base.png", "front.jpg", "base.jpg"):
                 p = os.path.join(d, cand)
                 if os.path.isfile(p):
                     ref = p
                     break
+            if not ref:
+                ref = _first_nonempty_image(d)
             if ref:
                 out.append({"name": name, "front": ref, "base": ref})
         return out
@@ -1433,7 +1450,9 @@ def api_keyframes_generate():
                 only_missing=only_missing, progress_cb=_progress,
                 chain_mode=chain_mode, verify_cb=_kf_verify,
                 max_verify_retries=_kf_vretries, preflight_cb=_kf_pre,
-                client=comfyui_client)  # S-04：注入全局 ComfyUIClient 实例（复用连接/共享状态）
+                client=comfyui_client,  # S-04：注入全局 ComfyUIClient 实例（复用连接/共享状态）
+                qc_stop_cb=_qc_retry_hopeless,  # G1：尾帧连续两次缺陷相同 → 止损
+            )
             ok = int(report.get("succeeded") or 0)
             with lock:
                 generation_state[task_id].update({
@@ -1702,9 +1721,15 @@ def api_storyboard_retry_shot():
     item_idx = _build_asset_index(script.get("items") or [], project, "item")
     scene_idx = _build_asset_index(script.get("scenes") or [], project, "scene")
     refs = _allocate_storyboard_refs(shot, char_idx, item_idx, scene_idx, project)
+    # S6 修复：参考图匹配失败时，不再静默取首角色（旧行为会把"不存在的角色"当主角色），
+    # 而是明确 400 + 具体错误。
+    if not refs and shot.get("_no_reference"):
+        return jsonify({"success": False, "no_reference": True,
+                        "error": shot.get("_ref_error") or "该镜头角色在资产索引中无匹配",
+                        "hint": "请检查剧本 characters_in_shot 与资产目录名是否一致"}), 400
     if not refs:
         return jsonify({"success": False,
-                        "error": "该镜头无可用参考图（请先完成步骤2/3/4的资产生成）"}), 400
+                       "error": "该镜头无可用参考图（请先完成步骤2/3/4的资产生成）"}), 400
     labels = [r[1] for r in refs]
     # 风格：剧本自带 style（用户与总控敲定）优先，缺失时退回项目 plan 的 style
     _rs_style = style_kit.normalize_style(script.get("style")) or style_kit.normalize_style(
@@ -2360,6 +2385,15 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                         break     # 质检接口异常，重生成无意义
                     # ★ 立刻沉淀：让同一次循环的下一次重试就能召回这条缺陷
                     _record_qc_lesson(project_name, "asset", orig_asset_prompt, base_attempts[-1])
+                    # ★ G1 止损：连续两次基础图缺陷完全相同 → 继续重试只是重复烧 GPU，提前停
+                    _hopeless, _hopeless_detail = _qc_retry_hopeless(base_attempts)
+                    if _hopeless:
+                        base_attempts[-1]["retry_stopped"] = True
+                        base_attempts[-1]["retry_stopped_features"] = _hopeless_detail
+                        app.logger.warning(
+                            f"资产基础图重试止损（{name}）：连续 {len(base_attempts)} 次缺陷完全相同，"
+                            f"提前停止重试。缺陷：{_hopeless_detail}；建议改写该资产提示词后重跑")
+                        break
                 if not base_ok:
                     # 把「基础图哪里不对」沉淀进教训库（供下次重生成时改写提示词）
                     if base_attempts and isinstance(base_attempts[-1], dict):
@@ -2442,6 +2476,22 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                         break
                     if api_error:
                         break     # 质检接口异常，重生成无意义
+                    # ★ G1 止损：逐视角检查连续两次缺陷是否完全相同，命中则停止该视角重试
+                    _per_view_hopeless = [vk for vk in view_src.keys()
+                                          if _qc_retry_hopeless(
+                                              view_attempts.get(vk, []))[0]]
+                    if _per_view_hopeless:
+                        for vk in _per_view_hopeless:
+                            _hk = view_attempts.get(vk, [])
+                            if _hk and isinstance(_hk[-1], dict):
+                                _hk[-1]["retry_stopped"] = True
+                                _hk[-1]["retry_stopped_features"] = _qc_retry_hopeless(
+                                    _hk)[1]
+                        app.logger.warning(
+                            f"资产多视角重试止损（{name}）：视角 {len(_per_view_hopeless)}/{len(view_src.keys())} "
+                            f"（{ '、'.join(_per_view_hopeless) }）连续 {max_retries + 1} 次缺陷完全相同，"
+                            f"提前停止该视角重试；整组不再重生成")
+                        break
 
                 blocked_views = []
                 saved_views = []
@@ -2609,22 +2659,74 @@ def _build_asset_index(assets: list, project_name: str, kind: str) -> dict:
     return index
 
 
+def _normalize_char_alias(name) -> str:
+    """归一化角色名别名（S6）：剥离 _主角/_角色/_主/_人 后缀、去空白与《》。
+
+    与 pipeline.probe_assets 的资产目录扫描口径对齐：资产目录名可能是
+    "青玉_主角" 而剧本里写 "青玉"，或反之。这里只做「后缀剥离 + 去符号」，
+    **不做模糊匹配**（避免把"阿青"误归到"青玉"）。
+    """
+    s = str(name or "").strip()
+    s = s.replace("《", "").replace("》", "").replace(" ", "")
+    for suf in ("_主角", "_角色", "_主", "_人"):
+        if s.endswith(suf) and len(s) > len(suf):
+            s = s[: -len(suf)]
+            break
+    return s
+
+
+def _match_shot_chars(shot: dict, char_idx: dict) -> list:
+    """S6 修复：按镜头 characters_in_shot 匹配 char_idx，**禁止静默 take-first**。
+
+    返回匹配到的角色名列表（保持 shot 原顺序）；镜头一个角色都匹配不到 → 返回 []，
+    由调用方设 shot['_no_reference']=True / shot['_ref_error']=... 决定 400 / 跳过。
+    """
+    chars_in = [n for n in (shot.get("characters_in_shot") or []) if n]
+    if not chars_in:
+        return []
+    alias_map = {k: _normalize_char_alias(k) for k in char_idx.keys()}
+    alias_rev = {}
+    for k, v in alias_map.items():
+        if v and v not in alias_rev:
+            alias_rev[v] = k
+    matched: list = []
+    for cname in chars_in:
+        if cname in char_idx:
+            matched.append(cname)
+            continue
+        norm = _normalize_char_alias(cname)
+        hit = alias_rev.get(norm)
+        if hit:
+            matched.append(hit)
+    # 去重保序
+    seen = set(); out = []
+    for m in matched:
+        if m not in seen:
+            seen.add(m); out.append(m)
+    return out
+
+
 def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_idx: dict,
                                project_name: str = None) -> list:
     """为单个镜头分配最多 3 张参考图（对应 分镜生成.json 的 image1/image2/image3）
 
     槽位语义（按重要性排序）：
-      1) 主角色正视图 —— 人物外观锚点（必须有，否则该镜头直接跳过）
+      1) 主角色正视图 —— 人物外观锚点（S6：匹配不到任何角色时不再 take-first，
+         而是让调用方走 no_reference 分支 → 400 / 跳过 + 警告日志）
       2) 次要角色正视图，缺则用镜头内物品正视图（物品/道具锚点）
       3) 镜头场景正视图（环境氛围锚点）
     """
-    chars_in = [n for n in (shot.get("characters_in_shot") or []) if n in char_idx]
-    if not chars_in:
-        chars_in = [n for n in char_idx.keys()][:1]
+    chars_in = _match_shot_chars(shot, char_idx)
     items_in = [n for n in (shot.get("items_in_shot") or []) if n in item_idx]
 
     refs = []
-
+    if not chars_in:
+        # S6：禁止静默 take-first —— 镜头一个角色都匹配不到时，标记 no_reference，
+        # 由调用方决定 400（单镜）/ 跳过 + 警告日志（批量）。
+        shot["_no_reference"] = True
+        shot["_ref_error"] = (
+            f"镜头 {shot.get('shot_id')} 的角色 {shot.get('characters_in_shot')} "
+            f"在资产索引中均无匹配（别名归一化后仍无）")
     main_name = chars_in[0] if chars_in else None
     main_img = char_idx.get(main_name, {}).get("image") if main_name else None
     if main_img:
@@ -2646,7 +2748,7 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
         refs.append(("次要参考", second_label, second_img))
 
     loc = shot.get("location")
-    scene_name = loc if loc in scene_idx else (list(scene_idx.keys())[0] if scene_idx else None)
+    scene_name = loc if loc in scene_idx else None
     scene_img = scene_idx.get(scene_name, {}).get("image") if scene_name else None
     if scene_img:
         used = {r[2] for r in refs}
@@ -2805,7 +2907,17 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             try:
                 refs = _allocate_storyboard_refs(shot, char_idx, item_idx, scene_idx, project_name)
                 if not refs:
-                    item["error"] = "该镜头无可用参考图（请先完成步骤2/3/4的资产生成）"
+                    # S6：区分"无参考图"与"角色匹配失败"（_no_reference）
+                    if shot.get("_no_reference"):
+                        item["no_reference"] = True
+                        item["ref_error"] = shot.get("_ref_error") or ""
+                        item["error"] = f"角色匹配失败（禁止静默兜底）：{item['ref_error']}"
+                        app.logger.warning(
+                            f"[S6] 分镜 shot {shot_id} 角色匹配失败"
+                            f"（characters_in_shot={shot.get('characters_in_shot')}），"
+                            f"跳过该镜参考图分配：{item['ref_error']}")
+                    else:
+                        item["error"] = "该镜头无可用参考图（请先完成步骤2/3/4的资产生成）"
                 else:
                     labels = [r[1] for r in refs]
                     prompt = comfyui_client.build_storyboard_prompt(shot, labels)
@@ -2828,6 +2940,10 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                             f"提示词预检未通过（{_pgate_item.get('label')}）："
                             f"{_pgate_item.get('reason')}" +
                             (f"；建议：{_pf_item.get('rebuild_hint')}" if _pf_item.get("rebuild_hint") else ""))
+                    # ★ G10：捕获自愈后提示词作为重试基准。
+                    #   旧 bug：重试召回教训库以 orig_prompt（自愈前）为键，导致重试
+                    #   回落到未自愈提示词，自愈修复被静默丢弃。
+                    self_healed_prompt = prompt
 
                     # ---------- 图片 AI 质检（不达标自动重生成） ----------
                     qc_cfg = _qc_load_cfg()
@@ -2841,31 +2957,34 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     for attempt in range(max_retries + 1):
                         if attempt > 0:
                             seed = random.randint(1, 2 ** 31 - 1)
-                            # 从教训库召回「上一轮质检到底哪里不对」，据此改写提示词再生成
-                            # ⚠️ 基准永远是 orig_prompt：若在已叠加建议的 prompt 上再叠，
-                            #    「【历史质检修正建议】」会一轮轮累积成一大坨
+                            # G10：基准改为 self_healed_prompt（自愈后提示词）。
+                            # 旧 bug：基准是 orig_prompt（自愈前），重试会回落到未自愈提示词，
+                            # 导致首次自愈对后续重试不再生效。
+                            # 教训库召回也改用 self_healed_prompt 作键：
+                            # 自愈改变了提示词 → 指纹也变了，用旧指纹的教训与自愈后提示词不匹配。
+                            _retry_base = self_healed_prompt
                             try:
                                 hints = prompt_memory.suggest(
                                     kind="storyboard",
-                                    prompt=orig_prompt,
+                                    prompt=_retry_base,
                                     project=project_name,
                                     root_dir=PROJECT_OUTPUT_DIR
                                 )
                                 learned = prompt_memory.learned_prompt(
                                     kind="storyboard",
-                                    prompt=orig_prompt,
+                                    prompt=_retry_base,
                                     project=project_name,
                                     root_dir=PROJECT_OUTPUT_DIR,
                                     style=_qc_style_of(project_name),
                                 )
-                                if learned and learned != orig_prompt:
+                                if learned and learned != _retry_base:
                                     prompt = learned
                                     item["prompt"] = prompt
                                     item["prompt_hints"] = hints[:3]
                                     app.logger.info("镜头 %s 第 %d 次重试，按质检教训改写提示词：%s",
                                                     shot_id, attempt + 1, hints[:2])
                                 else:
-                                    prompt = orig_prompt
+                                    prompt = _retry_base
                                     item["prompt"] = prompt
                                     app.logger.info("镜头 %s 第 %d 次重试，暂无可用教训，仅换种子",
                                                     shot_id, attempt + 1)
@@ -3366,7 +3485,9 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                                       f"episode_full_{os.path.basename(video_path)}")
                 verdict = qc_client.check_video(video_path, _episode_qc_desc(shots), cfg,
                                                frames_dir=fr_dir,
-                                               style=style)
+                                               style=style,
+                                               expected_duration=sum(
+                                                   float(s.get("duration") or 0.0) for s in shots))
                 gate = _qc_gate(verdict)
                 passed = bool(gate.get("accept", False))
                 if not passed and verdict.get("ok"):
@@ -3400,6 +3521,7 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                 qc_cfg=qc_cfg,
                 qc_style=eff_style,
                 max_retries=max_retries,
+                qc_stop_cb=_qc_retry_hopeless if qc_on else None,
             )
             files = result.get("files") or []
             episode_failed = bool(result.get("failed"))
@@ -3580,7 +3702,9 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                                               f"shot_{seq:02d}_try{attempt + 1}")
                     verdict = qc_client.check_video(v_scratch, _qc_shot_desc(shot), qc_cfg,
                                                     frames_dir=frames_dir,
-                                                    style=(shot.get("style") or _style_res.get("style")))
+                                                    style=(shot.get("style") or _style_res.get("style")),
+                                                    expected_duration=float(
+                                                        shot.get("duration") or 0.0))
                     rec = _qc_record_verdict(
                         project_name, "video", shot_id, "视频质检",
                         attempt + 1, seed, v_scratch, verdict,
@@ -4885,16 +5009,17 @@ def _prompt_preflight(kind: str, prompt: str, *, ctx=None, style: str = "",
 def _qc_repeat_features(rec: dict) -> frozenset:
     """取一条质检记录的「缺陷特征集合」，用于判断连续两次重试是否毫无变化。
 
-    只收稳定的**文本**特征（issues / critical_issues / style_issues）：
+    G1 修复：委托给 qc_client.qc_retry_features（共享叶子模块），app 侧再叠加
+    style_issues 维度（app 特有的风格缺陷，不进入通用模块）。
     seed 与 score 每次都会变（换了种子必然抖动），不能当特征，否则永远判不出「没变化」。
     """
-    feats = []
-    for key in ("issues", "critical_issues", "style_issues"):
-        for item in (rec.get(key) or []):
-            text = str(item).strip()
-            if text:
-                feats.append(text)
-    return frozenset(feats)
+    base = qc_client.qc_retry_features(rec)
+    extra = set()
+    for item in (rec.get("style_issues") or []):
+        text = str(item).strip()
+        if text:
+            extra.add(text[:200])
+    return frozenset(base | extra)
 
 
 def _qc_retry_hopeless(attempts: list, streak: int = 2) -> tuple:
@@ -4903,19 +5028,27 @@ def _qc_retry_hopeless(attempts: list, streak: int = 2) -> tuple:
 
     返回 ``(True, "缺陷摘要")`` 或 ``(False, "")``。
 
+    G1 修复：把本函数抽到 qc_client.qc_retry_hopeless（共享叶子模块），
+    供 comfyui_client / keyframe 以注入回调（qc_stop_cb）方式复用，
+    规避 app ↔ comfyui_client 的循环依赖。app 侧把 style_issues 合并进
+    issues 再委托 —— 通用模块不认识 app 特有字段。
+
     ⚠️ 刻意保守（宁可多试一次，也不要误停）：
       · 特征为**空**时一律不判定 —— 质检没给出可用信息 ≠ 缺陷相同；
       · 必须最近 streak 条**逐条集合相等**（多一条少一条都不算）；
       · **不改变闸门结论**：该镜仍算未通过、仍不进正式目录，只是不再继续重试；
         用户可直接改这一镜的剧本字段（如 camera / description）后单独重跑该镜。
     """
-    recs = [r for r in (attempts or []) if isinstance(r, dict)]
-    if len(recs) < streak:
-        return False, ""
-    feats = [_qc_repeat_features(r) for r in recs[-streak:]]
-    if not feats[0] or any(f != feats[0] for f in feats):
-        return False, ""
-    return True, "；".join(sorted(feats[0]))[:200]
+    merged = []
+    for r in (attempts or []):
+        if not isinstance(r, dict):
+            continue
+        issues = list(r.get("issues") or [])
+        style = list(r.get("style_issues") or [])
+        if style:
+            issues = issues + style
+        merged.append({"issues": issues, "critical_issues": r.get("critical_issues") or []})
+    return qc_client.qc_retry_hopeless(merged, streak)
 
 
 def _qc_gate(verdict: dict) -> dict:

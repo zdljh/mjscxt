@@ -1730,6 +1730,7 @@ class ComfyUIClient:
         qc_cfg: dict = None,
         qc_style: str = "",
         max_retries: int = 2,
+        qc_stop_cb=None,
     ) -> dict:
         """H3 整集视频生成（N 段一个工作流，原生 H3ContinuousSeamlessJoinV14 衔接）
         + 整片 QC 门控。
@@ -1742,6 +1743,8 @@ class ComfyUIClient:
         - segments: 同 generate_h3_sequence
         - qc_fn: 可选；qc_fn(video_path, shot_desc, qc_cfg, style) 返回
           {"passed": bool, "verdict": {...}, ...}；通过才保留成片，不通过则整片重试
+        - qc_stop_cb: 可选；G1 止损回调 qc_stop_cb(qc_results) -> (stop, detail)。
+          连续两次缺陷完全相同时提前停止整片重试，避免白烧 GPU（最贵的一处）。
         - max_retries: 整片 QC 不通过时最多重试次数（换随机种子）
         返回 dict：
           {"files": [video_path], "segments": [...], "qc_results": [...],
@@ -1812,17 +1815,30 @@ class ComfyUIClient:
                                        "reason": f"QC 异常: {qc_err}"})
                     continue
                 qc_passed = qc_result.get("passed", False)
+                _v = qc_result.get("verdict") or {}
                 qc_results.append({
                     "attempt": attempt + 1, "passed": qc_passed,
-                    "reason": (qc_result.get("verdict") or {}).get("reason") or "",
+                    "reason": _v.get("reason") or "",
+                    "critical_issues": _v.get("critical_issues") or [],
+                    "issues": _v.get("issues") or [],
                     "file": best_file,
                 })
                 if qc_passed:
                     logger.info(f"[H3-episode] 第 {attempt + 1} 次整片 QC 通过")
                     passed = True
                     break
+                # G1 止损铺开：整片重试最贵，连续两次缺陷一字不差 → 提前停（换 seed 只是换骰子）
+                if qc_stop_cb is not None:
+                    _ep_stop, _ep_detail = qc_stop_cb(qc_results)
+                    if _ep_stop:
+                        logger.warning(
+                            f"[H3-episode] 整片重试止损：连续 {len(qc_results)} 次缺陷完全相同"
+                            f"（{_ep_detail}），提前停止；建议改段提示词/剧本后单独重跑")
+                        qc_results[-1]["retry_stopped"] = True
+                        qc_results[-1]["retry_stopped_features"] = _ep_detail
+                        break
                 logger.warning(f"[H3-episode] 第 {attempt + 1} 次整片 QC 不通过"
-                               f"（reason={(qc_result.get('verdict') or {}).get('reason') or '-'}），"
+                               f"（reason={(_v.get('reason') or '-')})，"
                                f"{'重试' if attempt < max_retries else '放弃'}")
             else:
                 logger.info("[H3-episode] 整片生成成功（无 QC 门控）")
