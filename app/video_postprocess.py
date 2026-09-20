@@ -211,14 +211,40 @@ class VideoPostProcessor:
 
     def concat_videos(self, video_paths: List[str], output_path: str,
                      audio_paths: Optional[List[str]] = None) -> str:
-        """使用 FFmpeg 合并视频"""
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        """使用 FFmpeg 合并视频
 
-        # 创建文件列表
+        S-01 修复：拼接前探测每个片段的音轨参数（codec/sample_rate/channels）。
+        - 全部一致 → 走 concat demuxer + -c copy（快，不重编码）
+        - 不一致（或部分有音轨/部分无）→ 走 concat filter 重编码（统一采样率/声道/编码器）
+        """
+        if not video_paths:
+            logger.warning("合并视频失败：输入片段为空")
+            return ""
+
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+        # 探测音轨参数一致性
+        probes = [probe_media(p) for p in video_paths]
+        audio_params = set()
+        has_any_audio = False
+        for p in probes:
+            if p.get("has_audio"):
+                has_any_audio = True
+                audio_params.add((
+                    p.get("audio_codec"), p.get("sample_rate"),
+                    p.get("channels"),
+                ))
+        need_reencode = has_any_audio and len(audio_params) > 1
+
+        if need_reencode:
+            logger.info(f"音轨参数不一致（{len(audio_params)} 种），走 concat filter 重编码路径")
+            return self._concat_reencode(video_paths, output_path, probes)
+
+        # 参数一致 → 走 concat demuxer（快，不重编码）
         list_file = output_path + ".list"
         with open(list_file, 'w', encoding='utf-8') as f:
             for v in video_paths:
-                f.write(f"file '{v}'\n")
+                f.write(f"file '{os.path.abspath(v)}'\n")
 
         cmd = [
             "ffmpeg", "-y",
@@ -232,14 +258,71 @@ class VideoPostProcessor:
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if result.returncode == 0:
-                logger.info(f"视频合并成功: {output_path}")
+                logger.info(f"视频合并成功（demuxer -c copy）: {output_path}")
                 os.remove(list_file)
                 return output_path
             else:
-                logger.error(f"FFmpeg 错误: {result.stderr}")
-                return ""
+                # -c copy 失败（常见原因：音视频参数实际不一致但探测未捕获，
+                # 如 H265 vs H264 混拼、关键帧对齐失败）→ 降级重编码兜底
+                logger.warning(f"demuxer 拼接失败，降级 concat filter 重编码：{result.stderr[-300:]}")
+                os.remove(list_file) if os.path.exists(list_file) else None
+                return self._concat_reencode(video_paths, output_path, probes)
         except Exception as e:
             logger.error(f"合并视频失败: {e}")
+            return ""
+
+    def _concat_reencode(self, video_paths: List[str], output_path: str,
+                         probes: List[Dict]) -> str:
+        """concat filter 重编码拼接（统一 1280x720@30 H264 + 24kHz 单声道 AAC）
+
+        filter_complex 结构：
+          [i:v:0]scale/fps/format → [vi]
+          [i:a?]aresample/aformat → [ai]
+          [v0][v1]...concat=n:1:0 → [outv]
+          [a0][a1]...concat=n:0:1 → [outa]
+        """
+        if not video_paths:
+            return ""
+        n = len(video_paths)
+        inputs: List[str] = []
+        for p in video_paths:
+            inputs += ["-i", os.path.abspath(p)]
+
+        # 逐片段：视频归一化（scale+fps+pix_fmt+sar）→ [vi]；音频归一化（24kHz 单声道）→ [ai]
+        per_stream: List[str] = []
+        for i in range(n):
+            per_stream.append(
+                f"[{i}:v:0]scale=1280:720:force_original_aspect_ratio=decrease,"
+                f"pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=30,format=yuv420p,setsar=1[v{i}]"
+            )
+            per_stream.append(
+                f"[{i}:a?]aresample=24000,aformat=sample_fmts=fltp:channel_layouts=mono[a{i}]"
+            )
+        # 拼接
+        v_concat_in = "".join(f"[v{i}]" for i in range(n))
+        a_concat_in = "".join(f"[a{i}]" for i in range(n))
+        per_stream.append(f"{v_concat_in}concat=n={n}:v=1:a=0[outv]")
+        per_stream.append(f"{a_concat_in}concat=n={n}:v=0:a=1[outa]")
+        filter_complex = ";".join(per_stream)
+
+        cmd = ["ffmpeg", "-y", "-v", "error"] + inputs + [
+            "-filter_complex", filter_complex,
+            "-map", "[outv]", "-map", "[outa]",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+        logger.info(f"concat filter 重编码拼接 {n} 个片段 → {output_path}")
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+            if result.returncode == 0 and os.path.exists(output_path):
+                logger.info(f"视频合并成功（filter 重编码）: {output_path}")
+                return output_path
+            logger.error(f"视频合并失败（filter 重编码）: {result.stderr[-500:]}")
+            return ""
+        except Exception as e:
+            logger.error(f"视频合并异常（filter 重编码）: {e}")
             return ""
 
     def add_subtitles(self, video_path: str, subtitles: List[dict],
