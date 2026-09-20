@@ -9,6 +9,7 @@ AI 对话（创作总控）：多轮对话敲定漫剧创作设定，并把确�
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -39,8 +40,12 @@ def _locked(fn):
             return fn(*args, **kwargs)
     return _wrapper
 
-HISTORY_MAX_MESSAGES = 40      # 会话历史最多保留的消息条数（超出丢弃最早）
-CONTEXT_MESSAGES = 20          # 每次请求送入模型的最大历史消息条数
+#: 热窗口上限（**不是「丢弃上限」**）：chat_history.json 每个项目桶只保留最近 40 条，
+#: 保证读路径（load_history）耗时/内存不随总量增长。**全量留存在归档**
+#: （archive/<canonical_key>/<YYYY-MM-DD>.jsonl，只增不减）——「不丢」由归档保证，
+#: 不是由本上限保证。**本数值不可调大**（硬约束 C1；见 save_history 归档逻辑）。
+HISTORY_MAX_MESSAGES = 40      # 热窗口上限：每项目桶保留最近 40 条
+CONTEXT_MESSAGES = 20          # 每次请求送入模型的最大历史消息条数（与归档完全无关）
 MAX_CHARS_PER_MESSAGE = 4000   # 单条消息送入模型时的截断长度
 
 # 创作设定字段（顺序即前端展示顺序）；options 为 AI 可主动给出的候选项
@@ -115,7 +120,7 @@ def _atomic_replace(tmp: str, path: str) -> None:
     last = None
     for i in range(8):
         try:
-            _atomic_replace(tmp, path)
+            os.replace(tmp, path)
             return
         except PermissionError as e:        # WinError 5 / 32：目标被占用
             last = e
@@ -132,7 +137,7 @@ def _write_json(path: str, data: dict) -> None:
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        _atomic_replace(tmp, path)          # 同分区 replace 原子 + Windows 占用退避重试
     except Exception:
         try:
             if os.path.exists(tmp):
@@ -149,10 +154,35 @@ def default_history() -> dict:
             "active_project": "", "updated_at": None}
 
 
+def _legacy_msg_id(m: dict) -> str:
+    """为缺失 `msg_id` 的历史消息派生**确定性** id（同一条消息每次加载得到同一 id）。
+
+    ⚠️ 必须确定性：旧文件（v1 / v2 初期）的消息没有 `msg_id`，而热/冷合并去重、
+    归档水位线对齐都依赖稳定 id。用 (time, role, content) 派生可保证跨次加载一致；
+    若用随机 id，同一条消息每次 load 都变 → 去重失效、归档重复、水位线错位。
+    """
+    raw = f"{m.get('time') or ''}\x1f{m.get('role') or ''}\x1f{m.get('content') or ''}"
+    return "m_" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
 def _clean_messages(msgs) -> list:
+    """清洗消息：只保留 user/assistant，并保证每条都有 `msg_id`（热/冷一致）。
+
+    ⚠️ 不得在清洗时丢掉 `msg_id`：热窗口截断、归档水位线、`load_all_messages`
+    去重全都依赖它。旧数据无 `msg_id` → 用 `_legacy_msg_id` 确定性派生。
+    这里对缺失 id 的消息**就地补齐**（其 dict 来自 json 解析或本次内存构造），
+    便于后续 `save_history` 把 id 一并落盘、下次加载即稳定。
+    """
     if not isinstance(msgs, list):
         return []
-    return [m for m in msgs if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
+    out = []
+    for m in msgs:
+        if not (isinstance(m, dict) and m.get("role") in ("user", "assistant")):
+            continue
+        if not m.get("msg_id"):
+            m["msg_id"] = _legacy_msg_id(m)
+        out.append(m)
+    return out
 
 
 def project_messages(history: dict, project: str = "") -> list:
@@ -181,7 +211,9 @@ def _project_bucket(history: dict, project: str) -> dict:
     projects = history.setdefault("projects", {})
     bucket = projects.get(key)
     if not isinstance(bucket, dict):
-        bucket = {"messages": []}
+        # archived_upto：归档水位线（已归档到的最后一条 msg_id）；archived_count：已归档条数
+        # （用于归档行 seq 的项目内全量序号）。旧文件无这两个字段 → 读入容忍，见 save_history。
+        bucket = {"messages": [], "archived_upto": "", "archived_count": 0}
         projects[key] = bucket
     return bucket
 
@@ -195,7 +227,14 @@ def load_history(path: str) -> dict:
     if isinstance(raw_projects, dict):
         for k, v in raw_projects.items():
             if isinstance(v, dict):
-                out["projects"][str(k)] = {"messages": _clean_messages(v.get("messages"))}
+                bucket = {"messages": _clean_messages(v.get("messages"))}
+                # ⚠️ 必须带出归档水位线/计数：save_history 靠 archived_upto 判断「哪些还没归档」。
+                # 旧文件无这两个字段 → 视为空（首次 save 全量补写归档），读入容忍。
+                if v.get("archived_upto"):
+                    bucket["archived_upto"] = v.get("archived_upto")
+                if v.get("archived_count") is not None:
+                    bucket["archived_count"] = v.get("archived_count")
+                out["projects"][str(k)] = bucket
     # 旧数据迁移：v1 只有一份全局 messages，归到当时活跃的项目，避免历史丢失
     if not out["projects"] and out["messages"]:
         legacy_key = _legacy_canonical_key(data)
@@ -220,18 +259,59 @@ def _legacy_canonical_key(data: dict) -> str:
 
 @_locked
 def save_history(path: str, history: dict) -> dict:
-    history["messages"] = _clean_messages(history.get("messages"))[-HISTORY_MAX_MESSAGES:]
+    """落盘会话历史：**先把未归档的消息追加进归档，再截断热窗口并原子写**。
+
+    ⚠️ 顺序：必须在 `msgs[-HISTORY_MAX_MESSAGES:]` 截断**之前**归档，否则被截掉的
+    消息永远丢失（归档是「只增不减」的全量真相源，热文件只是有界窗口）。
+    ⚠️ 归档必须在 _CHAT_LOCK 临界区内（本函数已 @_locked）：两个写者同时归档同一批
+    消息会重复追加 —— 这正是归档追加不能单独加锁、只能内联在既有加锁函数里的原因。
+    """
+    root = os.path.dirname(os.path.abspath(path))
     for k, v in (history.get("projects") or {}).items():
-        if isinstance(v, dict):
-            v["messages"] = _clean_messages(v.get("messages"))[-HISTORY_MAX_MESSAGES:]
+        if not isinstance(v, dict):
+            continue
+        msgs = _clean_messages(v.get("messages"))
+        akey = canonical_project_key(k) or str(k)
+        upto = v.get("archived_upto") or ""
+        start = 0
+        if upto:
+            for i, m in enumerate(msgs):
+                if m.get("msg_id") == upto:
+                    start = i + 1
+                    break
+            else:
+                # 水位线丢失（回滚 / 换机 / 旧数据）：保守全量补写。
+                # ⚠️ 已知边界：这可能让归档出现重复行（append-only 无法撤回），
+                #    但 `load_all_messages` 按 msg_id 去重 → 对外仍是「不重不漏」。
+                start = 0
+        tail = msgs[start:]
+        if tail:
+            try:
+                base_seq = int(v.get("archived_count") or 0)
+            except (TypeError, ValueError):
+                base_seq = 0
+            _archive_append(root, akey, tail, base_seq)
+            v["archived_upto"] = tail[-1].get("msg_id") or ""
+            v["archived_count"] = base_seq + len(tail)
+        v["messages"] = msgs[-HISTORY_MAX_MESSAGES:]      # 热窗口截断
+    history["messages"] = _clean_messages(history.get("messages"))[-HISTORY_MAX_MESSAGES:]
     history["updated_at"] = _now()
     _write_json(path, history)
     return history
 
 
+def _new_msg_id() -> str:
+    """新消息唯一 id：`m_<YYYYmmddTHHMMSS>_<6 hex>`（时间可读 + 随机段防同秒碰撞）。
+
+    热/冷两处复用**同一** `msg_id`，这是水位线对齐与去重的唯一依据（设计 §2.2.2）。
+    """
+    return f"m_{time.strftime('%Y%m%dT%H%M%S')}_{os.urandom(3).hex()}"
+
+
 def append_message(history: dict, role: str, content: str, project: str = "") -> dict:
     """追加一条消息。指定 project 时写入该项目独立的历史（避免跨项目串台）"""
-    msg = {"role": role, "content": str(content or ""), "time": _now()}
+    msg = {"role": role, "content": str(content or ""), "time": _now(),
+           "msg_id": _new_msg_id()}
     if (project or "").strip():
         _project_bucket(history, project)["messages"].append(msg)
     else:
@@ -274,6 +354,196 @@ def clear_draft(history: dict, project: str) -> dict:
     for k in project_key_candidates(project):
         drafts.pop(k, None)
     return history
+
+
+# ===================== 会话归档（只增不减的全量真相源） =====================
+#
+# 分层（设计 §2.2.1）：
+#   热 = chat_history.json 每项目桶最近 HISTORY_MAX_MESSAGES 条（读路径有界）
+#   冷 = archive/<canonical_key>/<YYYY-MM-DD>.jsonl（只增不减，全量）
+# 归档仅在 save_history（已加锁）内、在热窗口截断**之前**追加；水位线为
+# history["projects"][key]["archived_upto"]（已归档到的最后一条 msg_id）。
+#
+# ⚠️ 追加写不是原子 `os.replace`（append-only 无法替换），但同样抗损：
+#    每次追加后 flush()+os.fsync()，崩溃最多丢最后一行，不会写坏整文件。
+
+ARCHIVE_SUBDIR = "archive"
+
+#: 默认归档根目录（= AI 对话目录，如 output/ai_chat）。由 app 层注入；
+#: 测试/导出可给 `load_all_messages` 显式传 root。
+_DEFAULT_ARCHIVE_ROOT = ""
+
+
+def set_archive_root(root: str) -> None:
+    """注入默认归档根目录（app.py 启动时调用一次）。"""
+    global _DEFAULT_ARCHIVE_ROOT
+    _DEFAULT_ARCHIVE_ROOT = root or ""
+
+
+def archive_dir(root: str, key: str) -> str:
+    """某项目归档目录：`<root>/archive/<canonical_key>/`"""
+    return os.path.join(root, ARCHIVE_SUBDIR, key)
+
+
+def archive_path(root: str, key: str, date: str) -> str:
+    """某项目某天的归档文件：`<root>/archive/<key>/<YYYY-MM-DD>.jsonl`"""
+    return os.path.join(archive_dir(root, key), f"{date}.jsonl")
+
+
+def _archive_append(root: str, key: str, msgs: list, base_seq: int = 0) -> int:
+    """把 msgs 按 `m["time"][:10]` 分组，**追加**写入归档 jsonl；返回追加行数。
+
+    - 行字段照设计 §3.1：`msg_id/role/content/time/date/project/project_key/seq`；
+    - `seq`：项目内全量序号（`base_seq + 组内 1-based 下标`），便于导出排序；可选字段。
+
+    ⚠️ **普通私有函数，不得加 @_locked**：`verify_atomic_write_locks.py` 断言
+    `ai_chat.py` 中 `@_locked` 恒为 3。它只在 `save_history` 的 _CHAT_LOCK 临界区内被调用。
+    """
+    if not msgs:
+        return 0
+    groups: dict = {}
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        date = str(m.get("time") or "")[:10] or datetime.now().strftime("%Y-%m-%d")
+        groups.setdefault(date, []).append(m)
+    written = 0
+    for date, items in groups.items():
+        path = archive_path(root, key, date)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                for i, m in enumerate(items):
+                    rec = {
+                        "msg_id": m.get("msg_id") or "",
+                        "role": m.get("role") or "",
+                        "content": m.get("content") or "",
+                        "time": m.get("time") or "",
+                        "date": date,
+                        # project：归档只有规范键可用，故与 project_key 同值（设计 §3.1 示例两者相等）
+                        "project": key,
+                        "project_key": key,
+                        "seq": base_seq + i + 1,
+                    }
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    written += 1
+                f.flush()
+                os.fsync(f.fileno())        # 追加后落盘，避免崩溃丢整段
+        except Exception as e:  # noqa: BLE001
+            logger.warning("归档追加失败（%s / %s）：%s", key, date, e)
+    return written
+
+
+def archive_count(root: str, key: str, date: str) -> int:
+    """某项目某天的归档条数（只读行数，不解析内容）。"""
+    path = archive_path(root, key, date)
+    if not os.path.isfile(path):
+        return 0
+    n = 0
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    n += 1
+    except Exception as e:  # noqa: BLE001
+        logger.warning("统计归档失败（%s）：%s", path, e)
+    return n
+
+
+def archive_dates(root: str, key: str) -> list:
+    """列出该项目归档的日期与每日条数（按日期升序）。
+
+    返回 `[{"date": "YYYY-MM-DD", "count": N}, ...]`（设计 §2.2.4）。
+    """
+    d = archive_dir(root, key)
+    out: list = []
+    if not os.path.isdir(d):
+        return out
+    for name in sorted(os.listdir(d)):
+        if not name.endswith(".jsonl"):
+            continue
+        date = name[:-len(".jsonl")]
+        if not date:
+            continue
+        out.append({"date": date, "count": archive_count(root, key, date)})
+    return out
+
+
+def load_archive(root: str, key: str, date: str, limit: int = 0, offset: int = 0) -> list:
+    """读取某项目某天归档的消息（行序；`limit=0` 表示全部，`offset` 先跳过）。
+
+    ⚠️ 读路径按需懒加载（只读被请求的那一天），不随归档总量增长（REQ-1.6）。
+    """
+    path = archive_path(root, key, date)
+    out: list = []
+    if not os.path.isfile(path):
+        return out
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:  # noqa: BLE001
+                    continue
+                if isinstance(rec, dict):
+                    out.append(rec)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("读取归档失败（%s）：%s", path, e)
+        return out
+    if offset:
+        out = out[offset:]
+    if limit:
+        out = out[:limit]
+    return out
+
+
+def _merge_messages(*groups) -> list:
+    """按 `msg_id` 去重 + 按 (time, seq) 排序，合并多组消息（前面的组优先保留）。"""
+    seen = set()
+    merged: list = []
+    for g in groups:
+        for m in g or []:
+            if not isinstance(m, dict):
+                continue
+            mid = str(m.get("msg_id") or "")
+            if mid:
+                if mid in seen:
+                    continue
+                seen.add(mid)
+            merged.append(m)
+
+    def _order(m: dict):
+        try:
+            seq = int(m.get("seq") or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        return (str(m.get("time") or ""), seq)
+
+    merged.sort(key=_order)
+    return merged
+
+
+def load_all_messages(history: dict, project: str = "", root: str = None) -> list:
+    """热窗口 + 全部归档按时间合并去重（验收 / 导出用）。
+
+    ⚠️ 「不丢」由归档保证，而非 `load_history`：`load_history` 保持有界（热窗口 40），
+    本函数把热窗口与全量归档按 `msg_id` 去重合并 → 全量条数（设计 Q-arch-1）。
+    `root` 缺省用 `set_archive_root` 注入的默认目录（app 启动时注入 output/ai_chat）。
+    """
+    key = canonical_project_key(project) if (project or "").strip() else ""
+    hot = project_messages(history, project)
+    if not key:
+        return _merge_messages(hot)
+    root = root or _DEFAULT_ARCHIVE_ROOT
+    archived: list = []
+    if root:
+        for d in archive_dates(root, key):
+            archived.extend(load_archive(root, key, d["date"]))
+    # 归档在前：同 msg_id 时保留归档记录（带 seq，便于导出排序）
+    return _merge_messages(archived, hot)
 
 
 # ===================== 创作设定（草稿 / 生效） =====================
