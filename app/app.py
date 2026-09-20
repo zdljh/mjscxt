@@ -1452,6 +1452,7 @@ def api_keyframes_generate():
                 max_verify_retries=_kf_vretries, preflight_cb=_kf_pre,
                 client=comfyui_client,  # S-04：注入全局 ComfyUIClient 实例（复用连接/共享状态）
                 qc_stop_cb=_qc_retry_hopeless,  # G1：尾帧连续两次缺陷相同 → 止损
+                recall_cb=_keyframe_recall_cb(project),  # T03a：尾帧质检重试召回历史教训
             )
             ok = int(report.get("succeeded") or 0)
             with lock:
@@ -1743,7 +1744,7 @@ def api_storyboard_retry_shot():
     qc_cfg = _qc_load_cfg()
     prompt, _pf, _pgate = _prompt_preflight(
         "storyboard", prompt, ctx=shot, style=(shot.get("style") or _rs_style),
-        ref_count=len(refs))
+        ref_count=len(refs), project_name=project)
     if not _pgate.get("accept"):
         return jsonify({"success": False, "prompt_qc_blocked": True,
                         "error": f"提示词预检未通过（{_pgate.get('label')}）：{_pgate.get('reason')}"
@@ -1778,7 +1779,8 @@ def api_storyboard_retry_shot():
                 WATERMARK_CLEANUP_BACKUP_DIR, project))
         except Exception as e:  # noqa: BLE001
             app.logger.warning(f"单镜重跑去水印未生效：{e}")
-    shutil.copy2(files[0], scratch)
+    # G8②：消费 ComfyUI output 源（与主 worker 的 move 语义对齐），不留 output 残留
+    shutil.move(files[0], scratch)
     if qc_on:
         verdict = qc_client.check_image(scratch, _qc_shot_desc(shot), qc_cfg,
                                         style=(shot.get("style") or _rs_style),
@@ -1955,7 +1957,8 @@ def api_video_retry_shot():
             (autopilot.get_plan(project) or {}).get("style"))),
         # ⚠️ 用 seg 里的参考图数量，不要用 `refs`：关键帧分支只设 ref_images，没有 `refs`，
         #    直接引用会 NameError（该分支走不到 else，`refs` 从未绑定）。
-        expect_refs=bool(seg.get("reference_images")))
+        expect_refs=bool(seg.get("reference_images")),
+        project_name=project)
     seg["prompt"] = prompt
     if not _pgate_v.get("accept"):
         return jsonify({"success": False, "prompt_qc_blocked": True,
@@ -2202,6 +2205,20 @@ def api_generate_script():
         script_path = script_gen.save_script(script, project_name)
         script["metadata"]["script_path"] = script_path
 
+        # S1：剧本质检接线（原为死代码——生产路径只调无质检的 generate_script，
+        # 结构缺陷直接流入分镜/视频后才暴露）。这里在剧本落盘后跑一次 check_script，
+        # 按 script_qc_ready 门控（与 image/video qc 同模式，开关关时 no-op、不报错），
+        # 结果透出给前端如实回显「剧本是否已质检」。单次检测（非 generate_script_with_qc
+        # 的 3 次重试+AI 判断重链路），止血优先、行为保守。
+        qc_cfg = _qc_load_cfg()
+        qc_result = {"skipped": True, "reason": "剧本质检未启用"}
+        if qc_client.script_qc_ready(qc_cfg):
+            qc_result = qc_client.check_script(
+                script_data=script, style=style, target_duration=duration, cfg=qc_cfg)
+            app.logger.info("剧本质检：passed=%s score=%s reason=%s",
+                            qc_result.get("passed"), qc_result.get("score"),
+                            qc_result.get("reason"))
+
         return jsonify({
             "success": True,
             "script_path": script_path,
@@ -2210,7 +2227,9 @@ def api_generate_script():
             "characters_count": len(script.get("characters", [])),
             "items_count": len(script.get("items", [])),
             "scenes_count": len(script.get("scenes", [])),
-            "shots_count": len(script.get("shots", []))
+            "shots_count": len(script.get("shots", [])),
+            "script_qc_active": qc_client.script_qc_ready(qc_cfg),
+            "qc_result": qc_result,
         })
     except Exception as e:
         app.logger.error(f"生成剧本失败: {e}")
@@ -2293,6 +2312,7 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                 os.makedirs(asset_dir, exist_ok=True)
                 scratch_dir = os.path.join(scratch_root, f"{asset_type}_{name}")
                 os.makedirs(scratch_dir, exist_ok=True)
+                _qc_prune_attempts(scratch_dir)   # G8③：清理上一轮遗留的过期 try（只留最近 4）
                 qc_desc = f"资产类型：{asset_type}；资产名称：{name}；资产设定：{str(prompt_zh)[:400]}"
 
                 # ---------- 阶段1：基础图（生成 → 质检 → 重生成 → 阻断判定） ----------
@@ -2301,14 +2321,17 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                 base_gate = None
                 base_ok = False
                 base_files = []
-                seed = None
+                # O3：第 1 轮也用真实随机 seed 并始终注入（不再 None 走模板默认常量），
+                # 使 qc.history[0].seed 不再为 null，产物可复现、可追溯。
+                seed = random.randint(1, 2 ** 31 - 1)
                 orig_asset_prompt = prompt_zh     # 教训库稳定键（改写后的提示词不参与指纹）
                 # ---- 提示词预检（生成前质检）----
                 # 资产是「一对多」批量生成（一个项目几十个角色/物品/场景），与整集同理不做硬阻断：
                 # 单条提示词有问题就自愈 + 记录，不让整批资产生成中断。缺失/过短这类致命缺陷
                 # 由后面的生成+质检链路兜底（空提示词本就出不来可用资产）。
                 prompt_zh, _pf_asset, _pgate_asset = _prompt_preflight(
-                    "asset", prompt_zh, ctx=asset, style=(asset.get("style") or gen_style or ""))
+                    "asset", prompt_zh, ctx=asset, style=(asset.get("style") or gen_style or ""),
+                    project_name=project_name)
                 if not _pgate_asset.get("accept"):
                     app.logger.warning("资产「%s」参考图提示词预检未通过（%s）：%s",
                                        name, _pgate_asset.get("label"), _pgate_asset.get("reason"))
@@ -2344,7 +2367,10 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                     
                         _set_phase(f"{name} 基础图质检不达标，修改提示词后重新生成（第 {attempt}/{max_retries} 次）",
                                    "regenerating")
-                    base_files = gen_base(prompt_zh, seed=seed, style=gen_style, size=gen_size)
+                    # G8：基础图落项目专属子目录（comic_drama/<项目>_asset_<类型>），
+                    # 不再堆在 ComfyUI output 默认目录——删项目/滚动清理才够得着。
+                    base_files = gen_base(prompt_zh, seed=seed, style=gen_style, size=gen_size,
+                                          filename_prefix=f"comic_drama/{project_name}_asset_{asset_type}")
                     if not base_files:
                         base_attempts.append({"attempt": attempt + 1, "seed": seed, "stage": "基础图生成",
                                               "ok": False, "error": "基础图生成失败"})
@@ -2352,7 +2378,9 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                                      "label": "生成失败", "reason": "基础图生成失败", "critical_issues": []}
                         break
                     scratch_base = os.path.join(scratch_dir, f"base_try{attempt + 1}.png")
-                    shutil.copy2(base_files[0], scratch_base)
+                    # G8②：消费 ComfyUI output 源（视频链路一直用 move，图片链路此前 copy2
+                    # 导致 output/comic_drama/ 只增不减）。move 后 output 目录不留残留。
+                    shutil.move(base_files[0], scratch_base)
                     if not qc_on:
                         if qc_declared:
                             # 已声明开启质检但接口不可用：明确阻断（图仅留在暂存区），不静默放行
@@ -2412,7 +2440,17 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                 if base_attempts:
                     shutil.copy2(base_attempts[-1]["file"], base_dst)
                 else:
-                    shutil.copy2(base_files[0], base_dst)
+                    # G8②：2380 处已把 ComfyUI output move 到 scratch_base（不再 copy2），
+                    # 故入库源是 scratch_base（base_files[0] 此时已 move 走、不可再取）
+                    shutil.copy2(scratch_base, base_dst)
+                # O2：产物旁路元数据（seed/提示词/工作流 SHA256/质检结论），可复现可追溯
+                _write_artifact_meta(
+                    base_dst, kind="asset_base", project_name=project_name,
+                    seed=seed, prompt=orig_asset_prompt,
+                    workflow_key={"character": "character_gen", "item": "item_gen",
+                                  "scene": "scene_gen"}.get(asset_type),
+                    qc=base_gate, asset_name=name,
+                    extra={"asset_type": asset_type, "style": gen_style or None})
 
                 # ---------- 阶段2：多视角（逐视角质检 → 整组重生成 → 不达标阻断） ----------
                 view_paths = {"base": base_dst}
@@ -2420,7 +2458,8 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                 view_gate = {}
                 view_src = {}
                 views = {}
-                vseed = None
+                # O3：多视角第 1 轮也用真实随机 seed 并始终注入（不再 None）
+                vseed = random.randint(1, 2 ** 31 - 1)
                 for attempt in range(max_retries + 1):
                     if attempt > 0:
                         vseed = random.randint(1, 2 ** 31 - 1)
@@ -2428,11 +2467,14 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                                    "regenerating")
                     views = comfyui_client.generate_multiview(
                         base_image_path=base_dst, asset_type=asset_type, asset_name=name,
-                        base_prompt_zh=prompt_zh, seed=vseed, style=gen_style, size=gen_size) or {}
+                        base_prompt_zh=prompt_zh, seed=vseed, style=gen_style, size=gen_size,
+                        filename_prefix=f"comic_drama/{project_name}_asset_{asset_type}") or {}
                     view_src = {}
                     for vk, vp in views.items():
                         sp = os.path.join(scratch_dir, f"{vk}_try{attempt + 1}.png")
-                        shutil.copy2(vp, sp)
+                        # G8②：多视角 ComfyUI output 源改 move（消费源，不留 output 残留）；
+                        # 后续 check_image / 入库读的都是 sp（scratch），不受影响
+                        shutil.move(vp, sp)
                         view_src[vk] = sp
                     if not views:
                         break
@@ -2503,6 +2545,12 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                         view_dst = os.path.join(asset_dir, f"{vk}.png")
                         shutil.copy2(view_src[vk], view_dst)
                         view_paths[vk] = view_dst
+                        # O2：每个多视角图旁路元数据（复用基础图 seed 链 + 本视角质检结论）
+                        _write_artifact_meta(
+                            view_dst, kind="asset_view", project_name=project_name,
+                            seed=vseed, prompt=orig_asset_prompt, workflow_key="multiview_gen",
+                            qc=gate, asset_name=name,
+                            extra={"asset_type": asset_type, "view": vk})
                         saved_views.append(vk)
                     else:
                         blocked_views.append({"view": vk, "label": gate["label"],
@@ -2930,7 +2978,8 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     #    否则同一镜头在自愈前后会生成两条互不相认的教训）。
                     prompt, _pf_item, _pgate_item = _prompt_preflight(
                         "storyboard", prompt, ctx=shot,
-                        style=(shot.get("style") or _sb_style), ref_count=len(refs))
+                        style=(shot.get("style") or _sb_style), ref_count=len(refs),
+                        project_name=project_name)
                     item["prompt"] = prompt
                     item["prompt_qc"] = _pf_item.get("verdict")
                     item["prompt_qc_repairs"] = _pf_item.get("repairs") or []
@@ -2951,7 +3000,9 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     qc_declared = bool(qc_cfg.get("enabled") and qc_cfg.get("image_enabled"))
                     max_retries = int(qc_cfg.get("max_retries", 0)) if qc_on else 0
                     attempts = []
-                    seed = None
+                    # O3：第 1 轮也用真实随机 seed 并始终注入（不再 None 走模板默认常量），
+                    # 使 manifest.shots[*].qc.history[0].seed 不再为 null，产物可复现、可追溯。
+                    seed = random.randint(1, 2 ** 31 - 1)
                     dst = os.path.join(out_dir, f"shot_{seq:02d}.png")
 
                     for attempt in range(max_retries + 1):
@@ -3016,9 +3067,13 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                         # P0：先落「质检暂存区」，质检达标后才写入正式交付目录（阻断 ⇒ 正式目录不产生该图）
                         sb_scratch_dir = os.path.join(QC_DIR, project_name, "storyboard_scratch")
                         os.makedirs(sb_scratch_dir, exist_ok=True)
+                        _qc_prune_attempts(sb_scratch_dir)   # G8③：清本镜历史过期 try（共享目录按镜头前缀保留最近4）
                         scratch_png = os.path.join(sb_scratch_dir,
                                                    f"shot_{seq:02d}_try{attempt + 1}.png")
-                        shutil.copy2(result["files"][0], scratch_png)
+                        # G8②：消费 ComfyUI output 源（与视频链路的 move 语义对齐），
+                        # 不再 copy2 导致 output/comic_drama_sb/ 只增不减。
+                        # 每轮 attempt 都会重新 generate 出新文件，move 走旧源无副作用。
+                        shutil.move(result["files"][0], scratch_png)
                         item.update({
                             "success": True,
                             "file": dst,
@@ -3046,6 +3101,12 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                         if gate["accept"]:
                             shutil.copy2(scratch_png, dst)   # 质检达标 → 写入正式交付目录
                             item["file"] = dst
+                            # O2：产物旁路元数据（seed/提示词/工作流 SHA256/质检结论）
+                            _write_artifact_meta(
+                                dst, kind="storyboard", project_name=project_name,
+                                seed=seed, prompt=item.get("prompt"), workflow_key="storyboard_gen",
+                                qc=gate, shot_id=shot_id,
+                                extra={"ref_count": item.get("ref_count")})
                             break
                         if not verdict.get("ok"):
                             # 质检接口异常：保留暂存图，不盲目重生成（闸门会阻断入库）
@@ -3436,7 +3497,7 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
             prompt, _pf_seg, _pgate_seg = _prompt_preflight(
                 "h3", prompt, ctx=shot,
                 style=(shot.get("style") or _style_res.get("style") or ""),
-                expect_refs=bool(refs))
+                expect_refs=bool(refs), project_name=project_name)
             seg = {"prompt": prompt, "duration": dur, "reference_images": refs,
                    "name": f"shot_{seq:02d}"}
             if _pf_seg.get("repairs") or (_pf_seg.get("verdict") or {}).get("issues"):
@@ -3466,6 +3527,12 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
             qc_declared = bool(qc_cfg.get("enabled") and qc_cfg.get("video_enabled"))
             max_retries = int(qc_cfg.get("max_retries", 0)) if qc_on else 0
             eff_style = (shot.get("style") if shot else None) or _style_res.get("style") or ""
+            # [教训][video] 诊断（§2.3.5）：qc_off = 质检总开关/类型开关/接口任一未就绪
+            # → 整片 QC 门控不会注入（qc_fn=None），本模式**根本不写教训库**，如实打点。
+            if not qc_on:
+                app.logger.info("[教训][video] project=%s mode=episode qc_off=true "
+                                "enabled=%s video_enabled=%s → 无质检门控，本模式不沉淀教训",
+                                project_name, qc_cfg.get("enabled"), qc_cfg.get("video_enabled"))
 
             # 整片 QC 门控回调：对 N 段一次生成出的单个连续整集视频抽帧质检
             _ep_qc_attempt = {"n": 0}
@@ -3499,8 +3566,19 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                         _record_qc_lesson(project_name, "video",
                                           "\n".join((sg.get("prompt") or "") for sg in segs),
                                           rec)
+                        app.logger.info(
+                            "[教训][video] project=%s mode=episode attempt=%d ok=True "
+                            "passed=False → 已沉淀",
+                            project_name, _ep_qc_attempt["n"])
                     except Exception as le:  # noqa: BLE001
                         app.logger.warning("整片质检教训沉淀失败：%s", le)
+                elif not passed and not verdict.get("ok"):
+                    # [教训][video] 诊断（§2.3.5）：质检调用异常/超时（ok=false）时静默跳过、
+                    # 不记教训——视频质检需 ffmpeg 抽帧 + 多模态，失败率高，如实打点便于排障。
+                    app.logger.info(
+                        "[教训][video] project=%s mode=episode attempt=%d ok=False "
+                        "passed=False verdict.ok=false → 质检异常/超时，不沉淀教训",
+                        project_name, _ep_qc_attempt["n"])
                 return {"passed": passed, "verdict": verdict, "gate": gate}
 
             with lock:
@@ -3598,6 +3676,10 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                             "progress": int((i + 1) / len(shots) * 100),
                             "current_shot": shot_id,
                         })
+                    # [教训][video] 诊断（§2.3.5）：断点续跑复用已达标视频 → 该镜**根本不重新
+                    # 质检**，自然没有新的 video 教训要沉淀（这是 0 落盘的正常原因之一）。
+                    app.logger.info("[教训][video] project=%s shot=%s 复用跳过：沿用已达标视频，"
+                                    "不重新质检、不沉淀教训", project_name, shot_id)
                     continue
             with lock:
                 generation_state[task_id].update({
@@ -3616,8 +3698,16 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                 qc_on = qc_client.video_qc_ready(qc_cfg)
                 qc_declared = bool(qc_cfg.get("enabled") and qc_cfg.get("video_enabled"))
                 max_retries = int(qc_cfg.get("max_retries", 0)) if qc_on else 0
+                if not qc_on:
+                    # [教训][video] 诊断（§2.3.5）：qc_off = 质检总开关/类型开关/接口任一未就绪
+                    # → per_shot 模式直接按原行为入库，**根本不质检**，自然无 video 教训可沉淀。
+                    app.logger.info("[教训][video] project=%s shot=%s mode=per_shot qc_off=true "
+                                    "enabled=%s video_enabled=%s → 未开质检，不沉淀教训",
+                                    project_name, shot_id,
+                                    qc_cfg.get("enabled"), qc_cfg.get("video_enabled"))
                 attempts = []
-                seed = None
+                # O3：第 1 轮也用真实随机 seed 并始终注入（不再 None），视频 qc.history[0].seed 不再为 null
+                seed = random.randint(1, 2 ** 31 - 1)
                 dst = os.path.join(videos_dir, f"shot_{seq:02d}.mp4")
                 video_item = {"shot_id": shot_id, "success": False,
                               "mode": "per_shot", "segment_count": 1,
@@ -3682,6 +3772,7 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                     # P0：先落「质检暂存区」，质检达标后才写入正式交付目录（阻断 ⇒ 正式目录不产生该视频）
                     v_scratch_dir = os.path.join(QC_DIR, project_name, "video_scratch")
                     os.makedirs(v_scratch_dir, exist_ok=True)
+                    _qc_prune_attempts(v_scratch_dir)   # G8③：清本镜历史过期 try（视频暂存按镜头前缀保留最近4）
                     v_scratch = os.path.join(v_scratch_dir,
                                              f"shot_{seq:02d}_try{attempt + 1}.mp4")
                     if os.path.abspath(src) != os.path.abspath(v_scratch):
@@ -3723,11 +3814,25 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                         if os.path.exists(dst):
                             os.remove(dst)
                         shutil.move(v_scratch, dst)   # 质检达标 → 写入正式交付目录
+                        # O2：产物旁路元数据（seed/提示词/工作流 SHA256/质检结论）
+                        _write_artifact_meta(
+                            dst, kind="video", project_name=project_name,
+                            seed=seed, prompt=prompt, workflow_key="h3_video",
+                            qc=gate, shot_id=shot_id,
+                            extra={"mode": "per_shot", "used_storyboard": video_item.get("used_storyboard")})
                         break
                     if not verdict.get("ok"):
+                        # [教训][video] 诊断（§2.3.5）：per_shot 质检调用异常/超时（ok=false）
+                        # → 静默跳过、不记教训（ffmpeg 抽帧 + 多模态失败率高），如实打点便于排障。
+                        app.logger.info("[教训][video] project=%s shot=%s mode=per_shot attempt=%d "
+                                        "verdict.ok=false → 质检异常/超时，不沉淀教训",
+                                        project_name, shot_id, attempt + 1)
                         break
                     # ★ 立刻沉淀教训（含风格不达标强化），供下一次重试改写提示词
                     _record_qc_lesson(project_name, "video", orig_video_prompt, rec)
+                    app.logger.info("[教训][video] project=%s shot=%s mode=per_shot attempt=%d "
+                                    "ok=true passed=False → recorded",
+                                    project_name, shot_id, attempt + 1)
                     # ★ 重试止损（同分镜）：连续两次缺陷完全相同 → 「改提示词 + 换种子」没带来
                     #   任何变化，提前停止重试，别再重复烧 GPU。达标早已 break，不改结论。
                     _hopeless, _hopeless_detail = _qc_retry_hopeless(attempts)
@@ -4700,6 +4805,10 @@ def api_llm_test():
 # AI 对话（创作总控）：多轮对话敲定创作设定 →「应用设定」落盘
 # =====================================================================
 
+# 归档根目录注入：ai_chat.load_all_messages 未显式传 root 时用它（见 ai_chat.set_archive_root）
+ai_chat.set_archive_root(os.path.dirname(os.path.abspath(AI_CHAT_HISTORY_PATH)))
+
+
 def _chat_project(data: dict = None, history: dict = None) -> str:
     data = data or {}
     # ⚠️ Ưu tiên request field (project_name hoặc project), sau đó mới fallback history
@@ -4731,6 +4840,64 @@ def api_ai_chat_history():
     """读取会话历史 + 当前草稿 + 已生效设定（供界面恢复）"""
     project = (request.args.get("project") or "").strip()
     return jsonify({"success": True, "state": _chat_state(project)})
+
+
+def _archive_project_key(raw: str, history: dict) -> str:
+    """归档接口的项目键：**看原始入参**决定是否回退到活跃项目。
+
+    ⚠️ 不能用 `_safe_project(x) or <兜底>` 判空：`_safe_project('')` 返回字面量
+    `'project'`（真值），兜底永不生效。必须看原始 query 是否为空。
+    """
+    raw = (raw or "").strip()
+    if raw:
+        return ai_chat.canonical_project_key(raw)
+    return str(history.get("active_project") or "")
+
+
+@app.route('/api/ai/chat/archive', methods=['GET'])
+def api_ai_chat_archive():
+    """列出某项目归档的日期与每日条数（只读；全量真相源的浏览入口）。
+
+    query: project（可空 → 回退当前活跃项目）
+    → {success, project, dates:[{date,count}], total}
+    """
+    history = ai_chat.load_history(AI_CHAT_HISTORY_PATH)
+    key = _archive_project_key(request.args.get("project") or "", history)
+    if not key:
+        return jsonify({"success": True, "project": "", "dates": [], "total": 0})
+    root = os.path.dirname(os.path.abspath(AI_CHAT_HISTORY_PATH))
+    dates = ai_chat.archive_dates(root, key)
+    return jsonify({"success": True, "project": key, "dates": dates,
+                    "total": sum(int(d.get("count") or 0) for d in dates)})
+
+
+@app.route('/api/ai/chat/archive/<date>', methods=['GET'])
+def api_ai_chat_archive_date(date):
+    """读取某项目某天的归档消息（只读分页）。
+
+    query: project（可空 → 回退当前活跃项目）/ limit（默认 0=全部）/ offset
+    → {success, date, total, messages:[...]}
+    """
+    date = str(date or "")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        return jsonify({"success": False, "error": "日期格式应为 YYYY-MM-DD"}), 400
+    history = ai_chat.load_history(AI_CHAT_HISTORY_PATH)
+    key = _archive_project_key(request.args.get("project") or "", history)
+    if not key:
+        return jsonify({"success": True, "date": date, "total": 0, "messages": []})
+    try:
+        limit = max(0, int(request.args.get("limit", 0)))
+    except (TypeError, ValueError):
+        limit = 0
+    try:
+        offset = max(0, int(request.args.get("offset", 0)))
+    except (TypeError, ValueError):
+        offset = 0
+    root = os.path.dirname(os.path.abspath(AI_CHAT_HISTORY_PATH))
+    messages = ai_chat.load_archive(root, key, date, limit=limit, offset=offset)
+    return jsonify({"success": True, "date": date,
+                    "total": ai_chat.archive_count(root, key, date),
+                    "messages": messages})
 
 
 @app.route('/api/ai/chat/clear', methods=['POST'])
@@ -4976,10 +5143,13 @@ class _PromptQCBlocked(RuntimeError):
 
 
 def _prompt_preflight(kind: str, prompt: str, *, ctx=None, style: str = "",
-                      ref_count=None, expect_refs=None) -> tuple:
+                      ref_count=None, expect_refs=None, project_name: str = "") -> tuple:
     """生成前提示词预检 + 确定性自愈（统一入口）。
 
     返回 ``(应交给生成端的提示词, preflight 结果, 闸门结论)``。
+
+    ``project_name``：可选；给出时会在预检**之前**先召回 ``kind="prompt"`` 的历史教训
+    并叠加，把「历史上被预检判死的输入模式」变成显式补丁后再进预检（US-7）。
 
     ⚠️ **一律 fail-open**：预检自身异常时按「原样放行」处理并记 warning。
     这一层是新增的保险，绝不能因为它自己出问题就把整集生产卡死。
@@ -4987,6 +5157,11 @@ def _prompt_preflight(kind: str, prompt: str, *, ctx=None, style: str = "",
     text = str(prompt or "")
     try:
         cfg = _qc_load_cfg()
+        if project_name:
+            # 召回叠加在原始提示词上（自愈前）；调用方已保留 orig_prompt 作稳定 phash 键。
+            text = prompt_memory.learned_prompt(
+                kind="prompt", prompt=text, project=project_name,
+                root_dir=PROJECT_OUTPUT_DIR, style=style)
         pf = prompt_qc.preflight(kind, text, ctx=ctx, style=style, cfg=cfg,
                                  ref_count=ref_count, expect_refs=expect_refs)
         gate = prompt_qc.prompt_qc_gate(pf, cfg)
@@ -5051,10 +5226,113 @@ def _qc_retry_hopeless(attempts: list, streak: int = 2) -> tuple:
     return qc_client.qc_retry_hopeless(merged, streak)
 
 
+def _qc_prune_attempts(scratch_dir: str, keep: int = 4) -> None:
+    """G8：质检暂存区 try 产物滚动保留 —— 每个 shot/asset 只保留最近 keep 个尝试。
+
+    背景（审计 G8）：图片链路每次都把产物 copy 进暂存区 `output/qc/<项目>/{assets,storyboard,
+    video}_scratch/`，不达标越多残留越多，实测 qc 目录膨胀到 1.1GB。临时产物（`*_tryN`）
+    只有「最近几轮」对续跑/排障有意义，更早的纯浪费。这里按 (前缀, 尝试号, 扩展名) 归组，
+    每组只留最大的 keep 个 try，其余删除。
+
+    设计取舍：
+      - 只清「带 _try 后缀的临时产物」，正式交付图（base.png/shot_XX.png）绝不动；
+      - 单文件失败静默跳过（清理是优化而非功能，绝不能因清错文件阻断生产）；
+      - 保留策略对 `.png`/`.mp4`/`.srt`/`.list` 通用，三类暂存区都能复用。
+    """
+    if not os.path.isdir(scratch_dir):
+        return
+    try:
+        import re as _re
+        groups = {}   # (前缀, 扩展名) -> [尝试号]
+        info = {}      # 尝试号 -> 完整路径
+        for fn in os.listdir(scratch_dir):
+            m = _re.match(r"^(.+)_try(\d+)(\.\w+)$", fn)
+            if not m:
+                continue   # 非 try 命名（正式产物/杂项）一律不动
+            prefix, num, ext = m.group(1), int(m.group(2)), m.group(3)
+            groups.setdefault((prefix, ext), []).append(num)
+            info[(prefix, ext, num)] = os.path.join(scratch_dir, fn)
+        removed = 0
+        for (prefix, ext), nums in groups.items():
+            keep_set = set(nums[-keep:]) if len(nums) > keep else set(nums)
+            for num in nums:
+                if num in keep_set:
+                    continue
+                p = info.get((prefix, ext, num))
+                if p and os.path.exists(p):
+                    try:
+                        os.remove(p)
+                        removed += 1
+                    except OSError:
+                        pass   # 文件被占用/权限问题：跳过，不阻断
+        if removed:
+            app.logger.info("G8 暂存区滚动清理 %s：删 %d 个过期 try（每组保留最近 %d）",
+                            scratch_dir, removed, keep)
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning("G8 暂存区清理失败（不影响生产）：%s: %s",
+                           type(e).__name__, e)
+
+
+def _write_artifact_meta(artifact_path: str, *, kind: str, project_name: str,
+                         seed=None, prompt=None, workflow_key=None,
+                         elapsed=None, qc=None, shot_id=None, asset_name=None,
+                         extra=None) -> None:
+    """O2：产物旁路元数据 —— 在正式产物旁写 `<产物>.meta.json`（可追溯/可复现）。
+
+    记录：seed / prompt / 工作流文件名 + SHA256（内容指纹，而非仅文件名）/ 耗时 /
+    生效质检结论。此前 manifest 只记工作流**文件名**，无法校验"当初到底用哪版工作流
+    出的这张图"；SHA256 让产物与生成时点的工作流内容一一对应。
+
+    纯旁路（绝不阻断生产）：任何异常静默降级、只留 debug 日志 —— meta 缺失不影响主流程。
+    """
+    try:
+        import hashlib
+        import config as _cfg
+        meta = {
+            "artifact": os.path.basename(artifact_path),
+            "kind": kind,
+            "project": project_name,
+            "seed": seed,
+            "prompt": (str(prompt)[:2000] if prompt else None),
+            "workflow": None,
+            "workflow_sha256": None,
+            "elapsed_sec": elapsed,
+            "qc": qc,
+            "extra": extra,
+            "written_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        if shot_id is not None:
+            meta["shot_id"] = shot_id
+        if asset_name is not None:
+            meta["asset"] = asset_name
+        # 工作流内容指纹（O2 核心：文件名 → 名 + SHA256）
+        if workflow_key:
+            try:
+                tpl_name = _cfg.WORKFLOW_TEMPLATE.get(workflow_key)
+                if tpl_name:
+                    wf_path = os.path.join(_cfg.COMFYUI_WORKFLOWS_DIR, tpl_name)
+                    if os.path.isfile(wf_path):
+                        h = hashlib.sha256()
+                        with open(wf_path, "rb") as _f:
+                            for _chunk in iter(lambda: _f.read(65536), b""):
+                                h.update(_chunk)
+                        meta["workflow"] = tpl_name
+                        meta["workflow_sha256"] = h.hexdigest()
+            except Exception:  # noqa: BLE001  工作流指纹算不出不影响 meta 主体
+                pass
+        out = os.path.splitext(artifact_path)[0] + ".meta.json"
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+    except Exception as e:  # noqa: BLE001  旁路兜底：meta 写失败绝不阻断入库
+        try:
+            app.logger.debug("O2 产物元数据旁路写失败（不影响入库）：%s: %s",
+                            type(e).__name__, e)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _qc_gate(verdict: dict) -> dict:
     """统一质检入库闸门（P0）：ok=false 或 不达标 一律不得静默入库。
-
-    返回 {"accept", "blocked", "skipped", "label", "reason", "critical_issues"}
     - skipped=True   → 质检未执行（总开关/类型开关关闭、接口未配置），按「放行」处理并明确标注；
     - ok=False       → 质检调用异常，结果不可判定，一律阻断（不得静默入库）；
     - accepted=False → 不通过；命中关键缺陷时 blocked=True（关键缺陷阻断）。
@@ -5185,6 +5463,32 @@ def _record_qc_lesson(project_name: str, kind: str, prompt: str, rec: dict) -> d
         return {}
 
 
+def _record_preflight_lesson(project_name: str, prompt_original: str, pf: dict,
+                             gate: dict) -> dict:
+    """把一次「提示词预检不通过 / 有缺陷」沉淀成 ``kind="prompt"`` 教训。
+
+    ``prompt_original`` 必须是**自愈前**（也**不含召回叠加块**）的原始提示词，作为稳定
+    phash 键。收敛 keyframe / asset / storyboard 三处预检的沉淀逻辑，避免复制粘贴。
+    """
+    pf = pf if isinstance(pf, dict) else {}
+    verdict = pf.get("verdict") if isinstance(pf.get("verdict"), dict) else {}
+    gate = gate if isinstance(gate, dict) else {}
+    rec = {
+        "issues": [str(x).strip() for x in (verdict.get("issues") or []) if str(x).strip()],
+        "critical_issues": [str(x).strip() for x in (verdict.get("critical_issues") or [])
+                            if str(x).strip()],
+        "reason": str(pf.get("reason") or gate.get("reason") or "").strip(),
+        "score": verdict.get("score"),
+        "stage": "prompt_preflight",
+        "label": str(pf.get("label") or gate.get("label") or ""),
+    }
+    if not rec["issues"] and rec["reason"]:
+        rec["issues"] = [rec["reason"]]
+    if not rec["issues"] and not rec["reason"]:
+        return {}
+    return _record_qc_lesson(project_name, "prompt", prompt_original or "", rec)
+
+
 def _qc_style_of(project_name: str) -> str:
     """取项目**当前**风格，供教训召回替换建议里的 ``{style}`` 占位符。
 
@@ -5210,6 +5514,23 @@ def _qc_style_of(project_name: str) -> str:
     except Exception:  # noqa: BLE001
         pass
     return ""
+
+
+def _keyframe_recall_cb(project_name: str):
+    """尾帧重试召回回调（注入 ``keyframe.generate_keyframes`` 的 ``recall_cb``）。
+
+    返回闭包 ``(orig_prompt, shot, item) -> str``：用 preflight 自愈**之前**的原始尾帧
+    提示词召回 ``kind="keyframe"`` 历史教训并叠加；无教训时原样返回（零行为变更）。
+    """
+    def _recall(orig_prompt: str, shot: dict, item: dict) -> str:
+        try:
+            return prompt_memory.learned_prompt(
+                kind="keyframe", prompt=orig_prompt or "", project=project_name,
+                root_dir=PROJECT_OUTPUT_DIR, style=_qc_style_of(project_name))
+        except Exception as e:  # noqa: BLE001 - 召回失败绝不影响生成
+            app.logger.warning(f"尾帧教训召回失败（忽略）：{e}")
+            return orig_prompt or ""
+    return _recall
 
 
 def _episode_qc_desc(shots: list, limit: int = 12) -> str:
@@ -5346,6 +5667,20 @@ def _keyframe_qc_verifier(project_name: str, script: dict = None):
         verdict = qc_client.check_image(path, desc, cfg, style=(shot.get("style") or ""),
                                         ref_images=(_qc_ref_images(shot, *_kf_idx) if _kf_idx else None))
         gate = _qc_gate(verdict)
+        # 尾帧质检不达标 → 沉淀 kind="keyframe" 教训，供下次重试 recall_cb 改写提示词。
+        # 提示词键用 preflight 自愈**之前**的确定性串（build_end_frame_prompt），与
+        # keyframe.generate_keyframes 里的 orig_prompt 同键，保证 phash 稳定。
+        if not gate.get("accept"):
+            try:
+                orig_prompt = keyframe.build_end_frame_prompt(
+                    shot, chained=bool(item.get("chained")))
+                rec = _qc_record_verdict(
+                    project_name, "keyframe",
+                    f"shot_{item.get('seq') or item.get('shot_id')}", "尾帧质检",
+                    1, None, path, verdict, style=(shot.get("style") or ""))
+                _record_qc_lesson(project_name, "keyframe", orig_prompt, rec)
+            except Exception as e:  # noqa: BLE001 - 沉淀失败绝不影响质检结论
+                app.logger.warning(f"尾帧教训沉淀失败（忽略）：{e}")
         return bool(gate.get("accept")), gate.get("reason") or ""
 
     return _verify, min(2, int(cfg.get("max_retries") or 0))
@@ -5383,7 +5718,17 @@ def _keyframe_prompt_preflight(project_name: str):
         style = shot.get("style") or _proj_style
         ctx = dict(shot)
         ctx["chained"] = bool(item.get("chained"))
+        # prompt 召回：预检前先叠加 kind="prompt" 历史教训。orig_prompt 是自愈**前**的
+        # 原始串（也不含召回叠加块），作为下方沉淀的稳定 phash 键，避免指纹漂移。
+        orig_prompt = prompt or ""
+        try:
+            prompt = prompt_memory.learned_prompt(
+                kind="prompt", prompt=orig_prompt, project=project_name,
+                root_dir=PROJECT_OUTPUT_DIR, style=style)
+        except Exception as e:  # noqa: BLE001 - 召回失败不影响预检
+            app.logger.warning(f"尾帧提示词召回失败（忽略）：{e}")
         pf = prompt_qc.preflight("keyframe", prompt, ctx=ctx, style=style, cfg=cfg)
+        gate = prompt_qc.prompt_qc_gate(pf, cfg)
         _qc_record(project_name, "prompt",
                    f"shot_{item.get('seq') or item.get('shot_id')}",
                    {"stage": "keyframe",
@@ -5393,6 +5738,12 @@ def _keyframe_prompt_preflight(project_name: str):
                     "rebuild_hint": pf.get("rebuild_hint") or "",
                     "verdict": pf.get("verdict") or {},
                     "prompt": pf.get("prompt") or ""})
+        # prompt 沉淀：预检不通过或有缺陷时落 kind="prompt"（键用自愈前原始串）。
+        if not gate.get("accept") or (pf.get("verdict") or {}).get("issues"):
+            try:
+                _record_preflight_lesson(project_name, orig_prompt, pf, gate)
+            except Exception as e:  # noqa: BLE001 - 沉淀失败不影响预检
+                app.logger.warning(f"尾帧提示词教训沉淀失败（忽略）：{e}")
         return pf
 
     return _pre, True
@@ -7176,6 +7527,166 @@ def _dub_audio_url(project_name: str, rel_path: str) -> str:
 #      在旧流程里要等到成片验收才暴露的问题。
 # 两者都**不阻断生成**：整集生产不能被单句质检拖死，结论如实记录、逐句可定位即可。
 
+def _record_audio_qc_lesson(project_name: str, ln: dict, verdict: dict) -> dict:
+    """把一句「配音成品质检不达标」沉淀成 ``kind="audio"`` 教训。
+
+    提示词键用**自愈前**的台词原文（``audio_orig_text``，回退当前 ``ln["text"]``）：
+    它正是 TTS 的实际输入，phash 稳定；预检已自愈过 text 时取自愈前的原文，避免指纹漂移。
+    ⚠️ 沉淀的 issues **只进教训库，绝不改台词**（音频类召回是计划级纠偏，见 _apply_audio_hints）。
+    """
+    text_key = ln.get("audio_orig_text") or ln.get("text") or ""
+    if not text_key:
+        return {}
+    verdict = verdict if isinstance(verdict, dict) else {}
+    rec = {
+        "issues": [str(x).strip() for x in
+                   (list(verdict.get("issues") or []) +
+                    list(verdict.get("critical_issues") or [])) if str(x).strip()],
+        "critical_issues": [str(x).strip() for x in (verdict.get("critical_issues") or [])
+                            if str(x).strip()],
+        "reason": str(verdict.get("reason") or "").strip(),
+        "score": verdict.get("score"),
+        "audio": True,
+    }
+    if not rec["issues"] and not rec["reason"]:
+        return {}
+    try:
+        return _record_qc_lesson(project_name, "audio", text_key, rec)
+    except Exception as e:  # noqa: BLE001 - 沉淀失败绝不影响配音
+        app.logger.warning(f"配音教训沉淀失败（忽略）：{e}")
+        return {}
+
+
+def _dub_line_speaker_from_script(ln: dict, project_name: str) -> str:
+    """从剧本里找该句所属镜头登记的 speaker（dialogue[].speaker / shot.speaker）。
+
+    取不到返回空串（调用方不做回填）。纯只读，永不抛异常。
+    """
+    shot_id = ln.get("shot_id")
+    if not project_name or shot_id is None:
+        return ""
+    try:
+        resolved = _dub_resolve_script({"project_name": project_name})
+        script = resolved.get("script") or {}
+    except Exception:  # noqa: BLE001
+        return ""
+    sid_str = str(shot_id)
+    text = str(ln.get("text") or "").strip()
+    shots = []
+    for sc in (script.get("scenes") or []):
+        shots.extend(sc.get("shots") or [])
+    if not shots:
+        shots = script.get("shots") or []
+    for shot in shots:
+        if str(shot.get("shot_id") or "") != sid_str:
+            continue
+        dlg_speaker = ""
+        for row in (shot.get("dialogue") or []):
+            if str(row.get("text") or "").strip() == text:
+                dlg_speaker = str(row.get("speaker") or "").strip()
+                if dlg_speaker:
+                    break
+        return dlg_speaker or str(shot.get("speaker") or "").strip()
+    return ""
+
+
+def _dub_character_desc(character: str, project_name: str) -> str:
+    """取角色音色底稿描述（供 design 模式 instruct）；取不到返回空串。"""
+    if not character or not project_name:
+        return ""
+    try:
+        resolved = _dub_resolve_script({"project_name": project_name})
+        script = resolved.get("script") or {}
+        for ch in (script.get("characters") or []):
+            if str(ch.get("name") or "") == str(character):
+                return str(ch.get("description") or ch.get("tts_voice") or "")
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _apply_audio_hints(ln: dict, hints: list, project_name: str = "") -> None:
+    """音频类召回的**计划级纠偏**（设计 D4：音频建议绝不拼进 ``ln["text"]``，会被 TTS 念出来）。
+
+    逐条扫描 hints（缺陷描述），按特征做确定性纠偏，只动 plan 的说话人/音色模式/期望时长：
+      - 含「旁白」「speaker」「角色」：若本句说话人是旁白兜底（剧本 dialogue 没登记 speaker），
+        且能拿到该镜在剧本里登记的 speaker，则回填 ``ln["character"]``，避免角色台词被旁白念；
+      - 含「情绪」「语气」「instruct」：``voice.mode == "preset"`` 时切到 ``design``，
+        并确保 ``instruct`` 携带该句情绪（preset 的 CustomVoice 会忽略 instruct，只有
+        VoiceDesign 真正按 instruct 控制语气）；
+      - 含「时长」「截断」：记录 ``ln["audio_expect_sec"]``（期望时长）供后续质检比对，不阻断；
+      - 其它：仅留痕（hints 由调用方写入 ``ln["audio_hints"]`` 审计），不改 plan。
+
+    纯就地修改、永不抛异常、不改 tts_client.py（build_dub_plan 保持纯计划构建）。
+    """
+    hints = [str(h).strip() for h in (hints or []) if str(h).strip()]
+    if not hints:
+        return
+    try:
+        joined = " ".join(hints)
+        voice = ln.get("voice") or {}
+        # —— 说话人回填：旁白兜底 + hint 提示该句其实是角色台词 → 按剧本登记的 speaker 纠偏 ——
+        if (("旁白" in joined or "speaker" in joined or "角色" in joined)
+                and str(ln.get("character") or "") == tts_client.NARRATION_SPEAKER):
+            speaker = ""
+            try:
+                speaker = _dub_line_speaker_from_script(ln, project_name)
+            except Exception:  # noqa: BLE001
+                speaker = ""
+            if speaker and speaker != tts_client.NARRATION_SPEAKER:
+                ln["character"] = speaker
+        # —— 情绪/语气：preset 忽略 instruct → 切 design 并携带情绪 ——
+        if ("情绪" in joined or "语气" in joined or "instruct" in joined.lower()):
+            emotion = str(ln.get("emotion") or "").strip()
+            if emotion and not tts_client._is_neutral_emotion(emotion):
+                desc = ""
+                try:
+                    desc = _dub_character_desc(ln.get("character"), project_name)
+                except Exception:  # noqa: BLE001
+                    desc = ""
+                voice = dict(voice, mode="design",
+                             instruct=tts_client._emotion_instruct(emotion, desc))
+                ln["voice"] = voice
+        # —— 时长/截断：记录期望时长供质检比对（不阻断）——
+        if "时长" in joined or "截断" in joined:
+            expect = _audio_line_expect_sec(ln)
+            if expect > 0:
+                ln["audio_expect_sec"] = round(float(expect), 2)
+    except Exception as e:  # noqa: BLE001 - 纠偏失败绝不影响配音
+        app.logger.warning(f"配音教训纠偏失败（忽略）：{e}")
+
+
+def _apply_audio_lessons(plan_lines: list, project_name: str) -> int:
+    """配音计划构建后、逐句合成前的音频教训召回（设计 §2.3.2）。
+
+    对每句按 ``kind="audio"`` 召回历史教训（键 = 该句 text）：
+      - ``ln["audio_hints"]`` 只存审计，**绝不进台词**；
+      - 调 ``_apply_audio_hints`` 做计划级纠偏（说话人回填 / preset→design / 期望时长）。
+    无教训时零行为变更；召回失败静默忽略（保险不影响配音）。返回产生 hints 的句数。
+    """
+    if not project_name or not plan_lines:
+        return 0
+    hit_lines = 0
+    for ln in plan_lines:
+        text = str(ln.get("text") or "")
+        # 键用 build_dub_plan 刚构建、**尚未被预检自愈过**的台词原文（TTS 实际输入），
+        # 保证 _record_audio_qc_lesson 里 phash 稳定、与自愈后的 text 不漂移。
+        ln.setdefault("audio_orig_text", text)
+        if not text:
+            continue
+        try:
+            hints = prompt_memory.suggest(kind="audio", prompt=text, project=project_name,
+                                          root_dir=PROJECT_OUTPUT_DIR)
+        except Exception:  # noqa: BLE001 - 召回失败绝不影响配音
+            hints = []
+        if not hints:
+            continue
+        ln["audio_hints"] = list(hints)
+        _apply_audio_hints(ln, hints, project_name)
+        hit_lines += 1
+    return hit_lines
+
+
 def _audio_line_expect_sec(line: dict) -> float:
     """该句配音的期望时长（由台词字数推算；推算不出时退回镜头时长）
 
@@ -7316,6 +7827,11 @@ def _audio_qc_lines(project_name: str, lines: list, results: list, cfg: dict,
                 stats["passed"] += 1
             else:
                 stats["failed"] += 1
+                # T03b：配音成品质检不达标 → 沉淀 kind="audio" 教训（键 = 该句 TTS 输入原文，
+                # 自愈前用 audio_orig_text）。verdict.ok=false（接口异常）时 verdict 无有效缺陷，
+                # 不沉淀，避免把「质检调用失败」记成「这句配音有问题」。
+                if verdict.get("ok", True) and ln:
+                    _record_audio_qc_lesson(project_name, ln, verdict)
                 if len(stats["problems"]) < 20:
                     stats["problems"].append({
                         "line_id": r.get("line_id"), "shot_id": r.get("shot_id"),
@@ -7615,6 +8131,10 @@ def api_tts_plan():
     except TTSError as e:
         return jsonify({"success": False, "error": str(e)}), 400
 
+    # T03b：配音计划构建后、预览/合成前，按 kind="audio" 召回历史教训做计划级纠偏
+    # （说话人回填 / preset→design / 期望时长），绝不进台词。无教训时零行为变更。
+    _apply_audio_lessons(plan.get("lines") or [], project_name)
+
     for ln in plan["lines"]:
         ln["url"] = _dub_audio_url(project_name, ln.get("out_path") or "")
         ln["exists"] = bool(ln.get("out_path") and os.path.exists(ln["out_path"]))
@@ -7780,6 +8300,10 @@ def api_tts_generate():
                      "请检查剧本该集是否确实没有台词内容。"),
             "audit": stats, "problem_shots": audit["problem_shots"],
         }), 400
+
+    # T03b：合成前同样召回 kind="audio" 历史教训做计划级纠偏（与 /api/tts/plan 一致），
+    # 避免用户「预览没纠偏、合成又纠偏」的不一致；无教训时零行为变更。
+    _apply_audio_lessons(plan.get("lines") or [], project_name)
 
     # 保存音色映射，保证同角色跨轮次音色一致
     try:
@@ -9294,26 +9818,105 @@ def _prompt_memory_view(kind: str = "", limit: int = 50) -> dict:
         return {"total": 0, "by_kind": {}, "path": "", "lessons": [], "error": str(e)}
 
 
+def _prompt_memory_dead_count() -> int:
+    """死教训数（use_count==0 的条数）；读取失败返回 0。"""
+    try:
+        return int(prompt_memory.get_memory(PROJECT_OUTPUT_DIR).stats().get("dead_lessons") or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _prompt_memory_used_total() -> int:
+    """累计被生成链路召回次数（所有教训 use_count 之和）；读取失败返回 0。"""
+    try:
+        return int(prompt_memory.get_memory(PROJECT_OUTPUT_DIR).stats().get("used_total") or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 @app.route('/api/memory/lessons', methods=['GET'])
 @_autopilot_guard
 def api_memory_lessons():
     """质检教训库（generation 链路自动学习成果）
 
-    query: kind（可空）/ limit（默认 50）/ prune_empty=1（顺手清理历史空记录）
+    query: kind（逗号分隔多值）/ project / since / until(ISO，只到日期按当天末闭区间) /
+           q（关键词）/ limit（默认 50）/ offset（默认 0）/ prune_empty=1（顺手清理空记录）
+    → {success, pruned, total, filtered, offset, limit, by_kind, dead_lessons, lessons[]}
     """
     kind = str(request.args.get('kind') or '')
+    project = str(request.args.get('project') or '').strip()
+    since = str(request.args.get('since') or '').strip()
+    until = str(request.args.get('until') or '').strip()
+    q = str(request.args.get('q') or '').strip()
     try:
-        limit = max(1, min(500, int(request.args.get('limit', 50))))
+        limit = max(0, min(500, int(request.args.get('limit', 50))))
     except (TypeError, ValueError):
         limit = 50
+    try:
+        offset = max(0, int(request.args.get('offset', 0)))
+    except (TypeError, ValueError):
+        offset = 0
     removed = 0
     if str(request.args.get('prune_empty') or '') in ('1', 'true', 'yes'):
         try:
             removed = prompt_memory.get_memory(PROJECT_OUTPUT_DIR).prune_empty()
         except Exception as e:  # noqa: BLE001
             app.logger.warning("清理空教训失败：%s", e)
-    view = _prompt_memory_view(kind=kind, limit=limit)
-    return jsonify({"success": True, "pruned": removed, **view})
+    try:
+        page = prompt_memory.get_memory(PROJECT_OUTPUT_DIR).query(
+            kind=kind, project=project, since=since, until=until, q=q,
+            limit=limit, offset=offset)
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning("读取质检教训库失败：%s", e)
+        return jsonify({"success": False, "pruned": removed, "total": 0, "filtered": 0,
+                        "offset": offset, "limit": limit, "by_kind": {}, "dead_lessons": 0,
+                        "lessons": [], "error": str(e)})
+    return jsonify({
+        "success": True, "pruned": removed,
+        "total": page["total"], "filtered": page["filtered"],
+        "offset": offset, "limit": limit,
+        "by_kind": page["by_kind"], "dead_lessons": page["dead_lessons"],
+        "lessons": page["items"],
+    })
+
+
+@app.route('/api/memory/lessons/<lesson_id>', methods=['DELETE'])
+@_autopilot_guard
+def api_memory_lesson_delete(lesson_id):
+    """删除单条教训（按确定性主键 lesson_id，"L"+sha1 前 16 位）。
+
+    → {success, deleted, lesson_id}；未命中返回 404 {"success":false,"error":"未找到该教训"}。
+    """
+    lid = str(lesson_id or "").strip()
+    if not lid:
+        return jsonify({"success": False, "error": "缺少 lesson_id"}), 400
+    try:
+        ok = prompt_memory.get_memory(PROJECT_OUTPUT_DIR).delete(lid)
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning("删除教训失败：%s", e)
+        return jsonify({"success": False, "error": str(e)}), 500
+    if not ok:
+        return jsonify({"success": False, "deleted": 0, "lesson_id": lid,
+                        "error": "未找到该教训"}), 404
+    return jsonify({"success": True, "deleted": 1, "lesson_id": lid})
+
+
+@app.route('/api/memory/lessons/clear', methods=['POST'])
+@_autopilot_guard
+def api_memory_lessons_clear():
+    """清空某一环节的全部教训（body {kind}；kind 为空 = 清空全部）。
+
+    → {success, cleared, kind}。
+    """
+    data = request.json or {}
+    kind = str(data.get("kind") or "").strip()
+    try:
+        cleared = prompt_memory.get_memory(PROJECT_OUTPUT_DIR).clear(kind)
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning("清空教训失败：%s", e)
+        return jsonify({"success": False, "cleared": 0, "kind": kind,
+                        "error": str(e)}), 500
+    return jsonify({"success": True, "cleared": cleared, "kind": kind})
 
 
 @app.route('/api/memory/lessons/search', methods=['GET'])
@@ -9359,7 +9962,12 @@ def api_memory_stats():
         "stats": stats,
         "trends": trends,
         "insights": insights,
-        "lessons": {"total": lessons["total"], "by_kind": lessons["by_kind"]},
+        "lessons": {
+            "total": lessons["total"],
+            "by_kind": lessons["by_kind"],
+            "dead_lessons": _prompt_memory_dead_count(),
+            "used_total": _prompt_memory_used_total(),
+        },
     })
 
 
