@@ -26,6 +26,7 @@ import subprocess
 from typing import Dict, List, Optional
 
 import requests
+import cancellation  # S9：远端任务取消（中止信号贯穿超分轮询，与 pipeline/llm_client 同一套）
 
 from config import (
     COMFYUI_URL, COMFYUI_OUTPUT_DIR, PROJECT_OUTPUT_DIR, UPSCALE_DIR,
@@ -687,8 +688,15 @@ class VideoUpscaler:
         deadline = t0 + timeout
         last_note = 0.0
         while time.time() < deadline:
+            # S9：中止信号检查（cancellation.should_stop 无注册时恒 False，不影响普通路径）
+            if cancellation.should_stop():
+                logger.warning("超分等待期间收到中止信号，打断远端任务 %s", prompt_id)
+                self.client.interrupt(prompt_id)
+                raise cancellation.Cancelled(f"超分远端等待期间收到中止信号：{prompt_id}")
             try:
                 hist = self.client.get_history(prompt_id)
+            except cancellation.Cancelled:
+                raise
             except Exception as e:
                 logger.debug(f"查询 history 失败: {e}")
                 hist = {}
@@ -723,7 +731,11 @@ class VideoUpscaler:
                     note = f"超分执行中…已耗时 {elapsed}s"
                     pct = 45
                 step(note, pct)
-            time.sleep(3)
+            # S9：可被打断的短休眠（3s 轮询间隔），暂停时最多 0.25s 即有反应
+            cancellation.sleep(3)
+        # S9：超时（非中止）也清理远端队列，避免本地判超时而远端白跑
+        logger.warning("超分等待超时，清理远端队列: %s", prompt_id)
+        self.client.interrupt(prompt_id)
         raise UpscaleError(
             f"超分等待超时（>{timeout}s，prompt_id={prompt_id}）。"
             f"可在 ComfyUI 队列查看该任务，或降低倍率/改用 tiny-long 模式后重试"

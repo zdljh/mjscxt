@@ -806,6 +806,10 @@ def public_view(cfg: dict) -> dict:
         "audio_qc_active": bool(cfg.get("enabled") and cfg.get("audio_enabled")),
         "audio_ai_active": bool(cfg.get("enabled") and cfg.get("audio_enabled")
                                 and ep["base_url"] and ep["api_key"] and ep["model"]),
+        # S1：剧本质检开关（与 image/video 同口径，需 enabled + script_enabled + 端点就绪）。
+        # 前端 /api/qc/config 据此如实回显「剧本质检是否真的在跑」，不再假装已质检。
+        "script_qc_active": bool(cfg.get("enabled") and cfg.get("script_enabled")
+                                and ep["base_url"] and ep["api_key"] and ep["model"]),
         "default_image_prompt": DEFAULT_IMAGE_PROMPT,
         "default_video_prompt": DEFAULT_VIDEO_PROMPT,
         "default_audio_prompt": DEFAULT_AUDIO_PROMPT,

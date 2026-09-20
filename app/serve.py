@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import sys
@@ -110,10 +111,71 @@ def _safe_run():
         return False
 
 
+def _install_shutdown_hooks() -> None:
+    """O16：优雅停机钩子。
+
+    背景：`autopilot.stop()` 原本**全库无调用方**，`serve.py` 里 `import signal` 也未使用。
+    于是 Ctrl+C 是「硬杀」——托管循环线程（daemon）被进程直接带死，可能留下：
+      - SQLite 里的 `interrupted` 记录（当前步骤没被正常收尾）；
+      - 正在写一半的 JSON / manifest（非原子写）。
+    本钩子让进程退出**之前**先优雅停掉托管循环（步骤边界生效），再正常终止。
+
+    实现（Python 官方推荐的「优雅停机 + 二次信号强制」模式）：
+      - 首次收到 SIGINT/SIGTERM/SIGBREAK → 调 `autopilot.stop(timeout=15)` 给在飞步骤
+        一个到边界停下的窗口，然后**恢复默认处理并重新抛出该信号**，让进程走常规终止
+        流程（触发 atexit 兜底）；
+      - `atexit.register(_atexit_stop)` 作为最后兜底：即使信号 handler 没跑到，
+        进程正常/异常退出前也保证 `autopilot.stop()` 被执行一次（幂等，重复调用安全）。
+
+    ⚠️ 与 S9 的「cancellation 检查点刻意不进 ComfyUI 渲染循环」不冲突：这里只停托管
+    循环线程本身，不强行打断已在 GPU 上渲染的段（避免留半成品），交由各自的超时兜底。
+    """
+    import atexit
+    import signal
+
+    def _do_stop() -> None:
+        try:
+            import autopilot
+        except Exception:  # noqa: BLE001  导入失败（如 app 尚未就绪）不应阻塞停机
+            return
+        try:
+            autopilot.stop(timeout=15)
+            logger.info("托管循环已优雅停止（步骤边界）")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"优雅停止托管循环失败：{e}")
+
+    def _atexit_stop() -> None:
+        # 进程退出兜底；_do_stop 内部幂等（autopilot.stop 重复调用安全）
+        _do_stop()
+
+    def _sig_handler(signum, frame) -> None:
+        logger.info(f"收到停机信号（{signum}），优雅停止托管循环后终止进程...")
+        _do_stop()
+        # 恢复默认处理，重新抛出同一信号 → 走常规终止（会再触发 atexit，幂等）
+        signal.signal(signum, signal.SIG_DFL)
+        signal.raise_signal(signum)
+
+    # 注册信号（Windows 上 SIGTERM/SIGBREAK 语义有限，能注册哪个就注册哪个）
+    for _sig, _name in ((signal.SIGINT, "SIGINT"),
+                        (getattr(signal, "SIGBREAK", signal.SIGINT), "SIGBREAK"),
+                        (getattr(signal, "SIGTERM", None), "SIGTERM")):
+        if _sig is None or _sig == signal.SIG_DFL:
+            continue
+        try:
+            signal.signal(_sig, _sig_handler)
+            logger.info(f"已注册优雅停机 handler：{_name}")
+        except (ValueError, OSError, RuntimeError) as e:
+            logger.debug(f"注册 {_name} handler 失败（{e}），跳过")
+
+    atexit.register(_atexit_stop)
+    logger.info("已注册 atexit 优雅停机兜底")
+
+
 def main() -> int:
     restart_count = 0
 
     logger.info("漫剧生成系统启动器开始运行（含自动重启保护）")
+    _install_shutdown_hooks()
 
     while restart_count <= MAX_RESTARTS:
         logger.info("启动 Flask 服务... (尝试 #%d)", restart_count + 1)

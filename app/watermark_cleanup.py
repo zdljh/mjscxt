@@ -95,12 +95,14 @@ def clean_image(path: str, region: Sequence[float] = DEFAULT_REGION,
     if not available():
         rec["error"] = "ffmpeg/ffprobe 不可用，跳过去水印"
         return rec
+    tmp = None
     try:
         w, h = probe_size(path)
         filt, box = _filter(w, h, region)
         rec["size"] = [w, h]
         rec["region"] = box
         rec["backup"] = _backup(path, backup_dir)
+        # G8：临时文件点前缀命名，且 finally 统一清理（成功则置 None 跳过）
         tmp = path + ".clean.png"
         cmd = [FFMPEG_BIN, "-y", "-v", "error", "-i", path, "-vf", filt,
                "-frames:v", "1", tmp]
@@ -109,9 +111,16 @@ def clean_image(path: str, region: Sequence[float] = DEFAULT_REGION,
             rec["error"] = (out.stderr or "ffmpeg 处理失败").strip()[:200]
             return rec
         os.replace(tmp, path)
+        tmp = None
         rec.update({"ok": True, "applied": True})
     except Exception as e:  # pragma: no cover - 兜底
         rec["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
     return rec
 
 
@@ -126,25 +135,36 @@ def clean_video(path: str, region: Sequence[float] = DEFAULT_REGION,
     if not available():
         rec["error"] = "ffmpeg/ffprobe 不可用，跳过去水印"
         return rec
+    tmp = None
     try:
         w, h = probe_size(path)
         filt, box = _filter(w, h, region)
         rec["size"] = [w, h]
         rec["region"] = box
         rec["backup"] = _backup(path, backup_dir)
-        tmp = os.path.splitext(path)[0] + ".clean.mp4"
+        # G8：临时文件用 .clean.tmp（非 .mp4 后缀），避免被 *.mp4 glob 命中当"分片"；
+        # 成功 replace 后置 None，失败/异常由 finally 清理。
+        # ⚠️ 扩展名不再是 .mp4，必须显式 -f mp4 指定容器（ffmpeg 否则靠扩展名推断会失败）
+        tmp = os.path.splitext(path)[0] + ".clean.tmp"
         has_audio = probe_has_audio(path)
         rec["has_audio"] = has_audio
         audio_args = ["-c:a", "copy"] if has_audio else ["-an"]
         cmd = [FFMPEG_BIN, "-y", "-v", "error", "-i", path, "-vf", filt,
                "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
-               "-pix_fmt", "yuv420p"] + audio_args + ["-movflags", "+faststart", tmp]
+               "-pix_fmt", "yuv420p", "-f", "mp4"] + audio_args + ["-movflags", "+faststart", tmp]
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
         if out.returncode != 0 or not os.path.exists(tmp):
             rec["error"] = (out.stderr or "ffmpeg 处理失败").strip()[:200]
             return rec
         os.replace(tmp, path)
+        tmp = None
         rec.update({"ok": True, "applied": True})
     except Exception as e:  # pragma: no cover - 兜底
         rec["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
     return rec

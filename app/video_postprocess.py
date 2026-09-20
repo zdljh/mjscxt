@@ -144,7 +144,9 @@ def strip_audio(video_path: str, output_path: Optional[str] = None,
 
     in_place = not output_path
     target = os.path.abspath(output_path or video_path)
-    tmp_out = target + ".noaudio.tmp.mp4" if in_place else target
+    # G8：临时文件用 .clean（非 .mp4 后缀），避免被 *.mp4 glob（_ordered_shot_files /
+    # get_output_status）命中当成"分片/成片"；容器格式改由 -f mp4 显式指定。
+    tmp_out = target + ".noaudio.clean" if in_place else target
     os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
 
     if backup and in_place:
@@ -156,10 +158,15 @@ def strip_audio(video_path: str, output_path: Optional[str] = None,
             report["error"] = f"备份失败，已中止（不做无备份剥离）：{e}"
             return report
 
+    # in_place 时输出到 .noaudio.clean（非 .mp4），必须显式 -f mp4 指定容器；
+    # 非 in_place 时输出到调用方给的目标（容器按其自身扩展名推断），不强加 -f mp4
+    fmt = ["-f", "mp4"] if in_place else []
     attempts = [
-        ("copy", ["ffmpeg", "-y", "-i", video_path, "-map", "0:v", "-c", "copy", "-an", tmp_out]),
+        ("copy", ["ffmpeg", "-y", "-i", video_path, "-map", "0:v", "-c", "copy", "-an"]
+         + fmt + [tmp_out]),
         ("reencode_h264", ["ffmpeg", "-y", "-i", video_path, "-map", "0:v", "-an",
-                           "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", tmp_out]),
+                           "-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
+         + fmt + [tmp_out]),
     ]
     last_err = ""
     for method, cmd in attempts:
@@ -238,12 +245,13 @@ def ensure_audio_track(video_path: str, sample_rate: int = 48000) -> Dict:
     if dur <= 0:
         report["error"] = "无法读取视频时长，跳过补音轨"
         return report
-    tmp_out = os.path.splitext(video_path)[0] + ".audioadded.tmp.mp4"
+    # G8：临时文件用 .clean（非 .mp4 后缀），避免被 *.mp4 glob 命中；容器由 -f mp4 显式指定
+    tmp_out = os.path.splitext(video_path)[0] + ".audioadded.clean"
     cmd = ["ffmpeg", "-y", "-v", "error", "-i", video_path,
            "-f", "lavfi", "-t", f"{dur:.3f}", "-i", f"anullsrc=r={sample_rate}:cl=stereo",
            "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
            "-c:a", "aac", "-b:a", "128k", "-shortest",
-           "-movflags", "+faststart", tmp_out]
+           "-f", "mp4", "-movflags", "+faststart", tmp_out]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
     except Exception as e:  # pragma: no cover - 环境相关
@@ -336,6 +344,12 @@ class VideoPostProcessor:
                 return self._concat_reencode(video_paths, output_path, probes)
         except Exception as e:
             logger.error(f"合并视频失败: {e}")
+            # G8：异常路径也要清掉 concat list 临时文件，不留 .list 残片
+            try:
+                if os.path.exists(list_file):
+                    os.remove(list_file)
+            except OSError:
+                pass
             return ""
 
     def _concat_reencode(self, video_paths: List[str], output_path: str,
@@ -402,6 +416,8 @@ class VideoPostProcessor:
         因此这里改为：把 ffmpeg 的工作目录切到 SRT 所在目录，滤镜只传**纯文件名**。
         这样既不出现反斜杠也不用转义盘符冒号，且路径里的中文/空格也一并规避。
         """
+        # G8：SRT 临时文件统一 finally 清理（成功则置 None 跳过；失败/异常路径不留残片）
+        srt_file = None
         try:
             os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
@@ -437,10 +453,7 @@ class VideoPostProcessor:
             if result.returncode == 0 and os.path.isfile(output_path) \
                     and os.path.getsize(output_path) > 0:
                 logger.info(f"字幕添加成功: {output_path}")
-                try:
-                    os.remove(srt_file)
-                except OSError:
-                    pass
+                srt_file = None
                 return output_path
             logger.error(f"添加字幕失败（返回码 {result.returncode}）："
                          f"{(result.stderr or '')[-800:]}")
@@ -448,6 +461,12 @@ class VideoPostProcessor:
         except Exception as e:  # noqa: BLE001
             logger.error(f"添加字幕失败: {e}")
             return ""
+        finally:
+            if srt_file and os.path.exists(srt_file):
+                try:
+                    os.remove(srt_file)
+                except OSError:
+                    pass
 
     def _format_time(self, seconds: float) -> str:
         """格式化时间为 SRT 格式"""

@@ -391,6 +391,11 @@ def project_kind_roots() -> list:
         ("autonomous", os.path.join(out, "autonomous")),
         ("exports", os.path.join(out, "exports")),
         ("export", os.path.join(out, "export")),
+        # G8：两层结构 output/qc/audio/<项目> 此前只扫一层 QC_DIR 永远匹配不到；
+        # _watermark_backup/<项目>（水印回滚源，按项目分子目录）补进删除覆盖，
+        # 单项目删除时按项目名精确收走该项目自己的备份子目录（进可还原回收站）。
+        ("qc_audio", os.path.join(QC_DIR, "audio")),
+        ("watermark_backup", os.path.join(QC_DIR, "_watermark_backup")),
     ]
 
 

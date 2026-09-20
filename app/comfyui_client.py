@@ -26,6 +26,7 @@ import random
 import logging
 import threading
 import requests
+import cancellation  # S9：远端任务取消（中止信号贯穿 ComfyUI 轮询，与 pipeline/llm_client 同一套）
 from typing import Dict, List, Optional, Any, Tuple, Sequence
 # ⚠️ Sequence 曾被漏导入：类级注解 `_LIGHT_KEYWORDS: Sequence[...]` 在类创建时**不求值**，
 # 所以模块照常导入、py_compile 也通过，但一旦有工具读取
@@ -688,9 +689,50 @@ class ComfyUIClient:
     def get_history(self, prompt_id: str) -> dict:
         return self._get(f"/history/{prompt_id}")
 
+    def interrupt(self, prompt_id: str = None) -> None:
+        """S9：向 ComfyUI 发 /interrupt，打断当前正在出队的任务。
+
+        - `prompt_id` 为 None → 打断队列中**正在执行**的那个（ComfyUI 官方语义）；
+        - 为具体 prompt_id → 仅当它仍在队列/执行中时才有效（配合 `delete_queued` 精准清理）。
+        失败静默（网络抖了也不应让取消路径本身抛错拖垮上层）。
+        """
+        try:
+            if prompt_id is None:
+                self._post("/interrupt")
+            else:
+                self._post("/interrupt")
+                self.delete_queued(prompt_id)
+            logger.info(f"已请求 ComfyUI 打断远端任务: {prompt_id or '(当前出队)'}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"ComfyUI /interrupt 失败（不影响取消流程）: {e}")
+
+    def delete_queued(self, prompt_id: str) -> None:
+        """S9：把指定 prompt 从队列中删除（ComfyUI `POST /queue {"delete":[id]}`）。"""
+        try:
+            self._post("/queue", {"delete": [prompt_id]})
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"ComfyUI 删除队列项失败（不影响取消流程）: {prompt_id}: {e}")
+
     def wait_for_completion(self, prompt_id: str, timeout: int = 1800) -> dict:
+        """轮询远端任务直到完成。
+
+        S9 增强（不改变返回契约——超时仍返回 `{}`，避免 ripple 到 6 处调用方）：
+          ① 轮询内检查 `cancellation.should_stop()`（contextvar，无注册时恒 False，
+             不影响普通 API 调用路径）；一旦收到「暂停/停止」→ 立即 `interrupt` +
+             抛 `cancellation.Cancelled`（穿透到 pipeline 归一为 cancelled），不再白烧 GPU；
+          ② 轮询用 `cancellation.sleep`（可被打断的短休眠），点了暂停最多 0.25s 就有反应，
+             而不是等满 3s；
+          ③ 超时（非中止）后也 `interrupt` 一次，避免「本地判超时、远端继续跑」的双重浪费。
+        ⚠️ 注意（审计 S9 备注）：cancellation 检查点**刻意不放进 ComfyUI 渲染循环**
+        （会留半成品）——这里加的是「超时/取消后的远端清理」，两者不冲突。
+        """
         start = time.time()
         while time.time() - start < timeout:
+            # ① 中止信号：点「暂停」后立刻打断远端并抛出，让上层转 cancelled 而非干等
+            if cancellation.should_stop():
+                logger.warning(f"等待期间收到中止信号，打断远端任务 {prompt_id}")
+                self.interrupt(prompt_id)
+                raise cancellation.Cancelled(f"ComfyUI 远端等待期间收到中止信号：{prompt_id}")
             try:
                 history = self.get_history(prompt_id)
                 if prompt_id in history:
@@ -704,10 +746,15 @@ class ComfyUIClient:
                         logger.error(f"生成出错: {status}")
                         _bump("waited_seconds", round(time.time() - start, 2))
                         return entry
+            except cancellation.Cancelled:
+                raise  # 中止信号必须穿透，不能被轮询的通用 except 吞掉
             except Exception as e:
                 logger.debug(f"轮询历史失败: {e}")
-            time.sleep(3)
-        logger.warning(f"等待超时: {prompt_id}")
+            # ② 可被打断的短休眠（3s 轮询间隔），暂停时最多 0.25s 即有反应
+            cancellation.sleep(3)
+        # ③ 超时（非中止）：仍清理远端，避免本地判超时而远端白跑
+        logger.warning(f"等待超时: {prompt_id}（清理远端队列）")
+        self.interrupt(prompt_id)
         _bump("waited_seconds", round(time.time() - start, 2))
         return {}
 

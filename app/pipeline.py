@@ -504,14 +504,25 @@ def step_assets(ctx) -> dict:
         if not assets:
             results[kind] = {"skipped": True, "total": 0, "note": "剧本中无此类资产"}
             continue
-        ctx["progress"](f"生成{kind}资产（{len(assets)} 个）", 20, phase=f"assets:{kind}")
+        # S13 断点续跑：probe_assets 已算出本类 missing（缺 base 图）名单；只把缺失项传给
+        # worker，已就绪资产不重烧 —— 30 个角色缺 1 个时不再重跑 30 次基础图 + 多视图 + 质检
+        missing_names = {n for n in (pd.get(kind, {}).get("missing") or [])}
+        todo = [a for a in assets
+                if str((a.get("name") or "").strip()) in missing_names]
+        if not todo:
+            # 本类顶层未 done（顶层 done 需三类全齐）但本类无缺失 → 视为已就绪
+            results[kind] = {"skipped": True, "total": len(assets), "note": "本类资产已就绪"}
+            continue
+        ctx["progress"](f"生成{kind}资产（缺 {len(todo)}/{len(assets)} 个）", 20,
+                        phase=f"assets:{kind}")
         final = _run_task_worker(
-            A._generate_asset_task, (assets, kind, ctx["project_name"], ctx["config"].get("style") or ""),
+            A._generate_asset_task, (todo, kind, ctx["project_name"], ctx["config"].get("style") or ""),
             "generation_state", "lock",
-            init={"total": len(assets), "asset_type": kind, "phase": f"{kind} 资产"},
+            init={"total": len(todo), "asset_type": kind, "phase": f"{kind} 资产"},
             prefix=f"pipe_asset_{kind}")
         out = _outcome_from_task(final, f"{kind} 资产生成")
-        results[kind] = {"total": len(assets), "ok": out["ok"], "count": out["count"],
+        results[kind] = {"total": len(assets), "generated": len(todo),
+                         "ok": out["ok"], "count": out["count"],
                          "blocked": out["blocked"], "error": out["error"]}
         if not out["ok"]:
             errs.append(f"{kind}: {out['error']}")
