@@ -2666,11 +2666,18 @@ def _shot_seq(shot_id, fallback: int) -> int:
 
 def _storyboard_worker(task_id: str, project_name: str, shots: list,
                        char_idx: dict, item_idx: dict, scene_idx: dict,
-                       episode_no=None, style: str = ""):
+                       episode_no=None, style: str = "", overwrite: bool = False):
     """后台分镜图生成任务：逐镜头生成并落盘 output/storyboards/<项目>[/epNN]/shot_XX.png
 
     style：用户与总控敲定的风格。用于 ① 补齐镜头 style 字段（老剧本无该字段时兜底）
     ② 解析画幅并覆写分镜图尺寸，保证分镜与成片同为竖屏 9:16。
+
+    overwrite：是否「全量重做」。默认 False —— 已达标入库的 shot_XX.png 直接复用、
+    只重跑缺失/被质检阻断的镜头（断点续跑语义）。这是本次修复的核心：
+    修复前无论如何都从第 1 镜重跑到最后一镜，导致「补跑 21 个不达标镜」要重烧全部 83 镜。
+    需要强制全部重画时（如换风格）显式传 overwrite=True。
+    注意：质检不达标的镜头只写质检暂存区、不写正式目录，所以「正式目录里已有该图」
+    ⟺ 「该镜上一轮已通过质检」——跳过它不会漏掉任何不达标镜。
     """
     out_dir = _ep_dir(os.path.join(STORYBOARDS_DIR, project_name), episode_no)
     os.makedirs(out_dir, exist_ok=True)
@@ -2688,10 +2695,51 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         shots = [dict(s, style=(s.get("style") or _sb_style)) for s in (shots or [])
                  if isinstance(s, dict)]
     manifest_shots = []
+    # 旧 manifest：断点续跑时给「被跳过的镜头」回填上一轮的质检/提示词信息，避免信息丢失
+    _prev_by_key = {}
+    _prev_manifest = os.path.join(out_dir, "storyboard_manifest.json")
+    if os.path.isfile(_prev_manifest):
+        try:
+            with open(_prev_manifest, "r", encoding="utf-8") as _f:
+                for _it in (json.load(_f).get("shots") or []):
+                    if not isinstance(_it, dict):
+                        continue
+                    _sid = _it.get("shot_id")
+                    if _sid is not None:
+                        _prev_by_key[str(_sid)] = _it
+                    _sq = _shot_seq(_sid, 0)
+                    if _sq:
+                        _prev_by_key[f"shot_{_sq:02d}"] = _it
+        except Exception as _e:  # noqa: BLE001
+            app.logger.warning(f"读取旧分镜清单失败（忽略，不影响本次生成）：{_e}")
+    app.logger.info("[分镜断点续跑] overwrite=%s；待处理 %d 镜（已存在者将跳过）",
+                    overwrite, len(shots))
     try:
         for i, shot in enumerate(shots):
             shot_id = shot.get("shot_id", i + 1)
             seq = _shot_seq(shot_id, i + 1)
+            dst = os.path.join(out_dir, f"shot_{seq:02d}.png")
+            # ---------- 断点续跑：已达标入库的镜头直接复用，只重跑缺失/不达标的 ----------
+            # 正式目录里已有非空 shot_XX.png ⟺ 上一轮该镜已通过质检（不达标的只落暂存区）。
+            # 因此这里跳过是安全的，且能把「补跑 N 个不达标镜」的代价从「全量 M 镜」降回 N 镜。
+            if not overwrite and os.path.isfile(dst) and os.path.getsize(dst) > 0:
+                prev = _prev_by_key.get(str(shot_id)) or _prev_by_key.get(f"shot_{seq:02d}") or {}
+                item = dict(prev) if prev else {}
+                item.update({"shot_id": shot_id, "success": True, "skipped": True,
+                             "file": dst, "error": "",
+                             "url": f"/api/storyboards/file/{project_name}/shot_{seq:02d}.png"})
+                item.setdefault("qc", {"enabled": False, "status": "skipped",
+                                       "label": "沿用已达标图", "attempts": 0, "regenerated": 0})
+                item.pop("qc_blocked", None)
+                manifest_shots.append(item)
+                with lock:
+                    generation_state[task_id].update({
+                        "current": i + 1,
+                        "progress": int((i + 1) / max(len(shots), 1) * 100),
+                        "current_shot": shot_id,
+                    })
+                    generation_state[task_id]["results"].append(item)
+                continue
             with lock:
                 generation_state[task_id].update({
                     "current": i + 1,
@@ -2946,10 +2994,12 @@ def api_generate_storyboards():
 
     thread = threading.Thread(target=_storyboard_worker,
                               args=(task_id, project_name, shots, char_idx, item_idx, scene_idx,
-                                    data.get('episode_no'), _project_style(project_name)))
+                                    data.get('episode_no'), _project_style(project_name),
+                                    bool(data.get('overwrite'))))
     thread.daemon = True
     thread.start()
     return jsonify({"task_id": task_id, "status": "started", "total": len(shots),
+                    "overwrite": bool(data.get('overwrite')),
                     "episode_stats": episode_stats})
 
 
@@ -3076,7 +3126,8 @@ def api_generate_videos():
               storyboards, use_storyboard, mode, timeout_per_segment, episode_tag,
               data.get('episode_no')),
         kwargs={"chain_mode": chain_mode,
-                "style": (data.get('style') or _project_style(project_name))},
+                "style": (data.get('style') or _project_style(project_name)),
+                "overwrite": bool(data.get('overwrite'))},
     )
     thread.daemon = True
     thread.start()
@@ -3088,8 +3139,12 @@ def api_generate_videos():
 def _video_generate_worker(task_id, project_name, shots, character_refs,
                           scene_refs, storyboards, use_storyboard, mode,
                           timeout_per_segment, episode_tag, episode_no=None,
-                          chain_mode="auto", style=""):
+                          chain_mode="auto", style="", overwrite=False):
     """逐镜/整集/关键帧三种模式的视频生成（后台任务体，可被路由与流水线复用）
+
+    overwrite：是否全量重做。默认 False —— per_shot 模式下已达标入库的
+    shot_XX.mp4 直接复用、只重跑缺失/被质检阻断的镜头（断点续跑）。
+    episode 模式为「整集一次生成」，无逐镜跳过语义，本参数不影响该分支。
 
     从 /api/videos/generate 抽出的模块级实现：原闭包变量（项目名、镜头、参考图、
     模式等）改为显式参数，业务逻辑不变。抽出的目的是让自动生产流水线
@@ -3337,6 +3392,24 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
         for i, shot in enumerate(shots):
             shot_id = shot.get('shot_id', i + 1)
             seq = _shot_seq(shot_id, i + 1)
+            # ---------- 断点续跑：已达标入库的视频直接复用，只重跑缺失/不达标的 ----------
+            # 正式目录里已有非空 shot_XX.mp4 ⟺ 上一轮该镜视频已通过质检（不达标的只落暂存区）。
+            if not overwrite:
+                _vdst = os.path.join(videos_dir, f"shot_{seq:02d}.mp4")
+                if os.path.isfile(_vdst) and os.path.getsize(_vdst) > 0:
+                    _vitem = {"shot_id": shot_id, "success": True, "skipped": True,
+                              "mode": "per_shot", "path": _vdst,
+                              "url": f"{_vurl}/shot_{seq:02d}.mp4",
+                              "qc": {"enabled": False, "status": "skipped",
+                                     "label": "沿用已达标视频", "attempts": 0, "regenerated": 0}}
+                    with lock:
+                        generation_state[task_id]["results"].append(_vitem)
+                        generation_state[task_id].update({
+                            "current": i + 1,
+                            "progress": int((i + 1) / len(shots) * 100),
+                            "current_shot": shot_id,
+                        })
+                    continue
             with lock:
                 generation_state[task_id].update({
                     "current": i + 1,
