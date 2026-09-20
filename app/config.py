@@ -124,7 +124,11 @@ NOVEL_MAX_CHUNKS = 8            # 单次转换最多送入模型的块数（抽�
 NOVEL_DEFAULT_SHOTS = 12        # 默认目标镜头数
 NOVEL_PREVIEW_CHARS = 4000      # 前端预览单页字符数
 NOVEL_BRIEF_CHARS = 800         # 「原著简报」正文取样字符数（喂给 AI 总控做风格判断，≤ agent 结果窗口）
-LLM_REQUEST_TIMEOUT = 240       # 单次 LLM 请求超时（秒）
+# 单次 LLM 请求超时（秒）。⚠️ 必须可 env 覆盖：reasoning_effort=max + 长章节（数千字正文）
+# 的剧本生成会一路提额 max_tokens（9300→12288→16384→24576），单次最重调用实测连 900s 都
+# 不够（2026-09-19 ep002 第一节 3297 字，900s 仍 ReadTimeout 反复 5 次）。
+# 默认放宽到 1800s（覆盖最重调用）；需要更严/更松可设 env LLM_REQUEST_TIMEOUT。
+LLM_REQUEST_TIMEOUT = int(os.environ.get("LLM_REQUEST_TIMEOUT", "1800"))
 
 # ===================== 项目级隔离（每部小说 = 一个独立项目） =====================
 # 注册表与每项目配置/隔离目录；各产物仍落在既有 output/<kind>/<项目键>/ 下，
