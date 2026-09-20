@@ -1432,7 +1432,8 @@ def api_keyframes_generate():
                 shots, sb_map, kf_dir, seed=seed, timeout=timeout,
                 only_missing=only_missing, progress_cb=_progress,
                 chain_mode=chain_mode, verify_cb=_kf_verify,
-                max_verify_retries=_kf_vretries, preflight_cb=_kf_pre)
+                max_verify_retries=_kf_vretries, preflight_cb=_kf_pre,
+                client=comfyui_client)  # S-04：注入全局 ComfyUIClient 实例（复用连接/共享状态）
             ok = int(report.get("succeeded") or 0)
             with lock:
                 generation_state[task_id].update({

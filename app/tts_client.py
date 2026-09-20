@@ -602,6 +602,25 @@ class QwenTTSClient:
 
     # ---------- 低层 ----------
 
+    def _unload_model(self) -> None:
+        """请求 ComfyUI 卸载已缓存的 TTS 模型（释放 GPU 显存）
+
+        G-03：synthesize_batch 中途失败（_wait 超时/执行错误）时，
+        前面已加载的模型未卸载（只有最后一句节点设了 unload_model_after_generate）。
+        批量 TTS 是高频链路，长期 autopilot 下显存累积泄漏 → 后续任务 OOM。
+        用 /free 接口（与 upscale_client 同口径）主动卸载。失败只告警不抛。
+        """
+        try:
+            req = urllib.request.Request(
+                f"{self.comfyui_url}/free",
+                data=json.dumps({"unload_models": True, "free_memory": True}).encode("utf-8"),
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                resp.read()
+            logger.info("QwenTTS 模型已请求卸载（/free，释放显存）")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"QwenTTS 模型卸载请求失败（不影响结果，仅显存未释放）：{e}")
+
     def _submit(self, prompt: Dict) -> str:
         r = _http_json(f"{self.comfyui_url}/prompt",
                        {"prompt": prompt, "client_id": f"dub-{int(time.time())}"})
@@ -708,7 +727,14 @@ class QwenTTSClient:
 
         logger.info(f"QwenTTS 批量合成 {len(items)} 句 → prompt 节点 {len(prompt)} 个")
         prompt_id = self._submit(prompt)
-        history = self._wait(prompt_id, timeout, progress_cb=lambda m: None)
+        # G-03：try/finally 确保 ComfyUI TTS 模型卸载。_wait 抛 TTSError（超时/执行失败）时，
+        # 前面已加载的模型未卸载（只有最后一句节点设了 unload_model_after_generate）。
+        # 批量 TTS 高频运行，显存累积泄漏 → 后续 OOM。成功时最后一句已卸载，/free 无副作用。
+        try:
+            history = self._wait(prompt_id, timeout, progress_cb=lambda m: None)
+        finally:
+            if not self.params.get("keep_model_loaded", False):
+                self._unload_model()
         outputs = history.get("outputs") or {}
 
         results: List[Dict] = []
