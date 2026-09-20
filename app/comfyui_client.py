@@ -116,13 +116,42 @@ SHOT_CAMERA_SPECS = {
     "近景": ("近景镜头（medium close-up）：取景自人物胸部以上至头顶，面部细节清晰，"
              "严禁退为中景或全景"),
     "中景": ("中景镜头（medium shot）：取景自人物腰部或膝部以上至头顶，人物占画面一半左右，"
-             "可带入部分环境"),
-    "全景": "全景镜头（wide shot）：完整呈现人物全身及其所处环境，人物占画面高度的大半",
-    "远景": "远景镜头（long shot）：人物在画面中较小、环境为主体，强调空间感与氛围",
+             "可带入部分环境；**严禁退为全景/远景**（不得出现膝盖以下部位、脚部或大片地面）"),
+    "全景": "全景镜头（wide shot）：完整呈现人物全身及其所处环境，人物占画面高度的大半；**不得退为远景色块**",
+    "远景": "远景镜头（long shot）：人物在画面中较小、环境为主体，强调空间感与氛围；**不得推成中景/近景**",
 }
 #: 景别关键字的解析顺序（**具体优先**）：剧本里 camera 字段常是「景别+运镜」的复合写法
 #: （如「特写推入」「全景升降」「中景跟拍」），必须按关键字解析，不能只做精确匹配。
 _CAMERA_KEY_ORDER = ("特写", "远景", "全景", "近景", "中景")
+
+#: 机位/视角关键字。与景别**正交**：剧本 camera 字段里既有景别（中景/特写）也有机位（俯拍/仰拍）。
+#: ⚠️ 历史缺陷：机位以前完全没人解析，等于白写在剧本里 —— 生成端不知道要俯拍，
+#: 质检端也没有依据判机位，于是「要求俯拍却给了平视」既没被约束也没被检出。
+_CAMERA_ANGLE_SPECS = {
+    "俯拍": "俯拍（高角度）：镜头高于主体自上向下俯视，画面能看到主体顶部/脚前的地面",
+    "仰拍": "仰拍（低角度）：镜头低于主体自下向上仰视，主体显得高大压迫",
+    "平视": "平视：镜头与主体视线同高",
+    "环绕": "环绕：镜头绕主体转动（在静帧里体现为明显的侧向机位）",
+    "过肩": "过肩：越过前景人物肩部拍向主体",
+    "斜侧": "斜侧机位：镜头相对主体明显偏斜（非正面）",
+}
+_CAMERA_ANGLE_ORDER = ("俯拍", "仰拍", "平视", "环绕", "过肩", "斜侧")
+
+#: 机位**同义词**：剧本写法很自由，只认「俯拍」不认「俯视」等于漏掉一半机位标注
+#: （漏掉的后果与「机位没人解析」一样：生成端不约束、质检端不判定）。
+#: 解析顺序：先用 _CAMERA_ANGLE_ORDER 的正式词（具体优先），再回落到本表。
+_CAMERA_ANGLE_ALIASES = {"俯视": "俯拍", "高角度": "俯拍", "高机位": "俯拍",
+                         "仰视": "仰拍", "低角度": "仰拍", "低机位": "仰拍",
+                         "平角": "平视", "水平视角": "平视",
+                         "环摇": "环绕", "绕拍": "环绕"}
+
+#: 景别未指定时的判定标准（camera 只给了机位/运镜）。
+#: 这段文字会被同时注入**生成端**与**质检端**，因此措辞必须两边都说得通。
+CAMERA_UNSPECIFIED_SPEC = (
+    "本镜未指定景别（camera 字段只给了机位/运镜，如「俯拍缓推」「环绕慢摇」）："
+    "取景范围以「动作与画面内容」的描述为准，**不要按某个固定景别去套**，"
+    "也**不得据此判定景别不符**；只判「机位/构图/主体清晰度/是否崩坏」"
+)
 
 
 def camera_key(camera) -> str:
@@ -134,6 +163,17 @@ def camera_key(camera) -> str:
     对任何复合写法都回落到**中景规格** —— 于是生成端给「特写推入」的镜头写的是
     「中景：腰部以上至头顶」，而质检端读的是字面「特写」，两端同时错位，
     实测分镜图质检通过率仅 57%、失败原因几乎全是「景别不符」。
+
+    ⚠️ **2026-09-20 再修：只给机位/运镜、没有景别词时不再猜「中景」，改返回空串（未指定）。**
+    实测《蛊真人》ep02 shot_13：``camera = "俯拍缓推"``，description 是
+    「镜头自方源脚面俯拍：灰白山石上积了一大滩血水…他清瘦的靴底半浸其中」——
+    本质是**脚部俯拍特写**。猜成「中景」会同时污染两端：
+      · 生成端 → 注入「中景：取景自腰部或膝部以上」与 description 的脚部俯拍
+        **直接互斥**，模型在两条矛盾指令间摇摆，6 次重试出的全是「全景 + 平视」；
+      · 质检端 → 拿「中景（腰部或膝部以上）」去判一张脚部俯拍图，必然判「景别不符」，
+        该镜**永远不可能通过**，白烧 6 次 GPU（max_retries=5）。
+    返回空串后：生成端不注入景别硬约束、质检端不做景别判定 ——
+    「宁可不说，也不要拿一个猜错的标准去判」。
     """
     s = str(camera or "").strip()
     if not s:
@@ -143,16 +183,34 @@ def camera_key(camera) -> str:
     for k in _CAMERA_KEY_ORDER:
         if k in s:
             return k
-    # 只有运镜词（如「拉远」「推入」）没有景别时，按中景处理
-    return "中景"
+    # 只有机位/运镜词（俯拍缓推 / 环绕慢摇 / 拉远）→ **不猜**，交回上层按「未指定」处理
+    return ""
+
+
+def camera_angle(camera) -> str:
+    """解析机位/视角（``俯拍缓推`` → ``俯拍``）；没有机位词时返回空串。
+
+    与 :func:`camera_key`（景别）正交：两者都要各自注入生成端与质检端，
+    否则「要求俯拍却给了平视」这类偏差既没人约束也没人检出。
+    """
+    s = str(camera or "").strip()
+    for k in _CAMERA_ANGLE_ORDER:
+        if k in s:
+            return k
+    for alias, key in _CAMERA_ANGLE_ALIASES.items():
+        if alias in s:
+            return key
+    return ""
 
 
 def camera_spec(camera) -> str:
     """取景别（镜头类型）的**权威判定标准**（生成端与质检端共用同一份）
 
-    见 :func:`camera_key` 说明：必须能解析复合写法，否则两端标准会错位。
+    见 :func:`camera_key` 说明：必须能解析复合写法，否则两端标准会错位；
+    景别确实未给时返回 :data:`CAMERA_UNSPECIFIED_SPEC`（而不是编一个中景）。
     """
-    return SHOT_CAMERA_SPECS[camera_key(camera)]
+    k = camera_key(camera)
+    return SHOT_CAMERA_SPECS[k] if k else CAMERA_UNSPECIFIED_SPEC
 
 
 SHOT_ACTION_SUFFIX = ("；上述动作必须完整、明确地表现出来（动作结果一眼可辨，如道具已收起、已离开手部），"
@@ -1231,7 +1289,22 @@ class ComfyUIClient:
             parts.append("参考图用途：" + "；".join(ref_labels) + "。")
         location = shot.get("location", "")
         camera = str(shot.get("camera") or "中景").strip()
-        cam_spec = camera_spec(camera)   # 复合写法（特写推入等）必须解析，不能精确匹配回落中景
+        cam_key = camera_key(camera)        # "" = 本镜没给景别（camera 只有机位/运镜）
+        cam_angle = camera_angle(camera)    # 俯拍 / 仰拍 / 平视 / 环绕 …（与景别正交）
+        cam_spec = camera_spec(camera)
+        # 景别段：**没给景别时绝不能编一个**硬塞进去。
+        # 实测《蛊真人》ep02 shot_13 camera="俯拍缓推"（description 是脚部俯拍），
+        # 旧实现猜成「中景：取景自腰部或膝部以上」→ 与画面描述的脚部俯拍**互斥**，
+        # 模型在两条矛盾指令间摇摆，6 次重试出的全是「全景 + 平视」，而质检端又按
+        # 中景判它「景别不符」→ 该镜永远过不了。改为把取景交还给画面描述。
+        if cam_key:
+            framing = f"**景别（必须严格遵守）：{cam_key}**——{cam_spec}。"
+        else:
+            framing = (f"**取景（本镜未指定景别）：严格以「动作与画面内容」里的取景描述为准**"
+                       f"（camera 原值「{camera}」只给了机位/运镜，"
+                       f"不要擅自套用中景/全景等固定景别，也不要把它撑成全景）。")
+        if cam_angle:
+            framing += f"**机位（必须严格遵守）：{_CAMERA_ANGLE_SPECS[cam_angle]}**。"
         # 画面内容优先级：
         # 1) storyboard_prompt_zh —— 提示词分析器**专门为该镜分镜图**写的中文提示词。
         #    历史缺陷：这个字段只写不读，用户花了 token 生成却从未生效（白花钱）。
@@ -1249,7 +1322,7 @@ class ComfyUIClient:
             # ⚠️ 用类名调用本类 staticmethod（裸名会去模块作用域找 → NameError）。
             desc = ComfyUIClient._merge_visual_detail(desc, detail)
         parts.append(
-            f"镜头{shot.get('shot_id', 1)}。**景别（必须严格遵守）：{camera}**——{cam_spec}。"
+            f"镜头{shot.get('shot_id', 1)}。{framing}"
             + (f"场景：{location}。" if location else "")
             + (f"动作与画面内容：{desc}{SHOT_ACTION_SUFFIX}。" if desc else "")
         )

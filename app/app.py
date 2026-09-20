@@ -31,7 +31,8 @@ from config import (
     KEYFRAME_CHAIN_MODE,
 )
 from script_generator import ScriptGenerator
-from comfyui_client import ComfyUIClient, camera_spec as _camera_spec
+from comfyui_client import (ComfyUIClient, camera_spec as _camera_spec,
+                            camera_key as _camera_key, camera_angle as _camera_angle)
 # ⚠️ 注意：本文件里 `comfyui_client` 这个名字是**实例**（见下方 `comfyui_client = ComfyUIClient()`），
 # 不是模块。因此**模块级函数**（camera_spec / camera_key / get_call_stats 等）必须像上面这样
 # 直接 import 后用别名调用 —— 写成 `comfyui_client.camera_spec(...)` 会在运行时抛
@@ -2883,6 +2884,23 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                         #   这样「同一次重试循环的下一次」就能召回它（旧实现只在循环结束后记一次，
                         #   导致前 N 次重试拿不到任何信息，纯粹换种子瞎撞）
                         _record_qc_lesson(project_name, "storyboard", orig_prompt, rec)
+                        # ★ 重试止损：连续两次缺陷一字不差 → 「改提示词 + 换种子」根本没带来
+                        #   任何变化，继续重试只是重复烧 GPU（实测 ep02 shot_13 这样白烧 6 次，
+                        #   全程 GPU 十几分钟，出的图全都一样）。放在闸门与教训沉淀之后：
+                        #   本镜若达标早已 break，不受影响；止损只减少无效重试，不改结论。
+                        _hopeless, _hopeless_detail = _qc_retry_hopeless(attempts)
+                        if _hopeless:
+                            # 标记最后一条质检记录：_qc_summary 据此把 label 写成「已停止重试」
+                            rec["retry_stopped"] = True
+                            rec["retry_stopped_features"] = _hopeless_detail
+                            item["qc_retry_stopped"] = {
+                                "reason": "连续两次缺陷完全相同，判定重试无收益，已提前停止",
+                                "features": _hopeless_detail, "attempts": len(attempts)}
+                            app.logger.warning(
+                                f"分镜重试止损（镜头 {shot_id}）：连续 {len(attempts)} 次缺陷完全相同，"
+                                f"提前停止重试。缺陷：{_hopeless_detail}；"
+                                f"建议改写该镜剧本字段（camera / description）后单独重跑该镜")
+                            break
                     if qc_declared or qc_on:
                         item["qc"] = _qc_summary(attempts, qc_declared, qc_on,
                                                  int(qc_cfg.get("max_retries", 0)))
@@ -3541,6 +3559,21 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                         break
                     # ★ 立刻沉淀教训（含风格不达标强化），供下一次重试改写提示词
                     _record_qc_lesson(project_name, "video", orig_video_prompt, rec)
+                    # ★ 重试止损（同分镜）：连续两次缺陷完全相同 → 「改提示词 + 换种子」没带来
+                    #   任何变化，提前停止重试，别再重复烧 GPU。达标早已 break，不改结论。
+                    _hopeless, _hopeless_detail = _qc_retry_hopeless(attempts)
+                    if _hopeless:
+                        # 标记最后一条质检记录：_qc_summary 据此把 label 写成「已停止重试」
+                        rec["retry_stopped"] = True
+                        rec["retry_stopped_features"] = _hopeless_detail
+                        video_item["qc_retry_stopped"] = {
+                            "reason": "连续两次缺陷完全相同，判定重试无收益，已提前停止",
+                            "features": _hopeless_detail, "attempts": len(attempts)}
+                        app.logger.warning(
+                            f"视频重试止损（镜头 {shot_id}）：连续 {len(attempts)} 次缺陷完全相同，"
+                            f"提前停止重试。缺陷：{_hopeless_detail}；"
+                            f"建议改写该镜剧本字段后单独重跑该镜")
+                        break
                 if qc_declared or qc_on:
                     video_item["qc"] = _qc_summary(attempts, qc_declared, qc_on,
                                                    int(qc_cfg.get("max_retries", 0)))
@@ -4779,6 +4812,42 @@ def _prompt_preflight(kind: str, prompt: str, *, ctx=None, style: str = "",
                             "critical_issues": [], "repairs": []}
 
 
+def _qc_repeat_features(rec: dict) -> frozenset:
+    """取一条质检记录的「缺陷特征集合」，用于判断连续两次重试是否毫无变化。
+
+    只收稳定的**文本**特征（issues / critical_issues / style_issues）：
+    seed 与 score 每次都会变（换了种子必然抖动），不能当特征，否则永远判不出「没变化」。
+    """
+    feats = []
+    for key in ("issues", "critical_issues", "style_issues"):
+        for item in (rec.get(key) or []):
+            text = str(item).strip()
+            if text:
+                feats.append(text)
+    return frozenset(feats)
+
+
+def _qc_retry_hopeless(attempts: list, streak: int = 2) -> tuple:
+    """连续 ``streak`` 次重试的缺陷特征**完全相同** → 判定「改提示词 + 换种子」没有产生
+    任何变化，继续重试只是重复烧 GPU（实测 ep02 shot_13 连烧 6 次全败，缺陷一字不差）。
+
+    返回 ``(True, "缺陷摘要")`` 或 ``(False, "")``。
+
+    ⚠️ 刻意保守（宁可多试一次，也不要误停）：
+      · 特征为**空**时一律不判定 —— 质检没给出可用信息 ≠ 缺陷相同；
+      · 必须最近 streak 条**逐条集合相等**（多一条少一条都不算）；
+      · **不改变闸门结论**：该镜仍算未通过、仍不进正式目录，只是不再继续重试；
+        用户可直接改这一镜的剧本字段（如 camera / description）后单独重跑该镜。
+    """
+    recs = [r for r in (attempts or []) if isinstance(r, dict)]
+    if len(recs) < streak:
+        return False, ""
+    feats = [_qc_repeat_features(r) for r in recs[-streak:]]
+    if not feats[0] or any(f != feats[0] for f in feats):
+        return False, ""
+    return True, "；".join(sorted(feats[0]))[:200]
+
+
 def _qc_gate(verdict: dict) -> dict:
     """统一质检入库闸门（P0）：ok=false 或 不达标 一律不得静默入库。
 
@@ -4975,7 +5044,15 @@ def _qc_shot_desc(shot: dict) -> str:
     # 景别放在最前：描述较长时 [:900] 截断会吃掉尾部，判定标准必须优先保住
     if shot.get("camera"):
         cam = str(shot["camera"]).strip()
-        parts.append(f"景别：{cam}（判定标准：{_camera_spec(cam)}）")
+        # ⚠️ 必须显示「解析后的景别」而不是只给裸词：camera 常是「景别+机位+运镜」的复合写法。
+        # 且**景别未给时不许编**（旧实现回落中景 → 拿中景标准去判脚部俯拍图，必然判不符，
+        # 该镜永远过不了；实测 ep02 shot_13 因此白烧 6 次 GPU）。
+        cam_k = _camera_key(cam)
+        parts.append(f"景别：{cam_k or '未指定'}（camera 原值「{cam}」；判定标准：{_camera_spec(cam)}）")
+        # 机位与景别正交：只给景别不给机位的话，「要求俯拍却给了平视」没人能判出来。
+        ang = _camera_angle(cam)
+        if ang:
+            parts.append(f"机位：{ang}（须与画面一致）")
     if shot.get("location"):
         parts.append(f"场景：{shot['location']}")
     if shot.get("description"):
@@ -5140,10 +5217,18 @@ def _qc_summary(attempts: list, enabled: bool, ready: bool, max_retries: int) ->
     status = "passed" if passed_rec else ("error" if last.get("error") else "failed")
     blocked = status in ("failed", "error")
     crit = list((passed_rec or last).get("critical_issues") or [])
+    # ★ 重试止损（_qc_retry_hopeless）：未通过且已提前停止重试时，把原因写进 label，
+    #   否则用户只看到「质检不达标」，不知道系统其实已经主动止损（没在继续烧 GPU）。
+    retry_stopped = bool((last or {}).get("retry_stopped")) and not passed_rec
+    _label = {"passed": "质检达标", "failed": "质检不达标", "error": "质检调用异常"}.get(status, status)
+    if retry_stopped:
+        _label = "质检不达标（已停止重试：连续两次缺陷完全相同）"
     return {
         "enabled": True,
         "status": status,
-        "label": {"passed": "质检达标", "failed": "质检不达标", "error": "质检调用异常"}.get(status, status),
+        "label": _label,
+        "retry_stopped": retry_stopped,
+        "retry_stopped_detail": (last or {}).get("retry_stopped_features") or "",
         "passed": bool(passed_rec),
         "blocked": blocked,
         "entry_blocked": blocked,
