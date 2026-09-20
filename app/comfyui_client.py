@@ -994,7 +994,8 @@ class ComfyUIClient:
 
     def _generate_base_image(self, workflow_file: str, prompt_zh: str,
                              asset_type: str = None, seed: int = None,
-                             style: str = "", size=None) -> List[str]:
+                             style: str = "", size=None,
+                             filename_prefix: str = None) -> List[str]:
         """通用基础图生成：更新正向提示词节点
 
         P0 修复（同轮补充）：
@@ -1007,6 +1008,10 @@ class ComfyUIClient:
           一个资产都没落到提示词里）；
         - size 非空 → 覆写尺寸节点，让「竖屏 9:16」真正体现在画布上（此前尺寸来自
           模板硬编码的 1664×928 横向）。
+
+        G8（资源清理）：filename_prefix 非空 → 覆写 SaveImageAdvanced/SaveImage 的
+        filename_prefix，让资产基础图落在 `comic_drama/<项目>_asset_<类型>` 这种项目专属
+        子目录，而非全部堆在 ComfyUI output 默认目录（此前删项目/滚动清理都够不着）。
         """
         api_prompt, meta = self.load_workflow(workflow_file, return_meta=True)
         node_id = self._find_positive_text_node(api_prompt)
@@ -1044,6 +1049,13 @@ class ComfyUIClient:
             logger.info(f"资产采样种子已注入: {self._inject_seed(api_prompt, seed)}")
         self._harden_no_watermark(api_prompt)   # C 项⑧：图片一律去水印
 
+        # G8：覆写输出文件名前缀（项目专属子目录），避免资产基础图堆在 ComfyUI output 默认目录
+        if filename_prefix:
+            for _nid, _n in api_prompt.items():
+                if _n.get("class_type") in ("SaveImageAdvanced", "SaveImage") \
+                        and "filename_prefix" in _n["inputs"]:
+                    _n["inputs"]["filename_prefix"] = filename_prefix
+
         prompt_id = self.queue_prompt(api_prompt)
         history = self.wait_for_completion(prompt_id)
         return self.get_output_files(history, ".png")
@@ -1068,7 +1080,8 @@ class ComfyUIClient:
                 break
 
     def generate_character_base(self, prompt_zh: str, seed: int = None,
-                                style: str = "", size=None) -> List[str]:
+                                style: str = "", size=None,
+                                filename_prefix: str = None) -> List[str]:
         logger.info(f"生成角色基础图: {prompt_zh[:50]}...")
         # 角色基础图 = 设定集（三视图横排）。必须确定性注入「全身 + 横排三视图」版式硬约束：
         # 剧本层提示词只写外貌特征、不含构图约束（风格词也由程序追加，版式同属构图维度），
@@ -1076,7 +1089,8 @@ class ComfyUIClient:
         # （2026-09-19 实测：三视图出成半身，且同图内人物身高比例不一致）。
         prompt_zh = self._ensure_fullbody_prompt(prompt_zh, style)
         return self._generate_base_image(WORKFLOW_TEMPLATE["character_gen"], prompt_zh,
-                                         asset_type="character", seed=seed, style=style, size=size)
+                                         asset_type="character", seed=seed, style=style, size=size,
+                                         filename_prefix=filename_prefix)
 
     @staticmethod
     def _ensure_fullbody_prompt(prompt_zh: str, style: str = "") -> str:
@@ -1093,22 +1107,27 @@ class ComfyUIClient:
         return (base + suffix) if base else suffix
 
     def generate_item_base(self, prompt_zh: str, seed: int = None,
-                           style: str = "", size=None) -> List[str]:
+                           style: str = "", size=None,
+                           filename_prefix: str = None) -> List[str]:
         logger.info(f"生成物品基础图: {prompt_zh[:50]}...")
         return self._generate_base_image(WORKFLOW_TEMPLATE["item_gen"], prompt_zh,
-                                         asset_type="item", seed=seed, style=style, size=size)
+                                         asset_type="item", seed=seed, style=style, size=size,
+                                         filename_prefix=filename_prefix)
 
     def generate_scene_base(self, prompt_zh: str, seed: int = None,
-                            style: str = "", size=None) -> List[str]:
+                            style: str = "", size=None,
+                            filename_prefix: str = None) -> List[str]:
         logger.info(f"生成场景基础图: {prompt_zh[:50]}...")
         return self._generate_base_image(WORKFLOW_TEMPLATE["scene_gen"], prompt_zh,
-                                         asset_type="scene", seed=seed, style=style, size=size)
+                                         asset_type="scene", seed=seed, style=style, size=size,
+                                         filename_prefix=filename_prefix)
 
     # ===================== 第二阶段：多视角生成 =====================
 
     def generate_multiview(self, base_image_path: str, asset_type: str,
                            asset_name: str, base_prompt_zh: str,
-                           seed: int = None, style: str = "", size=None) -> Dict[str, str]:
+                           seed: int = None, style: str = "", size=None,
+                           filename_prefix: str = None) -> Dict[str, str]:
         """基于基础图生成多视角图（Qwen Edit 2511）
 
         character → 4 视图（正/左/右/背）；item / scene → 4 视角（正/左45/右45/俯视）
@@ -1117,6 +1136,9 @@ class ComfyUIClient:
         但代码里并没有这一步 —— 风格与画幅都是模板自带的，用户的设定到不了多视角图。
         现在 style / size 由调用方传入并真正生效。
         seed 供 app 层质检不达标时重生成。
+
+        G8：filename_prefix 非空 → 多视角产物落项目专属子目录（每视角再加 key 后缀
+        避免同前缀互相覆盖）。
         """
         views = MULTIVIEW_CONFIG["character_views"] if asset_type == "character" \
             else MULTIVIEW_CONFIG["item_scene_views"]
@@ -1146,7 +1168,10 @@ class ComfyUIClient:
             view_prompt = self._build_multiview_prompt(asset_type, styled_desc, view)
             if asset_type == "scene" and SCENE_NO_CHARACTER_SUFFIX not in view_prompt:
                 view_prompt = view_prompt.rstrip("。;； ") + SCENE_NO_CHARACTER_SUFFIX
-            img_path = self._run_multiview_workflow(output_name, view_prompt, seed=seed, size=size)
+            # G8：每视角在公共前缀后加 key，避免同前缀下不同视角产物互相覆盖
+            view_prefix = f"{filename_prefix}_{view['key']}" if filename_prefix else None
+            img_path = self._run_multiview_workflow(output_name, view_prompt, seed=seed,
+                                                     size=size, filename_prefix=view_prefix)
             if img_path:
                 results[view["key"]] = img_path
             else:
@@ -1176,7 +1201,8 @@ class ComfyUIClient:
 
     def _run_multiview_workflow(self, uploaded_image_name: str, prompt_zh: str,
                                 image_dir: str = ANNOTATED_DIR,
-                                seed: int = None, size=None) -> Optional[str]:
+                                seed: int = None, size=None,
+                                filename_prefix: str = None) -> Optional[str]:
         """运行多视角编辑工作流（分镜生成.json：Qwen Edit 2511）"""
         api_prompt, meta = self.load_workflow(WORKFLOW_TEMPLATE["multiview_gen"], return_meta=True)
         if seed is not None:
@@ -1213,6 +1239,13 @@ class ComfyUIClient:
             logger.warning("分镜生成.json 中未找到参考图节点")
         else:
             logger.info(f"多视角参考图已替换 {len(ref_nodes)} 个节点: {ref_values}")
+
+        # G8：覆写输出文件名前缀（项目专属子目录），避免多视角图堆在 ComfyUI output 默认目录
+        if filename_prefix:
+            for _nid, _n in api_prompt.items():
+                if _n.get("class_type") in ("SaveImageAdvanced", "SaveImage") \
+                        and "filename_prefix" in _n["inputs"]:
+                    _n["inputs"]["filename_prefix"] = filename_prefix
 
         prompt_id = self.queue_prompt(api_prompt)
         history = self.wait_for_completion(prompt_id, timeout=900)
