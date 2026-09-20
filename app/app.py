@@ -4354,13 +4354,45 @@ def _save_ai_module(data: dict):
                                 api_key=None if keep else key, legacy_path=LLM_CONFIG_PATH,
                                 reasoning_effort=(reasoning_effort if has_reasoning_effort else None))
     view = ai_config.module_public_view(ai_config.get_module(cfg, module))
+    # ⭐ 质检模块保存后立即同步到「质检自己的配置」，让「前端改了模型，所有调用立刻生效」成立。
+    # 背景：质检链路读的是 qc_config.json（另一个文件 + 加密库 "qc" 槽），与 AI 设置的
+    #       ai_config.json / "ai.qc" 槽是两套完全独立的数据。不同步就会出现
+    #       「在 AI 设置改了模型，质检却仍旧模型」——实测这正是用户改了不生效的根因。
+    # 质检链路每次都调 qc_client.load_config(QC_CONFIG_PATH) 重新读盘（无缓存），
+    # 所以这里落盘后**无需重启**，下一个镜头的质检就吃新配置。
+    sync_note, sync_error = "", ""
+    if module == "qc":
+        try:
+            # keep=True（留空/脱敏回显）时上面没写新密钥，需回读加密库里刚生效的那把
+            eff_key = (ai_config.get_module(
+                ai_config.load_config(AI_CONFIG_PATH, LLM_CONFIG_PATH), "qc"
+            ).get("api_key") or "").strip()
+            if base_url and model and eff_key:
+                qc_client.set_endpoint(QC_CONFIG_PATH, base_url, eff_key, model)
+                sync_note = "，已同步为质检接口（下一次质检立即生效，无需重启）"
+            else:
+                sync_error = ("质检接口信息不完整，未同步（base_url=%s key=%s model=%s）"
+                              % (bool(base_url), bool(eff_key), bool(model)))
+        except Exception as e:  # noqa: BLE001
+            sync_error = f"{type(e).__name__}: {e}"
+        if sync_error:
+            app.logger.warning(
+                f"质检配置同步失败（AI 设置已保存，但质检仍会用旧接口）：{sync_error}")
+        else:
+            app.logger.info("质检接口已随 AI 设置同步："
+                            f"{base_url} / {model}（下次质检立即生效）")
     return jsonify({
         "success": True,
         "module": module,
         "module_config": view,
         "config": _ai_config_view(),
         "config_path": os.path.abspath(AI_CONFIG_PATH),
-        "message": f"{AI_MODULE_LABEL.get(module, module)}配置已保存" + ("（api_key 保持不变）" if keep else ""),
+        "qc_synced": bool(module == "qc" and not sync_error),
+        "qc_sync_error": sync_error,
+        "message": (f"{AI_MODULE_LABEL.get(module, module)}配置已保存"
+                    + ("（api_key 保持不变）" if keep else "")
+                    + sync_note
+                    + (f"；但同步到质检失败：{sync_error}" if sync_error else "")),
     })
 
 
@@ -4378,12 +4410,26 @@ def api_ai_config_clear():
     if module and module not in AI_MODULES:
         return jsonify({"success": False, "error": f"unknown module：{module}"}), 400
     cfg = ai_config.clear_module(AI_CONFIG_PATH, module=module, legacy_path=LLM_CONFIG_PATH)
+    # ⭐ 与「保存」对称：清空质检模块（或整体重置）时，同步清空质检自己的接口配置，
+    # 避免出现「AI 设置显示未配置，质检却仍在用旧接口」的新的不一致。
+    reset_note, reset_error = "", ""
+    if module in (None, "qc"):
+        try:
+            qc_client.reset_endpoint(QC_CONFIG_PATH)
+            reset_note = "，质检接口已同步重置"
+        except Exception as e:  # noqa: BLE001
+            reset_error = f"{type(e).__name__}: {e}"
+            app.logger.warning(f"质检接口重置失败（AI 设置已清空，质检可能仍用旧接口）：{reset_error}")
     return jsonify({
         "success": True,
         "module": module,
         "config": _ai_config_view(),
         "config_path": os.path.abspath(AI_CONFIG_PATH),
-        "message": (f"{AI_MODULE_LABEL.get(module, module)}配置已清除" if module else "AI 设置已整体重置"),
+        "qc_reset": bool(module in (None, "qc") and not reset_error),
+        "qc_reset_error": reset_error,
+        "message": ((f"{AI_MODULE_LABEL.get(module, module)}配置已清除" if module else "AI 设置已整体重置")
+                    + reset_note
+                    + (f"；但质检接口重置失败：{reset_error}" if reset_error else "")),
     })
 
 
