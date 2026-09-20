@@ -172,7 +172,7 @@ def _atomic_replace(tmp: str, path: str) -> None:
     last = None
     for i in range(8):
         try:
-            _atomic_replace(tmp, path)
+            os.replace(tmp, path)
             return
         except PermissionError as e:        # WinError 5 / 32：目标被占用
             last = e
@@ -189,7 +189,7 @@ def _write_file(path: str, cfg: dict) -> None:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        _atomic_replace(tmp, path)
     except Exception:
         try:
             if os.path.exists(tmp):
