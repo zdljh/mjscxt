@@ -935,8 +935,27 @@ class ComfyUIClient:
     def generate_character_base(self, prompt_zh: str, seed: int = None,
                                 style: str = "", size=None) -> List[str]:
         logger.info(f"生成角色基础图: {prompt_zh[:50]}...")
+        # 角色基础图 = 设定集（三视图横排）。必须确定性注入「全身 + 横排三视图」版式硬约束：
+        # 剧本层提示词只写外貌特征、不含构图约束（风格词也由程序追加，版式同属构图维度），
+        # 不注入则模型默认半身/胸像构图且三格版式不可控，多视角与分镜一致性都会崩坏
+        # （2026-09-19 实测：三视图出成半身，且同图内人物身高比例不一致）。
+        prompt_zh = self._ensure_fullbody_prompt(prompt_zh, style)
         return self._generate_base_image(WORKFLOW_TEMPLATE["character_gen"], prompt_zh,
                                          asset_type="character", seed=seed, style=style, size=size)
+
+    @staticmethod
+    def _ensure_fullbody_prompt(prompt_zh: str, style: str = "") -> str:
+        """给角色参考图提示词确定性地补「全身三视图」版式约束（幂等）"""
+        text = str(prompt_zh or "").strip()
+        # 幂等判断必须在 with_style 之前做（同 style_kit._style_suffix 的坑）
+        marker = "全身三视图"
+        base = text if marker in text else style_kit.with_style(text, style) if style else text
+        if marker in base:
+            return base
+        suffix = ("，全身三视图设定图：正面、左侧面、背面三张全身视图从左到右横排，"
+                  "同一角色同一比例，画面完整呈现从头到脚的全身，头顶上方与脚部下方留少量边距，"
+                  "人物身高占比一致")
+        return (base + suffix) if base else suffix
 
     def generate_item_base(self, prompt_zh: str, seed: int = None,
                            style: str = "", size=None) -> List[str]:
@@ -1002,10 +1021,16 @@ class ComfyUIClient:
     def _build_multiview_prompt(self, asset_type: str, base_desc: str, view: dict) -> str:
         camera_terms = f"{view['azimuth']}, {view['elevation']}, {view['distance']}"
         if asset_type == "character":
+            # 角色多视图每张都要求「全身」构图（2026-09-19 实测：基础图出成半身/胸像，
+            # 视角图继承半身构图导致"三视图不是全身"。distance=full-body shot 不够，
+            # 必须显式写"从头到脚完整入画"，并用负向措辞排除半身/胸像/大头）。
             return (
                 f"根据参考图生成同一角色的{view['label']}视图，"
                 f"保持人物的脸型、发型、服装、配饰与参考图完全一致，"
-                f"仅改变观察角度。{camera_terms}。{base_desc}"
+                f"仅改变观察角度，人物身高比例与参考图一致。"
+                f"全身构图：画面完整呈现人物从头到脚，头顶与脚部不留裁切，"
+                f"不要半身像、不要胸像、不要大头特写、不要截断脚部。"
+                f"{camera_terms}。{base_desc}"
             )
         asset_word = "物品" if asset_type == "item" else "场景"
         return (
