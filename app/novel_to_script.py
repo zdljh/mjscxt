@@ -829,8 +829,31 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
     shot_style = style_kit.normalize_style(bible.get("style"))
     shots = []
     sid = start_id
+    dropped_empty = []
     for s in raw_shots:
         if not isinstance(s, dict):
+            continue
+        # 空壳镜头（画面描述 / 补充细节 / 台词 三者皆空）**必须在这里丢掉**。
+        # 历史缺陷：模型偶尔会吐出一条只有 camera/location/emotion 的幽灵镜头
+        #（实测《蛊真人》ep02 shot_02：description/visual_detail/dialogue/audio_cues 全空），
+        # 本函数原样收下 → 生成期 prompt_qc 判「镜头缺少画面描述」**致命缺陷且不可自愈**
+        # → 该镜永远出不了图 → probe_storyboard 永远缺 1 镜 → 整集在分镜步永久卡死，
+        # 且用户在界面上拿不到任何可操作的补救入口。
+        # 这类镜头不承载任何原文内容（原文覆盖率校验不会因此丢句），丢掉是零损失；
+        # 若确实有原文没被承载，后续 coverage 补生成会按原文补回一条**有内容**的镜头。
+        # 注意：audio_cues 不参与判定 —— 只有音效没有画面的镜头同样出不了图。
+        _has_vis = bool(str(s.get("description") or "").strip()
+                        or str(s.get("visual_detail") or "").strip()
+                        or str(s.get("storyboard_prompt_zh") or "").strip())
+        _dlg_raw = s.get("dialogue")
+        if isinstance(_dlg_raw, str):
+            _has_dlg = bool(_dlg_raw.strip())
+        elif isinstance(_dlg_raw, (list, tuple)):
+            _has_dlg = bool(_dlg_raw)
+        else:
+            _has_dlg = False
+        if not (_has_vis or _has_dlg):
+            dropped_empty.append(s.get("camera") or s.get("location") or "?")
             continue
         loc = str(s.get("location") or "").strip()
         if scenes and loc and loc not in scenes:
@@ -915,6 +938,9 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
             row["duration_overflow_sec"] = round(need - SHOT_DURATION_MAX, 2)
         shots.append(row)
         sid += 1
+    if dropped_empty:
+        logger.warning("已丢弃 %d 条空壳镜头（无画面描述/细节/台词，出不了图且会卡死整集）：%s",
+                       len(dropped_empty), dropped_empty[:12])
     # 分配集数
     n = len(shots)
     if n:
