@@ -543,6 +543,18 @@ def delete_project(ref: str, confirm: bool = False) -> dict:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     trash_root = os.path.join(PROJECT_TRASH_DIR, f"{stamp}_{key}")
     os.makedirs(trash_root, exist_ok=True)
+    # B-23 F-07：trash 目录 ACL 收紧——只允许属主读写，其他用户 0 权限。
+    # Windows 上 chmod 是 no-op（NTFS 不读 POSIX 权限位），但在 POSIX 系统
+    # 上阻止其他用户读取/还原已删除项目的残留产物。
+    try:
+        import stat
+        os.chmod(trash_root, stat.S_IRWXU)
+        # 向上追溯 PROJECT_TRASH_DIR 也收紧（若存在）
+        _trash_base = os.path.abspath(PROJECT_TRASH_DIR)
+        if os.path.isdir(_trash_base):
+            os.chmod(_trash_base, stat.S_IRWXU)
+    except OSError:
+        pass
 
     moved, skipped = [], []
     targets = [("projects_workspace", p["root"])]
