@@ -63,20 +63,25 @@ _CALL_STATS_LOCK = threading.Lock()
 
 def get_call_stats() -> dict:
     """读取调用统计快照"""
-    return dict(_CALL_STATS)
+    with _CALL_STATS_LOCK:
+        return dict(_CALL_STATS)
 
 
 def reset_call_stats() -> dict:
     """重置调用统计"""
-    for k in list(_CALL_STATS.keys()):
-        _CALL_STATS[k] = 0 if not isinstance(_CALL_STATS[k], float) else 0.0
-    return dict(_CALL_STATS)
+    with _CALL_STATS_LOCK:
+        for k in list(_CALL_STATS.keys()):
+            _CALL_STATS[k] = 0 if not isinstance(_CALL_STATS[k], float) else 0.0
+        return dict(_CALL_STATS)
 
 
 def _bump(key: str, delta=1) -> None:
-    """安全累加统计项（统计失败绝不影响业务）"""
+    """安全累加统计项（统计失败绝不影响业务）
+    B-19 H1：读改写包锁，避免多线程并发竞争导致计数丢失。
+    """
     try:
-        _CALL_STATS[key] = _CALL_STATS.get(key, 0) + delta
+        with _CALL_STATS_LOCK:
+            _CALL_STATS[key] = _CALL_STATS.get(key, 0) + delta
     except Exception:  # noqa: BLE001
         pass
 

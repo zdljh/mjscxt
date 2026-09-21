@@ -295,6 +295,29 @@ def _first_existing_asset_image(directory: str) -> str:
     return ""
 
 
+# B-20 P2-10：磁盘余量检查。大体积写入（视频/图片/混音成片）前确认剩余空间，
+# 不足时 fail-loud（logger.warning + 返回 False），不静默写入导致半截文件。
+def _ensure_disk_headroom(directory: str, min_bytes: int, logger=None) -> bool:
+    """检查 directory 所在分区剩余空间是否 ≥ min_bytes。
+    返回 True（充足）/ False（不足，已记 warning）。失败时不影响调用方继续。
+    """
+    _log = logger
+    try:
+        # 用 shutil.disk_usage 取实际分区剩余空间
+        usage = shutil.disk_usage(os.path.abspath(directory))
+        free = usage.free
+        if free < min_bytes:
+            if _log:
+                _log.warning("磁盘余量不足：%s 剩余 %.1fMB < 需要 %.1fMB",
+                             os.path.abspath(directory), free / 1048576, min_bytes / 1048576)
+            return False
+        return True
+    except Exception as e:
+        if _log:
+            _log.warning("磁盘余量检查失败（已放行）：%s", e)
+        return True
+
+
 def _project_or_400(raw, field_name="project_name"):
     """G4 收口：路由层「项目入参 → 安全键 / 400」的统一入口。
 
