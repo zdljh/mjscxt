@@ -66,6 +66,7 @@ import pipeline
 import audio_qc
 import plugin_registry
 import project_store
+import shot_key
 import providers
 import prompt_qc
 import qc_client
@@ -101,6 +102,14 @@ from script_prompt_analyzer import analyze_script as analyze_script_prompts, sav
 from character_manager import CharacterManager, CharacterConsistencyEngine
 from relation_manager import RelationManager, RelationConflictDetector
 from nine_grid_storyboard import NineGridStoryboard
+
+# ===== 镜号归一化收敛（缺陷 P1-19 / 任务 A-10）=====
+# 全项目**唯一**的镜号归一化实现见 app/shot_key.py。此处把三处旧的本地实现收敛为
+# 「一行代理」，供本模块与 pipeline 等外部引用无缝沿用 —— 写侧（keyframe 落盘）与
+# 读侧（本模块查找）从此共用同一个函数，杜绝「写 shot_102、读 shot_01」的静默错位。
+_shot_seq = shot_key.shot_seq
+_shot_num_key = shot_key.norm_shot_key
+_norm_shot_key = shot_key.norm_shot_key
 
 app = Flask(__name__)
 # 总控 AI 自主执行内核：注入 Flask 实例，工具调用走进程内直连（不走网络/不绑端口）
@@ -943,19 +952,8 @@ def api_task_resume_preview(task_id):
 
 # ===== P1-1 一致性校验（跨镜头角色一致性） =====
 
-def _shot_num_key(key) -> str:
-    """把各种镜头标识统一成纯数字字符串：'shot_01' / 2 / '2' / 'S001' → '1' / '2'
-
-    注意与 _norm_shot_key 的区别：后者只处理纯数字字符串，无法把
-    文件名形式（shot_01）与剧本 shot_id（1）对齐，一致性采集器必须用本函数。
-    """
-    m = re.search(r"\d+", str(key))
-    if m:
-        try:
-            return str(int(m.group()))
-        except ValueError:
-            return m.group()
-    return str(key).strip().lower()
+# 注：`_shot_num_key` 已收敛为 app/shot_key.norm_shot_key 的一行代理（见文件顶部），
+# 定义不再落在此处 —— 全项目唯一的镜号归一化实现见 app/shot_key.py。
 
 
 def _consistency_collect(project_name: str, episode_no: int = None) -> dict:
@@ -2912,10 +2910,8 @@ def _apply_closeup_ref_strategy(refs: list, shot: dict, project_name: str = None
     return out or refs
 
 
-def _shot_seq(shot_id, fallback: int) -> int:
-    """shot_id → 顺序号（用于文件名 shot_XX.png / shot_XX.mp4，兼容 'S001' 等字符串编号）"""
-    m = re.search(r"\d+", str(shot_id))
-    return int(m.group()) if m else fallback
+# 注：本处原为 `_shot_seq(shot_id, fallback)`。已收敛为 app/shot_key.shot_seq 的
+# 一行代理（见文件顶部），全项目唯一的镜号归一化实现见 app/shot_key.py。
 
 
 def _storyboard_worker(task_id: str, project_name: str, shots: list,
@@ -3400,10 +3396,8 @@ def _collect_reference_images(character_refs: list, scene_refs: list) -> list:
 
 
 
-def _norm_shot_key(key) -> str:
-    """镜头编号归一化（1 / "1" / "01" 视为同一镜头）"""
-    s = str(key).strip()
-    return s.lstrip("0") or "0" if s.isdigit() else s
+# 注：本处原为 `_norm_shot_key(key)`。已收敛为 app/shot_key.norm_shot_key 的一行代理
+# （见文件顶部），全项目唯一的镜号归一化实现见 app/shot_key.py。
 
 
 @app.route('/api/videos/generate', methods=['POST'])
@@ -3536,6 +3530,19 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                 _sid = _s.get('shot_id', i + 1)
                 _seq = _shot_seq(_sid, i + 1)
                 _end = os.path.join(kf_dir, f"shot_{_seq:02d}_end.png")
+                # P1-19 一次性兼容：旧 keyframe 曾用「拼接全部数字」命名（"S01-C02"→102），
+                # 新语义为「首段数字」（→1）。旧文件仍在时按旧名回退命中并告警；整数镜号下
+                # 新旧同名，`_legacy != _seq` 恒为假，此分支不触发（零行为变更）。
+                if not os.path.isfile(_end):
+                    _legacy = shot_key.legacy_shot_seq(_sid)
+                    if _legacy is not None and _legacy != _seq:
+                        _legacy_path = os.path.join(kf_dir, f"shot_{_legacy:02d}_end.png")
+                        if os.path.isfile(_legacy_path):
+                            app.logger.warning(
+                                "[P1-19 兼容] 命中旧镜号命名尾帧 %s（镜号 %r 现按首段数字"
+                                "归一为 %d）；建议重跑关键帧以迁移到 shot_%02d_end.png",
+                                os.path.basename(_legacy_path), _sid, _seq, _seq)
+                            _end = _legacy_path
                 if os.path.isfile(_end):
                     kf_end_map[str(_sid)] = _end
                     kf_end_map[f"shot_{_seq:02d}"] = _end

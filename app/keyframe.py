@@ -31,6 +31,7 @@ import shutil
 from typing import Callable, Dict, List, Optional, Tuple
 
 import style_kit
+import shot_key
 
 logger = logging.getLogger(__name__)
 
@@ -147,27 +148,20 @@ def build_end_frame_prompt(shot: dict, char_refs: Optional[List[dict]] = None,
 
 
 def end_frame_path(keyframes_dir: str, shot_id) -> str:
-    """尾帧落盘路径：output/keyframes/<项目>/shot_<NN>_end.png（与分镜图命名对齐）"""
-    seq = _seq(shot_id)
+    """尾帧落盘路径：output/keyframes/<项目>/shot_<NN>_end.png（与分镜图命名对齐）
+
+    镜号归一化收敛后用全项目唯一实现 ``shot_key.shot_seq``（P1-19 / A-10）：
+    写侧（本函数）与读侧（app.py 的 kf_end_map 查找）必须共用同一函数，
+    否则会出现「写 shot_102_end.png、读 shot_01_end.png」的静默错位。
+    """
+    seq = shot_key.shot_seq(shot_id, 0)
     return os.path.join(keyframes_dir, f"shot_{seq:02d}_end.png")
 
 
 def start_frame_link_path(keyframes_dir: str, shot_id) -> str:
     """首帧在本目录的镜像路径（便于画布/导出统一按目录取图，不依赖分镜图目录）"""
-    seq = _seq(shot_id)
+    seq = shot_key.shot_seq(shot_id, 0)
     return os.path.join(keyframes_dir, f"shot_{seq:02d}_start.png")
-
-
-def _seq(shot_id) -> int:
-    """把 shot_id（可能是 1 / "1" / "shot_01"）归一为整数序号"""
-    if isinstance(shot_id, int):
-        return shot_id
-    s = str(shot_id or "").strip()
-    digits = "".join(ch for ch in s if ch.isdigit())
-    try:
-        return int(digits) if digits else 0
-    except ValueError:
-        return 0
 
 
 def generate_end_frame(start_frame: str, prompt: str, out_path: str,
@@ -240,7 +234,7 @@ def plan_keyframes(shots: List[dict], sb_map: Dict[str, str],
 
     for i, shot in enumerate(shots or []):
         sid = shot.get("shot_id", i + 1)
-        seq = _seq(sid) or (i + 1)
+        seq = shot_key.shot_seq(sid, 0) or (i + 1)
         key = str(sid).strip()
         own = _own_start(sb_map, key, seq)
         own_ok = bool(own) and os.path.isfile(own)
@@ -600,7 +594,7 @@ def build_keyframe_segments(shots: List[dict], sb_map: Dict[str, str],
     meta: List[dict] = []
     for i, shot in enumerate(shots or []):
         sid = shot.get("shot_id", i + 1)
-        seq = _seq(sid) or (i + 1)
+        seq = shot_key.shot_seq(sid, 0) or (i + 1)
         prompt, start = prompt_builder(shot, seq)
         if start_override:
             ov = start_override.get(str(sid)) or start_override.get(f"shot_{seq:02d}")
