@@ -25,6 +25,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from datetime import datetime
 from urllib.parse import urlparse
@@ -39,6 +40,42 @@ logger = logging.getLogger(__name__)
 
 # 项目根目录（定位加密密钥库 output/secrets.enc 与主密钥 .secret_key）
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+# P2-T3（审计 T-3）：qc_config 落盘此前三处（save_config / set_endpoint /
+# reset_endpoint）都用**固定 `.tmp`** 且模块无锁 —— 两个线程同时 save_config
+# 时固定临时名会互相截断（一边写到一半被另一边 os.replace 换走 → json 残半），
+# 损坏的配置文件会被 load_config 标 _config_corrupt 回退默认值（不阻断但配置丢失）。
+# 手法同 P1-1（project_store._write_json）：唯一临时名 + fsync + Windows 占用退避
+# replace + 模块级锁串行化整个「读改写」段（锁加在各写函数外层，见下方调用点）。
+_QC_WRITE_LOCK = threading.Lock()
+
+
+def _atomic_write_json(config_path: str, cfg: dict) -> None:
+    """原子写 JSON（唯一临时名 + fsync + 占用退避 replace），不截断、不留垃圾。"""
+    os.makedirs(os.path.dirname(os.path.abspath(config_path)), exist_ok=True)
+    # 临时名每次唯一（pid+threadid+随机），并发写者各写各的，互不截断
+    tmp = f"{config_path}.{os.getpid()}.{threading.get_ident()}.{os.urandom(3).hex()}.tmp"
+    last = None
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())          # 先落盘再 replace，避免断电后只剩空文件
+        for i in range(8):
+            try:
+                os.replace(tmp, config_path)   # 同分区原子换名
+                return
+            except PermissionError as e:       # Windows 目标被并发读取占用（WinError 5/32）
+                last = e
+                time.sleep(0.02 * (i + 1))
+        raise last
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)               # 失败不留垃圾临时文件
+        except OSError:
+            pass
+        raise
 
 # ===================== 默认配置 =====================
 
@@ -681,6 +718,13 @@ def load_config(config_path: str) -> dict:
 
 
 def save_config(config_path: str, patch: dict, keep_key_if_blank: bool = True) -> dict:
+    # P2-T3：整段「读 load_config → 改 → 原子写」持锁串行化，
+    # 防两个线程同时 save 时读改写互相丢更新（唯一临时名只防文件截断，不防逻辑丢更新）。
+    with _QC_WRITE_LOCK:
+        return _save_config_impl(config_path, patch, keep_key_if_blank)
+
+
+def _save_config_impl(config_path: str, patch: dict, keep_key_if_blank: bool = True) -> dict:
     cfg = load_config(config_path)
     for k, v in (patch or {}).items():
         if k not in CONFIG_KEYS or k == "updated_at":
@@ -739,11 +783,7 @@ def save_config(config_path: str, patch: dict, keep_key_if_blank: bool = True) -
     ov = cfg.get("endpoint_override")
     if isinstance(ov, dict):
         ov["api_key"] = ""
-    os.makedirs(os.path.dirname(os.path.abspath(config_path)), exist_ok=True)
-    tmp = config_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, config_path)
+    _atomic_write_json(config_path, cfg)
     # ⚠️ 必须重新 load_config 再返回，**不能返回上面那个已清空 api_key 的 cfg**：
     # 明文密钥只存加密库，上面刚把 cfg["api_key"] 置空是为了防明文落盘；
     # 若直接返回它，调用方拿到的就是「无密钥」的配置 → public_view 算出
@@ -878,6 +918,11 @@ def set_endpoint(config_path: str, base_url: str, api_key: str, model: str) -> d
 
     P0-3：密钥写入加密库，json 只保留 base_url/model（不含明文密钥）。
     """
+    with _QC_WRITE_LOCK:
+        return _set_endpoint_impl(config_path, base_url, api_key, model)
+
+
+def _set_endpoint_impl(config_path: str, base_url: str, api_key: str, model: str) -> dict:
     cfg = load_config(config_path)
     ep = {"base_url": (base_url or "").strip(), "api_key": (api_key or "").strip(),
           "model": (model or "").strip()}
@@ -892,16 +937,17 @@ def set_endpoint(config_path: str, base_url: str, api_key: str, model: str) -> d
     # endpoint_override 只记录 base_url/model，密钥由加密库提供
     cfg["endpoint_override"] = {"base_url": ep["base_url"], "api_key": "", "model": ep["model"]}
     cfg["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    os.makedirs(os.path.dirname(os.path.abspath(config_path)), exist_ok=True)
-    tmp = config_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, config_path)
+    _atomic_write_json(config_path, cfg)
     return cfg
 
 
 def reset_endpoint(config_path: str) -> dict:
     """「恢复为 AI 设置」：清空自动写入的接口，交还给用户在 AI 设置里独立配置"""
+    with _QC_WRITE_LOCK:
+        return _reset_endpoint_impl(config_path)
+
+
+def _reset_endpoint_impl(config_path: str) -> dict:
     cfg = load_config(config_path)
     try:
         import secret_store
@@ -911,11 +957,7 @@ def reset_endpoint(config_path: str) -> dict:
     cfg["base_url"], cfg["api_key"], cfg["model"] = "", "", ""
     cfg["endpoint_override"] = {"base_url": "", "api_key": "", "model": ""}
     cfg["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    os.makedirs(os.path.dirname(os.path.abspath(config_path)), exist_ok=True)
-    tmp = config_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, config_path)
+    _atomic_write_json(config_path, cfg)
     return cfg
 
 
