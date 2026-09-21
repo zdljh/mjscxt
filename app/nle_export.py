@@ -73,14 +73,15 @@ def _safe_filename(name: str) -> str:
 
 
 def build_timeline(script: dict, project: str, videos: list = None,
-                   use_real_duration: bool = True) -> dict:
+                   use_real_duration: bool = True, episode: int = None) -> dict:
     """构建逐镜时间轴
 
     返回 {"shots":[{shot_id,index,start,duration,end,video,text,speaker}], "total_sec": float}
     时长优先取视频真实时长（ffprobe），缺失时退回剧本 duration。
+    B-17 P2-13：episode 参数可选；提供时按集号过滤视频目录，避免跨集混用素材。
     """
     shots = (script or {}).get("shots") or []
-    vids = videos if videos is not None else _scan_videos(project, script)
+    vids = videos if videos is not None else _scan_videos(project, script, episode=episode)
 
     rows, t = [], 0.0
     for i, shot in enumerate(shots):
@@ -127,13 +128,30 @@ def build_timeline(script: dict, project: str, videos: list = None,
     return {"shots": rows, "total_sec": round(t, 3)}
 
 
-def _scan_videos(project: str, script: dict = None) -> list:
-    """扫描项目视频片段，优先按剧本镜头数顺序匹配 shot_NN.mp4"""
+def _scan_videos(project: str, script: dict = None, episode: int = None) -> list:
+    """扫描项目视频片段，优先按剧本镜头数顺序匹配 shot_NN.mp4
+    B-17 P2-13：episode 参数可选；提供时优先匹配该集专属目录
+    （``<key>_第N集`` 或 ``epNN`` 子目录），找不到再回退到项目级目录。
+    """
     d = os.path.join(VIDEOS_DIR, project)
     if not os.path.isdir(d):
         return []
+    # 集号专属目录优先
+    if episode:
+        for ep_tag in (f"ep{int(episode):02d}", f"第{int(episode)}集"):
+            ep_dir = os.path.join(VIDEOS_DIR, project, ep_tag)
+            if os.path.isdir(ep_dir):
+                files = sorted(f for f in os.listdir(ep_dir)
+                               if f.lower().endswith((".mp4", ".mov", ".mkv")))
+                if files:
+                    ordered = []
+                    numbered = sorted((f for f in files if re.match(r"^shot_(\d+)", f)),
+                                      key=lambda f: int(re.search(r"\d+", f).group()))
+                    ordered.extend(numbered)
+                    ordered.extend(f for f in files if f not in ordered and not f.endswith("_full.mp4"))
+                    return [os.path.join(ep_dir, f) for f in ordered]
+    # 回退到项目级目录（兼容旧布局）
     files = sorted(f for f in os.listdir(d) if f.lower().endswith((".mp4", ".mov", ".mkv")))
-    # 若存在整集成片（*_full.mp4），优先返回它（单条）
     fulls = [f for f in files if f.endswith("_full.mp4")]
     if fulls and not [f for f in files if re.match(r"^shot_\d+", f)]:
         return [os.path.join(d, fulls[0])]
@@ -190,15 +208,16 @@ def _jy_id(prefix: str, n: int, salt: str = "") -> str:
 
 def export_jianying(project: str, script: dict, videos: list = None,
                     audio: str = None, timeline: dict = None,
-                    draft_name: str = None) -> dict:
+                    draft_name: str = None, episode: int = None) -> dict:
     """导出剪映草稿（draft_content.json + draft_meta_info.json + 素材引用）
 
     轨道布局：
       视频轨：逐镜片段顺序排列
       音频轨：配音合并音轨（若存在）
       字幕轨：每镜台词（若存在）
+    B-17 P2-13：episode 参数可选；提供时按集号过滤视频目录。
     """
-    tl = timeline or build_timeline(script, project, videos)
+    tl = timeline or build_timeline(script, project, videos, episode=episode)
     rows = tl.get("shots") or []
     if not rows:
         return {"ok": False, "error": "没有可导出的镜头（剧本为空或无视频片段）"}
@@ -350,9 +369,11 @@ def export_jianying(project: str, script: dict, videos: list = None,
 
 def export_fcpxml(project: str, script: dict, videos: list = None,
                   audio: str = None, timeline: dict = None,
-                  fps: int = 30) -> dict:
-    """导出 FCPXML（Premiere Pro / Final Cut Pro 可导入）"""
-    tl = timeline or build_timeline(script, project, videos)
+                  fps: int = 30, episode: int = None) -> dict:
+    """导出 FCPXML（Premiere Pro / Final Cut Pro 可导入）
+    B-17 P2-13：episode 参数可选；提供时按集号过滤视频目录。
+    """
+    tl = timeline or build_timeline(script, project, videos, episode=episode)
     rows = tl.get("shots") or []
     if not rows:
         return {"ok": False, "error": "没有可导出的镜头"}
@@ -451,9 +472,11 @@ def _fmt_srt_time(sec: float) -> str:
 
 
 def export_srt(project: str, script: dict, timeline: dict = None,
-               videos: list = None) -> dict:
-    """导出 SRT 字幕（逐镜台词，按镜头时间轴对齐）"""
-    tl = timeline or build_timeline(script, project, videos)
+               videos: list = None, episode: int = None) -> dict:
+    """导出 SRT 字幕（逐镜台词，按镜头时间轴对齐）
+    B-17 P2-13：episode 参数可选；提供时按集号过滤视频目录。
+    """
+    tl = timeline or build_timeline(script, project, videos, episode=episode)
     rows = [r for r in (tl.get("shots") or []) if r.get("text")]
     if not rows:
         return {"ok": False, "error": "剧本中没有台词，无法生成字幕"}
@@ -480,9 +503,12 @@ def export_srt(project: str, script: dict, timeline: dict = None,
 # ===================== ④ 帧序列清单（P2-2） =====================
 
 def export_frames(project: str, script: dict, timeline: dict = None,
-                  videos: list = None, copy_files: bool = False) -> dict:
-    """导出关键帧清单：列出每镜的分镜图与视频片段路径 + 时间轴信息"""
-    tl = timeline or build_timeline(script, project, videos)
+                  videos: list = None, copy_files: bool = False,
+                  episode: int = None) -> dict:
+    """导出关键帧清单：列出每镜的分镜图与视频片段路径 + 时间轴信息
+    B-17 P2-13：episode 参数可选；提供时按集号过滤视频目录。
+    """
+    tl = timeline or build_timeline(script, project, videos, episode=episode)
     rows = tl.get("shots") or []
 
     sb_dir = os.path.join(STORYBOARDS_DIR, project)
@@ -569,24 +595,26 @@ def list_exports(project: str = None) -> list:
 
 
 def export_all(project: str, script: dict, videos: list = None,
-               audio: str = None, formats: list = None) -> dict:
+               audio: str = None, formats: list = None,
+               episode: int = None) -> dict:
     """一键导出（默认全部格式；formats 可指定子集）
 
     formats 可选值：jianying / fcpxml / srt / frames
+    B-17 P2-13：episode 参数可选；提供时按集号过滤视频目录。
     """
-    tl = build_timeline(script, project, videos)
+    tl = build_timeline(script, project, videos, episode=episode)
     results = {"timeline": {"shot_count": len(tl.get("shots") or []),
                             "total_sec": tl.get("total_sec")}}
     want = None
     if isinstance(formats, list) and formats:
         want = {str(f).strip().lower() for f in formats if str(f).strip()}
     if want is None or "jianying" in want:
-        results["jianying"] = export_jianying(project, script, videos, audio, timeline=tl)
+        results["jianying"] = export_jianying(project, script, videos, audio, timeline=tl, episode=episode)
     if want is None or "fcpxml" in want:
-        results["fcpxml"] = export_fcpxml(project, script, videos, audio, timeline=tl)
+        results["fcpxml"] = export_fcpxml(project, script, videos, audio, timeline=tl, episode=episode)
     if want is None or "srt" in want:
-        results["srt"] = export_srt(project, script, timeline=tl)
+        results["srt"] = export_srt(project, script, timeline=tl, episode=episode)
     if want is None or "frames" in want:
-        results["frames"] = export_frames(project, script, timeline=tl)
+        results["frames"] = export_frames(project, script, timeline=tl, episode=episode)
     return {"ok": any(v.get("ok") for v in results.values() if isinstance(v, dict)),
             "project": project, "output_dir": _out_dir(project), "results": results}

@@ -2118,9 +2118,12 @@ def api_export_run():
     if not script:
         return jsonify({"success": False, "error": "剧本不存在"}), 404
     formats = data.get('formats')
+    # B-17 P2-13：传集号给 nle_export，按集号过滤视频目录，避免跨集混用素材
+    ep_no = data.get('episode_no')
     try:
         results = nle_export.export_all(project, script,
-                                        formats=formats if isinstance(formats, list) else None)
+                                        formats=formats if isinstance(formats, list) else None,
+                                        episode=ep_no)
     except Exception as e:  # noqa: BLE001
         app.logger.exception("NLE 导出失败")
         return jsonify({"success": False, "error": f"导出失败：{e}"}), 500
@@ -9909,7 +9912,8 @@ def _timeline_for_export(project_name: str, episode_no=None,
         return provided
 
     script = _load_script_for(project_name, episode_no)
-    tl = nle_export.build_timeline(script or {}, project_name)
+    # B-17 P2-13：传集号给 build_timeline，按集号过滤视频目录
+    tl = nle_export.build_timeline(script or {}, project_name, episode=episode_no)
     rows = tl.get("shots") or []
     clips = [
         {
