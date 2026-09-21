@@ -35,6 +35,7 @@ from typing import Dict, List, Optional
 
 from config import MIX_DEFAULT_PARAMS, DUB_MIX_DIR
 from video_postprocess import probe_media
+import shot_key
 
 logger = logging.getLogger(__name__)
 
@@ -164,11 +165,14 @@ def shot_timeline(script: Dict, videos_dir: str = "", segments: Optional[List[st
 
 
 def _shot_seq_num(shot_id) -> Optional[int]:
-    """shot_id → 镜号（去非数字、取剩余数字串）。兼容 "shot_03" / "3" / "03"。"""
-    if shot_id is None:
-        return None
-    s = re.sub(r"\D", "", str(shot_id))
-    return int(s) if s else None
+    """shot_id → 镜号。P1-19 收敛：委托全项目唯一实现 ``shot_key.shot_seq``（取首段数字）。
+
+    原先用「拼接全部数字」（``S01-C02 → 102``）——与写侧 ``shot_key``（``→ 1``）语义互斥，
+    是镜号归一化收敛后**残留的唯一非单一实现**（见 P1-19 / A-10）。现统一为首段数字：
+    ``"shot_03" / "03" → 3``、``"S01-C02" → 1``、整数原样。本模块写读两侧共用该口径，
+    整数镜号下与旧行为一致，非整数复合镜号下消除「读 102 写 1」错位。
+    """
+    return shot_key.shot_seq(shot_id)
 
 
 def _shot_seq_num_from_filename(base: str) -> Optional[int]:

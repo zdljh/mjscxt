@@ -9523,7 +9523,11 @@ def api_autopilot_deliverables():
 def api_autopilot_review():
     """验收 / 打回成片（打回 = 该集在下次轮转时自动重做）"""
     data = request.json or {}
-    project = _safe_project(data.get('project') or data.get('project_name') or '')
+    # 口径统一（F-01 收口）：与 run-once 一致，改走 _project_or_400 拒绝越界/空/控制字符。
+    project, err = _project_or_400(
+        data.get('project') or data.get('project_name') or '', field_name="project")
+    if err is not None:
+        return err
     review = str(data.get('review') or '').strip().lower()
     if review not in ('accepted', 'rejected', 'pending'):
         return jsonify({"success": False, "error": "review 仅支持 accepted / rejected / pending"}), 400
@@ -9586,7 +9590,12 @@ def api_autopilot_exception_resolve():
 def api_autopilot_run_once():
     """立即生产指定一集（同步返回结果；用于联调与补跑，不建议前端长等待）"""
     data = request.json or {}
-    project = _safe_project(data.get('project') or data.get('project_name') or '')
+    # 口径统一（F-01 收口）：run-once / review 此前用 _safe_project，会把越界/空/控制字符
+    # 项目名静默收敛成合法键，与全仓 46 处 _project_or_400 不一致；现改走同一入口。
+    project, err = _project_or_400(
+        data.get('project') or data.get('project_name') or '', field_name="project")
+    if err is not None:
+        return err
     try:
         ep = int(data.get('episode_no') or 1)
     except (TypeError, ValueError):
