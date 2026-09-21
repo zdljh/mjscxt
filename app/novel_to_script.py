@@ -849,6 +849,28 @@ def _match_known_names(raw_names, known: list, field: str) -> list:
     return out
 
 
+# 实质台词文本判据（P0-2 补修 / task#9）：
+# 一条台词只有当它含「实质字符」（CJK / 字母 / 数字）才算"有台词内容"。
+# 纯标点（"。！？"）、空 text（[{"text":""}]）、结构化空壳（[{"text":""}]）
+# 一律视为**无实质台词**——与下游 prompt_qc「缺少画面描述」的硬不变量对齐。
+_DLGM_SUBSTANTIVE_RE = re.compile(r"[\u4e00-\u9fff\w]")
+
+
+def _has_meaningful_dlg(raw, chars: list) -> bool:
+    """归一化后是否含**实质**台词文本（单一判据，供「丢弃闸门」与「画面补齐」同源使用）。
+
+    task#9 修复的根因：旧实现里丢弃闸门用**原始值真值**（``bool([{"text":""}])`` /
+    ``bool("。！？".strip())`` 都为 True），而画面补齐条件用**归一化后真值**（这两类
+    归一化后 dialogue 为 []）→ 两处口径不一致 → 「结构化空壳 / 纯标点」镜头**既不被丢弃
+    也不被补齐** → 空壳镜在分镜步永久卡死。本函数以「归一化后是否含实质字符」为唯一
+    判据，让两处共用，消除分歧。
+    """
+    for line in _dlg_lines(raw, chars, chars):
+        if _DLGM_SUBSTANTIVE_RE.search(str(line.get("text") or "")):
+            return True
+    return False
+
+
 def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) -> list:
     scenes = [s.get("name") for s in (bible.get("scenes") or []) if isinstance(s, dict)]
     chars = [c.get("name") for c in (bible.get("characters") or []) if isinstance(c, dict)]
@@ -875,13 +897,9 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
         _has_vis = bool(str(s.get("description") or "").strip()
                         or str(s.get("visual_detail") or "").strip()
                         or str(s.get("storyboard_prompt_zh") or "").strip())
-        _dlg_raw = s.get("dialogue")
-        if isinstance(_dlg_raw, str):
-            _has_dlg = bool(_dlg_raw.strip())
-        elif isinstance(_dlg_raw, (list, tuple)):
-            _has_dlg = bool(_dlg_raw)
-        else:
-            _has_dlg = False
+        # task#9 补修：台词判据与下方「画面补齐」同源（归一化后是否含实质文本），
+        # 不再用原始值真值——否则 `[{"text":""}]` / `"。！？"` 既骗过闸门又不被补齐。
+        _has_dlg = _has_meaningful_dlg(s.get("dialogue"), chars)
         if not (_has_vis or _has_dlg):
             dropped_empty.append(s.get("camera") or s.get("location") or "?")
             continue
@@ -968,8 +986,11 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
         # ⚠️ 刻意**不写入台词原文**：台词进画面提示词会被模型渲染成字幕（prompt_qc 的硬原则），
         #    且会被 description 复用方（H3/尾帧/图片质检）当成「镜头内容」——那是以台词冒充
         #    画面，属于新缺陷。故只描述「说话人物的表演」，不含任何台词文本。
-        # 真·四字段全空的幽灵镜头仍在上方被丢弃（不受影响）。
-        if not (row["description"] or row["visual_detail"]) and row["dialogue"]:
+        # 真·四字段全空（含 task#9 的「结构化空壳 / 纯标点」形状）的幽灵镜头已在上方丢弃。
+        # 补齐判据与上方丢弃闸门**同源**（都走 _has_meaningful_dlg），避免两处口径再次漂移：
+        # 只有「归一化后确有实质台词文本」才补画面描述；纯标点/空壳既已被丢弃，此处恒假。
+        if not (row["description"] or row["visual_detail"]) \
+                and _has_meaningful_dlg(s.get("dialogue"), chars):
             _spk = []
             for _d in row["dialogue"]:
                 _nm = (_d.get("speaker") or "").strip() if isinstance(_d, dict) else ""
