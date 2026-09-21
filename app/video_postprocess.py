@@ -273,6 +273,12 @@ def ensure_audio_track(video_path: str, sample_rate: int = 48000) -> Dict:
         report["error"] = f"{type(e).__name__}: {e}"
         return report
     if r.returncode != 0 or not os.path.exists(tmp_out):
+        # B-16 P2-11：补音轨失败 → 清理中间产物（.clean 半成品）
+        try:
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+        except OSError:
+            pass
         report["error"] = (r.stderr or "ffmpeg 补音轨失败").strip()[-300:]
         return report
     after = probe_media(tmp_out)

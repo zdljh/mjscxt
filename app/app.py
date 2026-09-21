@@ -247,6 +247,30 @@ def _safe_project(name: str) -> str:
     return project_store.safe_key(name)
 
 
+# B-16 P2-11：失败路径清理中间产物。把「生成失败 / 质检阻断 / 异常」时的 scratch
+# 目录、.tmp 文件等中间产物统一删掉，避免只增不减。
+def _cleanup_scratch_dir(dir_path: str, logger=None) -> None:
+    """清空目录内容（保留目录本身），失败时只记日志不抛异常。"""
+    import logging
+    _log = logger or logging.getLogger(__name__)
+    if not dir_path or not os.path.isdir(dir_path):
+        return
+    try:
+        for fn in os.listdir(dir_path):
+            fp = os.path.join(dir_path, fn)
+            try:
+                if os.path.isdir(fp):
+                    import shutil
+                    shutil.rmtree(fp, ignore_errors=True)
+                else:
+                    os.remove(fp)
+            except OSError:
+                _log.warning("清理中间产物失败：%s", fp)
+        _log.info("已清理 scratch 目录：%s", dir_path)
+    except OSError as e:
+        _log.warning("清理 scratch 目录失败：%s", e)
+
+
 # B-14 P2-4：资产「取图判据」统一入口。就绪判据（_collect_asset_refs 的
 # _first_nonempty_image）与取图判据（_build_asset_index 的 _first_existing）
 # 此前各自维护一套「判有图」逻辑，口径漂移（一个只认 4 个扩展名、另一个只
@@ -2457,6 +2481,8 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                     if not base_files:
                         base_attempts.append({"attempt": attempt + 1, "seed": seed, "stage": "基础图生成",
                                               "ok": False, "error": "基础图生成失败"})
+                        # B-16 P2-11：基础图生成失败 → 清理本资产产生的 scratch 中间产物
+                        _cleanup_scratch_dir(scratch_dir, app.logger)
                         base_gate = {"accept": False, "blocked": True, "skipped": False,
                                      "label": "生成失败", "reason": "基础图生成失败", "critical_issues": []}
                         break
@@ -3278,8 +3304,32 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             "qc_blocked_count": blocked,
             "shots": manifest_shots,
         }
-        with open(os.path.join(out_dir, "storyboard_manifest.json"), "w", encoding="utf-8") as f:
-            json.dump(manifest, f, ensure_ascii=False, indent=2)
+        # B-15 P2-3：manifest 原子写（.tmp + os.replace），落盘失败不回滚 success
+        _sb_mp = os.path.join(out_dir, "storyboard_manifest.json")
+        _sb_tmp = _sb_mp + ".tmp"
+        try:
+            with open(_sb_tmp, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(_sb_tmp, _sb_mp)
+        except Exception as _mp_err:
+            app.logger.warning(f"分镜 manifest 原子写失败（已回滚 status）：{_mp_err}")
+            if os.path.exists(_sb_tmp):
+                try:
+                    os.unlink(_sb_tmp)
+                except OSError:
+                    pass
+            with lock:
+                generation_state[task_id].update({
+                    "status": "failed",
+                    "progress": 100,
+                    "success_count": ok,
+                    "qc_blocked_count": blocked,
+                    "output_dir": out_dir,
+                    "error": f"分镜 manifest 落盘失败：{_mp_err}",
+                })
+            return
 
         with lock:
             generation_state[task_id].update({
@@ -4123,6 +4173,8 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
             })
     except Exception as e:
         app.logger.error(f"视频生成失败: {e}")
+        # B-16 P2-11：视频任务异常 → 清理本任务产生的视频 scratch 中间产物
+        _cleanup_scratch_dir(os.path.join(QC_DIR, project_name, "video_scratch"), app.logger)
         with lock:
             generation_state[task_id].update({"status": "failed", "error": str(e)})
 
@@ -8313,10 +8365,20 @@ def _dub_worker(task_id: str, project_name: str, plan: dict, out_dir: str,
             })
     except (TTSError, OSError) as e:
         app.logger.error(f"配音任务失败: {e}")
+        # B-16 P2-11：配音失败 → 清理本任务产生的中间产物（lines 目录、merged 半成品）
+        _cleanup_scratch_dir(os.path.join(out_dir, "lines"), app.logger)
+        _mp_tmp_f = os.path.join(out_dir, f"ep{int(episode):02d}_dub.{fmt}.tmp")
+        if os.path.exists(_mp_tmp_f):
+            try:
+                os.remove(_mp_tmp_f)
+            except OSError:
+                pass
         with dub_lock:
             dub_tasks[task_id].update({"status": "failed", "error": str(e), "phase": "失败"})
     except Exception as e:  # noqa: BLE001
         app.logger.exception("配音任务异常")
+        # B-16 P2-11：配音异常 → 清理中间产物
+        _cleanup_scratch_dir(os.path.join(out_dir, "lines"), app.logger)
         with dub_lock:
             dub_tasks[task_id].update({"status": "failed", "error": f"异常：{e}", "phase": "失败"})
 
@@ -8959,11 +9021,16 @@ def _mix_worker(task_id: str, prepared: dict, out_name: str):
             app.logger.info(f"成片未登记待验收（{project_name} 第{prepared['episode']}集）："
                             f"{reg.get('reason')}")
     except DubMixError as e:
+        app.logger.warning(f"混音合成失败: {e}")
+        # B-16 P2-11：混音失败 → 清理本任务产生的中间产物（未完成的 report / 半成品）
+        _cleanup_scratch_dir(out_dir, app.logger)
         with mix_lock:
             mix_tasks[task_id].update({"status": "failed", "phase": "合成失败",
                                        "message": str(e), "progress": 100})
     except Exception as e:  # pragma: no cover - 兜底
         app.logger.exception("音画合成异常")
+        # B-16 P2-11：混音异常 → 清理中间产物
+        _cleanup_scratch_dir(out_dir, app.logger)
         with mix_lock:
             mix_tasks[task_id].update({"status": "failed", "phase": "合成异常",
                                        "message": f"{type(e).__name__}: {e}", "progress": 100})
