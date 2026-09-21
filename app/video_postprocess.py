@@ -83,7 +83,8 @@ def probe_media(path: str) -> Dict:
     info["size_bytes"] = os.path.getsize(path)
     info["size_mb"] = round(info["size_bytes"] / 1048576, 3)
     cmd = ["ffprobe", "-v", "error", "-show_entries",
-           "stream=index,codec_type,codec_name,width,height:format=duration,format_name",
+           "stream=index,codec_type,codec_name,width,height,r_frame_rate,"
+           "sample_rate,channels:format=duration,format_name",
            "-of", "json", path]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -106,6 +107,20 @@ def probe_media(path: str) -> Dict:
         if videos:
             info["width"] = videos[0].get("width")
             info["height"] = videos[0].get("height")
+            # B-05 P1-4：实测帧率（ffprobe r_frame_rate 形如 "30000/1001"），供降级重编码参考
+            _fr = str(videos[0].get("r_frame_rate") or "")
+            try:
+                num, _, den = _fr.partition("/")
+                if den:
+                    info["fps"] = round(int(num) / int(den), 3)
+                elif num:
+                    info["fps"] = float(num)
+            except (ValueError, ZeroDivisionError):
+                pass
+        if audios:
+            # B-04 P1-3（已修复 S-01）：补 audio 采样率/声道探测，供音轨一致性判定
+            info["sample_rate"] = audios[0].get("sample_rate")
+            info["channels"] = audios[0].get("channels")
         info["duration"] = round(float((d.get("format") or {}).get("duration") or 0), 3)
         info["format_name"] = (d.get("format") or {}).get("format_name")
         info["ok"] = True
@@ -354,7 +369,11 @@ class VideoPostProcessor:
 
     def _concat_reencode(self, video_paths: List[str], output_path: str,
                          probes: List[Dict]) -> str:
-        """concat filter 重编码拼接（统一 1280x720@30 H264 + 24kHz 单声道 AAC）
+        """concat filter 重编码拼接（分辨率/帧率由源片实测推导，不硬编码）
+
+        B-05 P1-4：原实现硬编码 scale=1280:720 + fps=30 → 竖屏 9:16 项目被悄悄
+        改成横屏加黑边且不可逆。改为以「分辨率/帧率出现最多的片段」为基准，
+        竖屏保持竖屏、帧率与源片一致。
 
         filter_complex 结构：
           [i:v:0]scale/fps/format → [vi]
@@ -365,16 +384,45 @@ class VideoPostProcessor:
         if not video_paths:
             return ""
         n = len(video_paths)
+
+        # B-05：从源片实测推导目标分辨率/帧率（以出现最多的宽/高/帧率为准）
+        target_w, target_h = 1280, 720  # 兜底值（probe 全部失败时才用）
+        target_fps = 30
+        w_votes: Dict[int, int] = {}
+        h_votes: Dict[int, int] = {}
+        fps_votes: Dict[int, int] = {}
+        for i, p in enumerate(video_paths):
+            pro = probes[i] if i < len(probes) else {}
+            w = int(pro.get("width") or 0)
+            h = int(pro.get("height") or 0)
+            fps = int(round(float(pro.get("fps") or 0)))
+            if w and h:
+                w_votes[w] = w_votes.get(w, 0) + 1
+                h_votes[h] = h_votes.get(h, 0) + 1
+            if fps:
+                fps_votes[fps] = fps_votes.get(fps, 0) + 1
+        if w_votes:
+            target_w = max(w_votes, key=w_votes.get)
+        if h_votes:
+            target_h = max(h_votes, key=h_votes.get)
+        if fps_votes:
+            target_fps = max(fps_votes, key=fps_votes.get)
+        # 宽高对齐到偶数（libx264 要求），防止 721 之类奇数
+        target_w = target_w // 2 * 2 or 1280
+        target_h = target_h // 2 * 2 or 720
+        logger.info(f"降级重编码基准：{target_w}x{target_h}@{target_fps}fps（源片实测）")
+
         inputs: List[str] = []
         for p in video_paths:
             inputs += ["-i", os.path.abspath(p)]
 
-        # 逐片段：视频归一化（scale+fps+pix_fmt+sar）→ [vi]；音频归一化（24kHz 单声道）→ [ai]
+        # 逐片段：视频归一化（scale 到源片基准 + fps + pix_fmt + sar）→ [vi]；音频归一化 → [ai]
         per_stream: List[str] = []
         for i in range(n):
             per_stream.append(
-                f"[{i}:v:0]scale=1280:720:force_original_aspect_ratio=decrease,"
-                f"pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=30,format=yuv420p,setsar=1[v{i}]"
+                f"[{i}:v:0]scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+                f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
+                f"fps={target_fps},format=yuv420p,setsar=1[v{i}]"
             )
             per_stream.append(
                 f"[{i}:a?]aresample=24000,aformat=sample_fmts=fltp:channel_layouts=mono[a{i}]"

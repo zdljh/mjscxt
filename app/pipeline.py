@@ -41,12 +41,51 @@ import json
 import logging
 import os
 import shutil
+import threading
 import time
 import traceback
 
 import cancellation
 
 logger = logging.getLogger(__name__)
+
+# ===================== 集级互斥（B-02 P0-5 并发/幂等） =====================
+# 问题：autopilot 托管守护线程（autopilot.py:805）与手动 run-once（app.py:9417）
+# 可能并发写同一集的同一批路径（正式目录 + scratch）。加「集级」锁
+# （键 = 项目 + 集号）保证同一集任何时刻只有一个执行体；不同集可并行。
+# 不可用全局锁（会让不同项目/不同集互相阻塞）。
+_EP_LOCKS: dict = {}
+_EP_LOCKS_GUARD = threading.Lock()
+
+
+def _acquire_episode_lock(project_name: str, episode_no: int) -> bool:
+    """尝试获取集级锁；拿不到（另一执行体正在跑）返回 False，不阻塞。"""
+    key = f"{project_name}#{int(episode_no)}"
+    with _EP_LOCKS_GUARD:
+        lk = _EP_LOCKS.get(key)
+        if lk is None:
+            lk = threading.Lock()
+            _EP_LOCKS[key] = lk
+    return lk.acquire(blocking=False)
+
+
+def _release_episode_lock(project_name: str, episode_no: int) -> None:
+    key = f"{project_name}#{int(episode_no)}"
+    with _EP_LOCKS_GUARD:
+        lk = _EP_LOCKS.get(key)
+    if lk is not None:
+        try:
+            lk.release()
+        except RuntimeError:
+            pass
+
+
+def is_episode_running(project_name: str, episode_no: int) -> bool:
+    """该集当前是否有执行体（供前端/诊断查询）"""
+    key = f"{project_name}#{int(episode_no)}"
+    with _EP_LOCKS_GUARD:
+        lk = _EP_LOCKS.get(key)
+    return bool(lk and lk.locked())
 
 # ===================== 步骤定义 =====================
 
@@ -388,9 +427,71 @@ def final_path(ctx) -> str:
     return os.path.join(A.FINAL_DIR, ctx["project_name"], f"ep{ctx['episode_no']:02d}_final.mp4")
 
 
+def _deliverable_review(ctx) -> dict:
+    """读取该集成片在 deliverables.json 里登记的 review 状态（找不到返回 {}）"""
+    A = _A()
+    idx_path = os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot",
+                            ctx["project_name"], "deliverables.json")
+    if not _nonempty(idx_path):
+        return {}
+    try:
+        with open(idx_path, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+    return (data.get("items") or {}).get(str(int(ctx["episode_no"]))) or {}
+
+
 def probe_final(ctx) -> dict:
     p = final_path(ctx)
-    return {"total": 1, "ready": 1 if _playable(p) else 0, "done": _playable(p), "file": p}
+    done = _playable(p)
+    # B-03 P0-4：成片被打回（review= rejected）时，即便磁盘上成片仍可播放，
+    # 也不能走幂等短路（原 done=done 会让 step_final 直接跳过、review 永不复位、
+    # 最终误报「状态同步异常」）。打回 = 该集需要重做 → 让 step_final 真正重跑。
+    review = _deliverable_review(ctx).get("review")
+    if done and review == "rejected":
+        done = False
+    return {"total": 1, "ready": 1 if done else 0, "done": done, "file": p,
+            "review": review}
+
+
+def _reset_deliverable_review(ctx, review: str, note: str = "") -> None:
+    """B-03 P0-4：成片重做后把 deliverables.json 里该集的 review 复位。
+
+    失败不阻断流水线（review 复位是「体验」问题，不影响成片本身）。
+    """
+    A = _A()
+    idx_path = os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot",
+                            ctx["project_name"], "deliverables.json")
+    if not _nonempty(idx_path):
+        return
+    try:
+        with open(idx_path, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+    except Exception:  # noqa: BLE001
+        logger.warning("复位 review 失败（读 deliverables.json 异常）：%s",
+                       ctx["project_name"])
+        return
+    item = (data.get("items") or {}).get(str(int(ctx["episode_no"])))
+    if not isinstance(item, dict):
+        return
+    item["review"] = review
+    item["review_note"] = note
+    item["reviewed_at"] = _now()
+    tmp = idx_path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, idx_path)
+        logger.info("第%s集 成片重做后 review 复位为 %s（项目 %s）",
+                    int(ctx["episode_no"]), review, ctx["project_name"])
+    except Exception:  # noqa: BLE001
+        logger.warning("复位 review 失败（写 deliverables.json 异常）：%s",
+                       ctx["project_name"])
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def dub_manifest_path(ctx) -> str:
@@ -763,6 +864,11 @@ def step_final(ctx) -> dict:
             pass
     if not _nonempty(out):
         raise PipelineError("成片合成失败（目标文件为空）")
+    # B-03 P0-4：成片重做后，把 deliverables.json 里该集的 review 复位到 pending，
+    # 避免「打回 → 重跑 → 仍判 rejected → 又短路」的循环。
+    old_review = _deliverable_review(ctx).get("review")
+    if old_review == "rejected":
+        _reset_deliverable_review(ctx, "pending", "成片已重做，请重新验收")
     return {"ok": True, "artifact": out,
             "detail": {"segments": len(files), "subtitles": bool(subbed), "size": os.path.getsize(out)}}
 
@@ -1087,6 +1193,15 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
                 "error": f"该集此前已判定需人工介入（{dead.get('reason') or '未知原因'}）",
                 "note": "请先在「需人工介入」中处理或标记忽略后才会重新尝试"}
 
+    # B-02 P0-5：集级互斥。拿到锁才能继续，拿不到说明另一执行体（run-once / 托管轮转）
+    # 正在跑同一集 → 直接返回 busy，不并发写同一批路径。不同集/项目互不影响。
+    if not _acquire_episode_lock(project_name, int(episode_no)):
+        return {"ok": False, "status": "busy", "episode_no": int(episode_no),
+                "project": project_name, "deliverable": "", "steps": {},
+                "error": f"{project_name} 第{int(episode_no)}集 正在被另一个执行体生产，"
+                         f"请稍后再试（避免并发写同一批路径）",
+                "note": "同一集任何时刻只有一个执行体；不同集可并行"}
+
     result = {
         "ok": False, "status": "failed", "episode_no": int(episode_no),
         "project": project_name, "project_key": ctx["project_key"],
@@ -1155,6 +1270,7 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
         logger.error("第%s集流水线失败：%s\n%s", episode_no, result["error"], traceback.format_exc())
     finally:
         cancellation.reset(_cancel_token)
+        _release_episode_lock(project_name, int(episode_no))
 
     result["elapsed_sec"] = round(time.time() - started, 1)
     result["finished_at"] = _now()

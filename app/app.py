@@ -9415,6 +9415,11 @@ def api_autopilot_run_once():
     cfg = pipeline.normalize_config({**plan, 'novel_id': meta.get('novel_id')},
                                     default_project_key=project)
     result = pipeline.run_episode(cfg, project, ep, meta, chapter)
+    if result.get('status') == 'busy':
+        # B-02 P0-5：该集正被另一执行体（托管轮转）生产，集级锁拒绝双跑
+        return jsonify({"success": False,
+                        "error": result.get('error') or "该集正在生产中",
+                        "retry_after_sec": 30}), 409
     if result.get('ok') and result.get('deliverable'):
         pipeline.record_deliverable(project, ep, result['deliverable'], meta={
             'title': chapter.get('title') or '', 'chapter_index': chapter.get('index'),
