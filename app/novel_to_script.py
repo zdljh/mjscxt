@@ -819,6 +819,36 @@ def _overflow_detail(raw, limit: int) -> str:
     return s[int(limit):].strip()[:400]
 
 
+def _match_known_names(raw_names, known: list, field: str) -> list:
+    """把镜头声明的角色/物品名收敛到 bible 名单内（**禁止静默 take-first**）。
+
+    P1-16 修复：旧实现用 `[...] if c in chars] or chars[:1]` —— 名字与 bible 对不上时
+    静默填入首个角色（通常是主角），使整集以**错误角色**为外观锚点（日志/界面看不出来），
+    并把下游 S6「禁止静默 take-first」的 `_no_reference` 分支彻底架空（列表恒非空）。
+    现在只保留**精确命中 bible** 的名字（去重保序）；匹配不到即返回空列表，交由下游
+    `_allocate_storyboard_refs` 的 no_reference 分支显式告警/跳过，并在「有输入但全未
+    命中」时记 warning，保证排障可见。
+    """
+    if isinstance(raw_names, str):
+        raw_names = [raw_names]
+    names = [n for n in (raw_names or []) if n]
+    if not names:
+        return []
+    known_set = set(known or [])
+    seen, out = set(), []
+    for n in names:
+        if n in known_set and n not in seen:
+            seen.add(n)
+            out.append(n)
+    if not out:
+        logger.warning(
+            "镜头 %s 声明的名字 %s 均未命中 bible（可用：%s）→ 保留空列表，"
+            "交由下游 no_reference 显式告警/跳过（禁止静默兜底取错角色）",
+            field, "、".join(names)[:80],
+            "、".join(x for x in (known or []) if x)[:120])
+    return out
+
+
 def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) -> list:
     scenes = [s.get("name") for s in (bible.get("scenes") or []) if isinstance(s, dict)]
     chars = [c.get("name") for c in (bible.get("characters") or []) if isinstance(c, dict)]
@@ -857,7 +887,16 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
             continue
         loc = str(s.get("location") or "").strip()
         if scenes and loc and loc not in scenes:
-            loc = next((n for n in scenes if n and n in loc), scenes[0])
+            # P1-16 修复（场景侧）：匹配不到时**保留原 loc** 并记 warning，绝不静默回落
+            # `scenes[0]`。旧行为会把「破败的大殿」这类不在 bible 里的场景名换成「后山」
+            # 这类首个场景 —— 环境锚点整集级错位，且日志/界面看不出来。
+            _hit = next((n for n in scenes if n and n in loc), None)
+            if _hit:
+                loc = _hit
+            else:
+                logger.warning(
+                    "镜头场景名未命中 scenery bible：%r（可用：%s）→ 保留原文，"
+                    "不静默回落首个场景", loc, "、".join(x for x in scenes if x)[:120])
         if not loc and scenes:
             loc = scenes[0]
         row = {
@@ -896,7 +935,13 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
             # 其余一律丢弃，交由生成期 h3_prompt_kit 按当次参考图规范重建。
             "prompt_h3": _keep_valid_h3(s.get("prompt_h3")),
             "style": shot_style,          # ← 风格注入：分镜图/视频提示词的风格来源
-            "characters_in_shot": [c for c in (s.get("characters_in_shot") or []) if c in chars] or chars[:1],
+            # P1-16 修复（角色侧）：**去掉 `or chars[:1]` 兜底**。旧行为在「镜头角色名与
+            # bible 对不上」时静默填入首个角色（通常是主角），使整集以错误角色为外观锚点，
+            # 且日志/界面看不出来 —— 同时把下游 S6「禁止静默 take-first」的 `_no_reference`
+            # 分支彻底架空（列表恒非空）。现在只保留**精确命中 bible** 的角色，匹配不到即留空，
+            # 由下游 `_allocate_storyboard_refs` 的 no_reference 分支显式告警/跳过。
+            "characters_in_shot": _match_known_names(
+                s.get("characters_in_shot"), chars, "characters_in_shot"),
             "items_in_shot": [i for i in (s.get("items_in_shot") or []) if i in items],
         }
         # 覆盖率补生成镜头：保留其承载的原文单元编号，便于覆盖率校验与前端回溯
@@ -915,6 +960,25 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
             (f"{d['speaker']}：{d['text']}" if d.get("speaker") else d.get("text") or "")
             for d in row["dialogue"]
         ).strip()
+        # P0-2 修复（上游补齐）：只有台词、没有画面描述的镜头，在生成期提示词预检里会命中
+        #   「镜头缺少画面描述（description / visual_detail / storyboard_prompt_zh 均为空）」
+        # 这条**致命且不可自愈**的缺陷（prompt_qc._check_storyboard → fatal）→ 该镜永远
+        # 出不了图 → probe_storyboard 永远缺 1 镜 → **整集在分镜步永久卡死**。
+        # 这里在上游用**台词上下文**补齐一条画面描述，使该镜带「画面内容」进入生成。
+        # ⚠️ 刻意**不写入台词原文**：台词进画面提示词会被模型渲染成字幕（prompt_qc 的硬原则），
+        #    且会被 description 复用方（H3/尾帧/图片质检）当成「镜头内容」——那是以台词冒充
+        #    画面，属于新缺陷。故只描述「说话人物的表演」，不含任何台词文本。
+        # 真·四字段全空的幽灵镜头仍在上方被丢弃（不受影响）。
+        if not (row["description"] or row["visual_detail"]) and row["dialogue"]:
+            _spk = []
+            for _d in row["dialogue"]:
+                _nm = (_d.get("speaker") or "").strip() if isinstance(_d, dict) else ""
+                if _nm and _nm not in _spk:
+                    _spk.append(_nm)
+            _who = "、".join(_spk) or "人物"
+            row["description"] = (
+                f"{_who}开口说话（本镜以人物台词表演为主，画面聚焦说话人物的口型与神情）"
+            )[:200]
         # 单镜头时长：取「模型给的时长」与「内容实际需要的时长」的**较大值**。
         # 历史缺陷：原实现只要模型给了合法值就直接采用（4~5 秒），完全不看这镜有多少台词
         #   → 长台词硬贴在短画面上，配音沿时间轴溢出到后面几镜，成片尾部被 `-shortest` 静默截掉。
