@@ -205,7 +205,7 @@ def _read_json(path: str, default, strict: bool = False):
                 raise
             logger.warning("读取 %s 解析失败，按默认值处理", os.path.basename(path))
             return default
-        except OSError:
+        except OSError as e:
             # P1-2 补修（回归修复）：区分「文件不存在」与「存在但不可读」。
             # 文件不存在 = **正常初始态**（首次运行/全新部署）：
             if not os.path.exists(path):
