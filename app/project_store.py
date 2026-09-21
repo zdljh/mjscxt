@@ -206,9 +206,33 @@ def _read_json(path: str, default, strict: bool = False):
             logger.warning("读取 %s 解析失败，按默认值处理", os.path.basename(path))
             return default
         except OSError:
+            # P1-2 补修（回归修复）：区分「文件不存在」与「存在但不可读」。
+            # 文件不存在 = **正常初始态**（首次运行/全新部署）：
+            if not os.path.exists(path):
+                if strict:
+                    # 活文件不存在但 .bak 还在（活文件被误删场景）→ 恢复最后一份好版本，
+                    # 而不是静默建空索引（下次 save 会基于空索引写回、清空项目注册表）
+                    restored = _try_restore_bak(path)
+                    if restored is not None:
+                        logger.warning(
+                            "读取 %s：活文件不存在但存在 .bak，已恢复最后一份好版本",
+                            os.path.basename(path))
+                        return restored
+                return default
+            # 活文件存在但读取失败（非瞬时占用类 OSError）：
             if strict:
+                logger.error(
+                    "读取 %s 失败（文件存在但不可读：%s），fail-loud，"
+                    "避免下游「读改写」基于空索引写回、清空数据",
+                    os.path.basename(path), e if isinstance(e, Exception) else "OSError")
                 raise
             return default
+    # 瞬时占用（PermissionError）重试 6 轮仍未读到的兜底出口：
+    if strict:
+        logger.error(
+            "读取 %s 反复被占用（已重试 6 次）且文件存在，fail-loud（strict），"
+            "绝不把「读不到」当成「空」写回", os.path.basename(path))
+        raise
     logger.warning("读取 %s 反复被占用（已重试 6 次），按未配置处理", os.path.basename(path))
     return default
 
