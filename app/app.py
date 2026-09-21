@@ -10638,6 +10638,16 @@ def api_memory_trends():
 
 
 if __name__ == '__main__':
+    # P2-T4（F-02）：直跑分支也走同一套回环护栏（与 serve.main 共用 host_guard）。
+    # 此前 `python app/app.py` 直跑完全绕过 serve.py 护栏 —— APP_HOST=0.0.0.0 时
+    # 零鉴权的 debug 模式对同网段全裸暴露。现：非回环且未设 MJSCXT_ALLOW_NON_LOOPBACK
+    # 时拒绝启动（fail-closed），与 serve.py 口径一致。
+    from host_guard import _guard_host
+    try:
+        _guard_host(APP_HOST)
+    except RuntimeError as e:
+        app.logger.error("启动被安全护栏拦截（F-02 直跑分支）：%s", e)
+        raise SystemExit(2)
     app.logger.info(f"漫剧生成系统启动: http://{APP_HOST}:{APP_PORT} (debug={APP_DEBUG})")
     app.run(host=APP_HOST, port=APP_PORT, debug=APP_DEBUG, threaded=True)
 
