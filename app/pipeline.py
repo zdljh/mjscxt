@@ -507,8 +507,13 @@ def probe_tts(ctx) -> dict:
     try:
         with open(p, "r", encoding="utf-8") as f:
             mf = json.load(f) or {}
-    except Exception:  # noqa: BLE001
-        return {"total": 0, "ready": 0, "done": False, "file": p}
+    except Exception as e:  # noqa: BLE001
+        # B-08 P1-10：manifest 损坏/解析失败 → fail-loud（不再静默 done:False），
+        # 否则 TTS 步骤会误判「未就绪」而重烧整集配音。
+        logger.warning("配音 manifest 解析失败（项目 %s 第 %s 集）：%s",
+                       ctx["project_name"], int(ctx["episode_no"]), e)
+        return {"total": 0, "ready": 0, "done": False, "file": p,
+                "error": f"manifest 损坏或不可解析：{e}"}
     lines = [l for l in (mf.get("lines") or []) if isinstance(l, dict)]
     ok = [l for l in lines if l.get("ok") and _nonempty(l.get("out_path") or "")]
     return {"total": len(lines), "ready": len(ok),
@@ -786,6 +791,44 @@ def step_video(ctx) -> dict:
     return {"ok": True, "detail": detail, "artifact": recheck["dir"]}
 
 
+def _probe_concat_duration(concat_video: str, segments: list) -> float:
+    """B-07 P1-5：ffprobe 实测拼接后视频总时长（秒）。
+
+    字幕时间轴基准必须与成片实测时长一致，否则字幕整体漂移。
+    拼接后若存在则优先用 ffprobe 实测；无 ffprobe 时退化用各段实测时长累加。
+    """
+    import subprocess as _sp
+    import json as _json
+    # 1) 若已拼好成片（concat_video 非空且存在），直接 ffprobe 取实测时长
+    if concat_video and _nonempty(concat_video):
+        try:
+            r = _sp.run(["ffprobe", "-v", "error", "-show_entries",
+                         "format=duration", "-of", "json",
+                         os.path.abspath(concat_video)],
+                        capture_output=True, text=True, timeout=60)
+            if r.returncode == 0:
+                d = _json.loads(r.stdout or "{}")
+                dur = float((d.get("format") or {}).get("duration") or 0)
+                if dur > 0:
+                    return dur
+        except Exception:  # noqa: BLE001
+            pass
+    # 2) 退化：各段 ffprobe 实测时长累加（比剧本 duration 累加更可靠）
+    total = 0.0
+    for seg in segments:
+        try:
+            r = _sp.run(["ffprobe", "-v", "error", "-show_entries",
+                         "format=duration", "-of", "json",
+                         os.path.abspath(seg)],
+                        capture_output=True, text=True, timeout=60)
+            if r.returncode == 0:
+                d = _json.loads(r.stdout or "{}")
+                total += float((d.get("format") or {}).get("duration") or 0)
+        except Exception:  # noqa: BLE001
+            continue
+    return total
+
+
 def step_final(ctx) -> dict:
     """成片合成：按剧本镜头顺序拼接该集所有片段，可选叠加字幕"""
     A = _A()
@@ -839,12 +882,46 @@ def step_final(ctx) -> dict:
     try:
         from dialogue_utils import dialogue_text
         subs, cur = [], 0.0
-        for s in shots:
-            dur = float(s.get("duration") or 5)
-            text = dialogue_text(s.get("dialogue"))
-            if text:
-                subs.append({"start": cur, "end": cur + dur, "text": text})
-            cur += dur
+        # B-07 P1-5：时间轴基准用 ffprobe 实测各段时长累加（而非剧本 duration），
+        # 与成片实际时长一致，避免字幕整体漂移。
+        if mode == "episode":
+            # 整集模式：tmp 是整集视频，按各镜剧本时长占比近似分配（单条源片无法逐段 ffprobe）
+            _ep_total = _probe_concat_duration(tmp, [tmp])
+            for s in shots:
+                dur = float(s.get("duration") or 5)
+                _script_total = sum(float(x.get("duration") or 5) for x in shots) or 1.0
+                if _ep_total > 0:
+                    dur = dur / _script_total * _ep_total
+                text = dialogue_text(s.get("dialogue"))
+                if text:
+                    subs.append({"start": cur, "end": cur + dur, "text": text})
+                cur += dur
+        else:
+            # 逐镜模式：各段 ffprobe 实测时长累加
+            seg_durs = []
+            for p in files:
+                _d = 0.0
+                try:
+                    import subprocess as _sp2
+                    import json as _json2
+                    _r = _sp2.run(["ffprobe", "-v", "error", "-show_entries",
+                                   "format=duration", "-of", "json",
+                                   os.path.abspath(p)],
+                                  capture_output=True, text=True, timeout=60)
+                    if _r.returncode == 0:
+                        _d = float((_json2.loads(_r.stdout or "{}").get("format")
+                                    or {}).get("duration") or 0)
+                except Exception:  # noqa: BLE001
+                    _d = 0.0
+                seg_durs.append(_d)
+            for i, s in enumerate(shots):
+                dur = seg_durs[i] if i < len(seg_durs) else float(s.get("duration") or 5)
+                if dur <= 0:
+                    dur = float(s.get("duration") or 5)
+                text = dialogue_text(s.get("dialogue"))
+                if text:
+                    subs.append({"start": cur, "end": cur + dur, "text": text})
+                cur += dur
         if subs:
             subbed = A.video_processor.add_subtitles(tmp, subs, out)
     except Exception as e:  # noqa: BLE001  字幕失败不阻断成片

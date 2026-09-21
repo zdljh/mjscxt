@@ -8256,8 +8256,13 @@ def _dub_worker(task_id: str, project_name: str, plan: dict, out_dir: str,
                       for r in results],
         }
         manifest_path = os.path.join(out_dir, f"ep{int(episode):02d}_dub_manifest.json")
-        with open(manifest_path, "w", encoding="utf-8") as f:
+        # B-08 P1-10：manifest 原子写（先 .tmp 后 os.replace），崩溃不留下半写文件
+        _mp_tmp = manifest_path + ".tmp"
+        with open(_mp_tmp, "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(_mp_tmp, manifest_path)
 
         _msg = f"成功 {len(ok_items)} 句 / 失败 {len(results) - len(ok_items)} 句"
         if aqua.get("enabled") and aqua.get("checked"):
@@ -8622,9 +8627,28 @@ def _mix_resolve_video(data: dict, project_name: str) -> str:
     return cands[0][1]
 
 
-def _mix_segments_dir(project_name: str) -> str:
-    """定位该项目的镜头分段视频目录（用于按真实分段时长对齐时间轴）"""
+def _mix_segments_dir(project_name: str, episode: int = 0) -> str:
+    """定位该集（episode 给定）或该项目的镜头分段视频目录（用于按真实分段时长对齐时间轴）
+
+    B-10 P1-6：带集号过滤。第 2 集起不再取到第 1 集素材，避免时间轴/成片源系统性错配。
+    优先匹配该集专属目录（``<key>_第N集`` 或 ``epNN`` 子目录），找不到再回退到项目级目录。
+    """
+    ep_tag = f"ep{int(episode):02d}" if episode else ""
     best, best_key = "", (-1, 0)
+    # 优先找该集专属目录（第 2 集起视频通常落在 <项目键>_第N集/ 或 epNN/ 子目录）
+    ep_dir = ""
+    if episode:
+        for cand in (os.path.join(VIDEOS_DIR, project_name, ep_tag),
+                     os.path.join(VIDEOS_DIR, f"{project_name}_第{episode}集")):
+            if os.path.isdir(cand):
+                ep_dir = cand
+                break
+    if ep_dir:
+        # 该集目录直接采用
+        vids = [f for f in os.listdir(ep_dir) if f.lower().endswith(".mp4")]
+        if vids:
+            return ep_dir
+    # 回退：项目级目录（第 1 集或整集模式）
     for d in project_store.project_dirs(VIDEOS_DIR, project_name):
         if not os.path.isdir(d):
             continue
@@ -8785,7 +8809,7 @@ def _mix_prepare(data: dict) -> dict:
     manifest = mf["manifest"]
     episode = episode or int(manifest.get("episode") or 1)
 
-    seg_dir = _mix_segments_dir(project_name)
+    seg_dir = _mix_segments_dir(project_name, episode)
     timeline = shot_timeline(script, videos_dir=seg_dir)
 
     params = dict(MIX_DEFAULT_PARAMS)
