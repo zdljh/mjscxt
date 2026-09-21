@@ -29,6 +29,8 @@ import json
 import logging
 import os
 import secrets as _secrets
+import shutil
+import threading
 from typing import Optional
 
 # 关键：必须经由 env_loader 保证 .env 已加载，否则 MJSCXT_SECRET_KEY 读不到，
@@ -36,6 +38,14 @@ from typing import Optional
 from env_loader import PROJECT_ROOT_DIR as _ENV_ROOT  # noqa: F401
 
 logger = logging.getLogger(__name__)
+
+# 进程内读写锁：SecretStore 的 CRUD 是「_read_store → 改内存 → _write_store」的读改写。
+# P1-1（A-11）：此前全类**零锁** + `_write_store` 用**固定** ``.tmp`` 名，两个并发线程
+# （例：保存 AI 密钥 + 保存质检配置）A 写一半、B 以 "w" 截断重写同一 ``.tmp``，A 再
+# ``os.replace`` → 发布出去的是**交错/截断的 JSON**；而 ``_read_store`` 解析失败后
+# **静默返回空库** → 下次读改写把**整个密钥库清空**。加 RLock + 唯一临时名 + 损坏 .bak
+# 恢复 / fail-loud 根治（与 project_store 的 P1-2 同一口径）。
+_STORE_LOCK = threading.RLock()
 
 # ===================== 主密钥解析 =====================
 
@@ -135,6 +145,42 @@ class SecretStore:
 
     # ---------- 加密文件读写 ----------
 
+    @staticmethod
+    def _bak_path(root_dir: str) -> str:
+        return _secrets_path(root_dir) + ".bak"
+
+    def _restore_corrupt(self, path: str) -> dict:
+        """活文件损坏时从 ``.bak``（上一份可解析好版本）恢复，返回其 dict。
+
+        P1-1（A-11）：恢复成功会原子写回活文件；``.bak`` 不存在/也不可解析时
+        返回 ``None``（调用方据此 fail-loud，绝不静默返空库 → 防止下次读改写清空整个密钥库）。
+        """
+        bak = self._bak_path(self.root_dir)
+        if not os.path.isfile(bak):
+            return None
+        try:
+            with open(bak, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data.get("secrets"), dict):
+            data["secrets"] = {}
+        tmp = f"{path}.restore.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except OSError:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+            raise
+        return data
+
     def _read_store(self) -> dict:
         path = _secrets_path(self.root_dir)
         if not os.path.isfile(path):
@@ -146,15 +192,36 @@ class SecretStore:
                 data["secrets"] = {}
             return data
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"密钥库读取失败（按空处理）：{e}")
-            return {"version": 1, "secrets": {}}
+            # P1-1（A-11）：解析失败 = 文件损坏（非瞬时占用）。**不再静默返空库**——
+            # 旧实现会把整个密钥库当「空」，下次 set/clear 读改写即把全部密钥写没了。
+            # 先尝试从 .bak（最后一份好版本）恢复；恢复不了才 fail-loud。
+            restored = self._restore_corrupt(path)
+            if restored is not None:
+                logger.warning(
+                    "密钥库 %s 解析失败（文件损坏：%s），已从 .bak 恢复", os.path.basename(path), e)
+                return restored
+            logger.error(
+                "密钥库 %s 解析失败（文件损坏：%s）且无可用 .bak，fail-loud 阻止基于空库写回",
+                os.path.basename(path), e)
+            raise ValueError(f"密钥库文件损坏且无可用备份：{path}（{e}）")
 
     def _write_store(self, data: dict) -> None:
         path = _secrets_path(self.root_dir)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
+        # P1-1（A-11）：发布前快照「当前可解析好版本」到 .bak（损坏时可恢复）
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    json.load(f)
+                shutil.copy2(path, self._bak_path(self.root_dir))
+            except (OSError, ValueError):
+                pass  # 活文件已损坏 → 不把它当好版本盖到 .bak
+        # P1-1（A-11）：临时名**每次唯一**（旧实现固定 `.tmp`，并发写者互相截断）
+        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.{os.urandom(3).hex()}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
         try:
             os.chmod(path, 0o600)
@@ -195,7 +262,12 @@ class SecretStore:
             val = (os.getenv(env_name) or "").strip()
             if val:
                 return val
-        data = self._read_store()
+        with _STORE_LOCK:
+            try:
+                data = self._read_store()
+            except (ValueError, OSError):
+                # 只读路径优雅降级（不写回）；损坏已在 _read_store 记 error + fail-loud
+                return ""
         entry = (data.get("secrets") or {}).get(namespace) or {}
         token = entry.get("api_key")
         if token:
@@ -211,27 +283,40 @@ class SecretStore:
         token = self._encrypt(plain)
         if not token:
             return False
-        data = self._read_store()
-        data.setdefault("secrets", {}).setdefault(namespace, {})["api_key"] = token
-        try:
-            self._write_store(data)
-            return True
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"密钥落盘失败：{e}")
-            return False
+        with _STORE_LOCK:
+            try:
+                data = self._read_store()
+            except (ValueError, OSError) as e:
+                # P1-1（A-11）：密钥库损坏且无 .bak → **绝不基于空库写回**（那会清空其它
+                # 命名空间的所有密钥）。中止本次写入并告警。
+                logger.error("密钥库不可读，中止 set_api_key（保护既有密钥）：%s", e)
+                return False
+            data.setdefault("secrets", {}).setdefault(namespace, {})["api_key"] = token
+            try:
+                self._write_store(data)
+                return True
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"密钥落盘失败：{e}")
+                return False
 
     def clear_api_key(self, namespace: str) -> bool:
-        data = self._read_store()
-        entry = (data.get("secrets") or {}).get(namespace)
-        if not entry:
-            return True
-        entry.pop("api_key", None)
-        try:
-            self._write_store(data)
-            return True
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"密钥清除失败：{e}")
-            return False
+        with _STORE_LOCK:
+            try:
+                data = self._read_store()
+            except (ValueError, OSError) as e:
+                # P1-1（A-11）：同上，损坏且无备份时不基于空库写回
+                logger.error("密钥库不可读，中止 clear_api_key（保护既有密钥）：%s", e)
+                return False
+            entry = (data.get("secrets") or {}).get(namespace)
+            if not entry:
+                return True
+            entry.pop("api_key", None)
+            try:
+                self._write_store(data)
+                return True
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"密钥清除失败：{e}")
+                return False
 
     # ---------- 非密钥字段的环境变量覆盖 ----------
 

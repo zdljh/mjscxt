@@ -111,13 +111,78 @@ def paths(key: str) -> dict:
     }
 
 
-def _read_json(path: str, default):
+def _last_good_bak(path: str) -> str:
+    """数据文件「上一份可解析好版本」备份路径：``path + '.bak'``。
+
+    P1-2（A-12）：``_write_json`` 每次发布前先快照当前**可解析**的活文件到 ``.bak``，
+    使 ``.bak`` 恒为「最后一次正常落盘的内容」。活文件损坏时可从它恢复。
+    """
+    return path + ".bak"
+
+
+def _snapshot_bak(path: str) -> None:
+    """发布前快照：若活文件当前可解析，复制到 ``.bak``（保留最后一次好版本）。
+
+    只对「可解析」的活文件做快照 —— 若活文件已损坏，绝不把它当好版本盖到 ``.bak``
+    上（否则连唯一可恢复的来源都丢）。
+    """
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            json.load(f)
+    except (OSError, ValueError):
+        return  # 活文件已不可解析 → 不覆盖既有 .bak
+    try:
+        shutil.copy2(path, _last_good_bak(path))
+    except OSError:
+        pass
+
+
+def _try_restore_bak(path: str):
+    """活文件损坏时，尝试从 ``.bak``（最后一份好版本）恢复并返回其内容。
+
+    恢复成功会把 ``.bak`` 内容写回活文件（原子替换），返回解析后的 dict；
+    ``.bak`` 不存在/也不可解析时返回 ``None``（调用方据此 fail-loud）。
+    """
+    bak = _last_good_bak(path)
+    if not os.path.isfile(bak):
+        return None
+    try:
+        with open(bak, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    # 把 .bak 内容原子写回活文件，恢复数据
+    tmp = f"{path}.restore.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        _atomic_replace(tmp, path)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    return data
+
+
+def _read_json(path: str, default, strict: bool = False):
     """读 JSON：对 Windows 的**瞬时共享冲突**做退避重试。
 
     ⚠️ 与 `_atomic_replace` 配对：Windows 上 `os.replace` 换目录项的那一瞬间，
     另一个线程 `open()` 同一路径会抛 `PermissionError`。旧实现把 OSError 一律
     当「读失败」→ 返回默认值（空索引）→ 用户看到「所有项目突然消失」，刷新又回来。
     这不是文件坏了，是暂时拿不到；退避重试后仍失败才降到默认值。
+
+    P1-2（A-12）``strict=True``（仅关键数据文件，如项目索引）：解析失败时
+    **不再静默返默认值**（那会被下游「读改写」当成空索引写回 → 清空全部项目）。
+    改为：先尝试从 ``.bak``（最后一份好版本）恢复；恢复不了才**抛错 fail-loud**，
+    由调用方决定上抛或降级 —— 绝不把损坏态读成空再写回。
     """
     for i in range(6):
         try:
@@ -125,7 +190,24 @@ def _read_json(path: str, default):
                 return json.load(f)
         except PermissionError:
             time.sleep(0.02 * (i + 1))
-        except (OSError, ValueError):
+        except ValueError:
+            # JSON 解析失败 = 文件真损坏（非瞬时占用）
+            if strict:
+                restored = _try_restore_bak(path)
+                if restored is not None:
+                    logger.warning(
+                        "读取 %s 解析失败（文件损坏），已从 .bak 恢复最后一份好版本",
+                        os.path.basename(path))
+                    return restored
+                logger.error(
+                    "读取 %s 解析失败（文件损坏）且无可用 .bak，fail-loud，"
+                    "避免静默清空数据", os.path.basename(path))
+                raise
+            logger.warning("读取 %s 解析失败，按默认值处理", os.path.basename(path))
+            return default
+        except OSError:
+            if strict:
+                raise
             return default
     logger.warning("读取 %s 反复被占用（已重试 6 次），按未配置处理", os.path.basename(path))
     return default
@@ -179,7 +261,13 @@ def new_project_id() -> str:
 
 @_locked
 def load_index() -> dict:
-    data = _read_json(PROJECT_INDEX_PATH, None)
+    try:
+        data = _read_json(PROJECT_INDEX_PATH, None, strict=True)
+    except (ValueError, OSError) as e:
+        # P1-2（A-12）：索引损坏且无可用 .bak → fail-loud，**绝不**静默建空索引再写回
+        # （旧实现会把全部项目从注册表永久清空）。交由上层决定上抛或走 migrate_legacy 重建。
+        logger.error("项目索引不可读且无可用备份：%s", e)
+        raise
     if not isinstance(data, dict):
         data = {"version": INDEX_VERSION, "projects": [], "updated_at": now_str()}
     data.setdefault("version", INDEX_VERSION)
@@ -193,6 +281,7 @@ def load_index() -> dict:
 def save_index(index: dict) -> dict:
     index["version"] = INDEX_VERSION
     index["updated_at"] = now_str()
+    _snapshot_bak(PROJECT_INDEX_PATH)   # P1-2：发布前快照「当前可解析好版本」，损坏时可从 .bak 恢复
     _write_json(PROJECT_INDEX_PATH, index)
     return index
 
