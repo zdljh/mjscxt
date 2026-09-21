@@ -1229,15 +1229,89 @@ def dead_letter_path(project_name: str) -> str:
     return os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot", project_name, "dead_letter.json")
 
 
+# P1-11（A-13）：死信文件损坏防护 —— 「.bak 快照 + 唯一临时名 + 损坏先恢复」
+# 背景：`_read_dead_letters` 曾「解析失败 → 静默 {}」，死信记录因此丢失，
+# 该集会被无限重烧并反复重新标记。对齐 project_store / secret_store 口径：
+# 每次发布前把「当前可解析好版本」快照到 .bak，损坏时先从 .bak 恢复；
+# 恢复不了才降级为空（并 error 日志留痕，绝不静默）。
+
+
+def _dead_letter_bak(path: str) -> str:
+    """死信文件「上一份可解析好版本」备份路径：``path + '.bak'``."""
+    return path + ".bak"
+
+
+def _dead_letter_snapshot_bak(path: str) -> None:
+    """发布前快照：若活文件当前可解析，复制到 .bak（保留最后一次好版本）."""
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            json.load(f)
+    except (OSError, ValueError):
+        return  # 活文件已不可解析 → 不覆盖既有 .bak（它仍是最后一份好版本）
+    try:
+        shutil.copy2(path, _dead_letter_bak(path))
+    except OSError:
+        pass
+
+
+def _dead_letter_try_restore_bak(path: str):
+    """活文件损坏时，尝试从 .bak（最后一份好版本）恢复并返回其 dict；无备份返回 None."""
+    bak = _dead_letter_bak(path)
+    if not os.path.isfile(bak):
+        return None
+    try:
+        with open(bak, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    data.setdefault("episodes", {})
+    tmp = f"{path}.restore.{os.getpid()}.{time.time_ns()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return None
+    return data
+
+
 def _read_dead_letters(project_name: str) -> dict:
     p = dead_letter_path(project_name)
     if not _nonempty(p):
         return {}
     try:
         with open(p, "r", encoding="utf-8") as f:
-            return json.load(f) or {}
-    except Exception:  # noqa: BLE001
+            data = json.load(f) or {}
+    except Exception as e:  # noqa: BLE001
+        # P1-11（A-13）：解析失败 = 文件损坏。先尝试从 .bak 恢复，
+        # 恢复不了才降级为空（留 error 日志，绝不静默吞掉）。
+        logger.error("死信文件 %s 解析失败（文件损坏：%s），尝试从 .bak 恢复", p, e)
+        restored = _dead_letter_try_restore_bak(p)
+        if restored is not None:
+            logger.warning("死信文件 %s 已从 .bak 恢复（保留既有死信记录）", p)
+            return restored
+        logger.error("死信文件 %s 损坏且无可用 .bak，按无死信处理（既有记录已丢失）", p)
         return {}
+    if not isinstance(data, dict):
+        data = {}
+    eps = data.get("episodes")
+    if eps is not None and not isinstance(eps, dict):
+        logger.warning("死信文件 %s 的 episodes 结构异常，按空结构处理", p)
+        data["episodes"] = {}
+    elif eps is None:
+        data["episodes"] = {}
+    return data
 
 
 def _is_dead_letter(config: dict, project_name: str, episode_no: int) -> dict:
@@ -1258,9 +1332,12 @@ def mark_dead_letter(project_name: str, episode_no: int, reason: str,
         "episode_no": int(episode_no), "reason": reason,
         "detail": detail or {}, "marked_at": _now(), "resolved": False,
     }
-    tmp = p + ".tmp"
+    _dead_letter_snapshot_bak(p)  # P1-11（A-13）：发布前快照最后一份好版本
+    tmp = f"{p}.{os.getpid()}.{time.time_ns()}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, p)
     logger.warning("第%s集已标记需人工介入：%s", episode_no, reason)
     return eps[str(int(episode_no))]
@@ -1275,9 +1352,12 @@ def resolve_dead_letter(project_name: str, episode_no: int, note: str = "") -> d
         return {}
     item.update({"resolved": True, "resolved_at": _now(), "resolve_note": note})
     os.makedirs(os.path.dirname(p), exist_ok=True)
-    tmp = p + ".tmp"
+    _dead_letter_snapshot_bak(p)  # P1-11（A-13）：发布前快照最后一份好版本
+    tmp = f"{p}.{os.getpid()}.{time.time_ns()}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, p)
     return item
 
