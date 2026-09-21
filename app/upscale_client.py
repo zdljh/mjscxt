@@ -600,10 +600,17 @@ class VideoUpscaler:
 
         # 3.5) 释放 ComfyUI 已缓存模型显存（8G 笔记本显存紧张，避免超分 OOM）
         if overrides.get("free_vram", True):
+            # B-01 P1-12：/free 互斥守卫 —— 本进程无其它 running GPU 任务时才发，
+            # 避免卸掉分镜/视频/关键帧等其它任务正在使用的模型（反复换入换出）。
             try:
-                r = requests.post(f"{self.base_url}/free",
-                                  json={"unload_models": True, "free_memory": True}, timeout=30)
-                step(f"已请求 ComfyUI 释放显存（HTTP {r.status_code}）", 12)
+                import gpu_task_gate
+                _self_task_id = getattr(self, "current_task_id", "") or ""
+                if gpu_task_gate.has_other_running_gpu_tasks(_self_task_id):
+                    logger.info("B-01 /free 守卫：本进程有其它 running GPU 任务，跳过 /free（避免卸他人模型）")
+                else:
+                    r = requests.post(f"{self.base_url}/free",
+                                      json={"unload_models": True, "free_memory": True}, timeout=30)
+                    step(f"已请求 ComfyUI 释放显存（HTTP {r.status_code}）", 12)
             except Exception as e:
                 logger.warning(f"释放显存请求失败（不影响继续）: {e}")
 
