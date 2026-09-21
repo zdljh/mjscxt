@@ -3634,6 +3634,9 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
         main_char_img = _collect_reference_images(character_refs[:1], [])
         app.logger.info(f"视频参考图解析结果: {ref_imgs}；主角锚点: {main_char_img}")
 
+        # B-18 P1-7：构建角色索引，供 _shot_segment 逐镜匹配参考图（与分镜链路口径对齐）
+        char_idx = _build_asset_index(character_refs, project_name, "character")
+
         # 分镜图映射（步骤5产物）→ 作为 H3 的 <Picture 1> 构图基准
         # 修复：改用合并式映射（目录扫描 + manifest + 前端传入）。
         # 原实现只认前端传入的 storyboards，前端漏传某镜时该镜会静默退化为
@@ -3694,8 +3697,20 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                     shot, character_refs, scene_refs,
                     storyboard_ref={"name": f"shot_{sid}"})
             elif sb_local:
-                # 分镜图（构图/场景基准）+ 主角外观锚点，共 2 张（H3 参考图上限）
-                refs = [sb_local] + main_char_img
+                # B-18 P1-7：参考图按 characters_in_shot 逐镜匹配，不再全段共用 main_char_img
+                # H3 参考图上限 2 张：[分镜图, 本镜主角锚点]
+                _matched_chars = _match_shot_chars(shot, char_idx)
+                _shot_char_img = None
+                for _mc in (_matched_chars or []):
+                    _p = (char_idx.get(_mc) or {}).get("image")
+                    if _p:
+                        _shot_char_img = _p
+                        break
+                if _shot_char_img:
+                    refs = [sb_local, _shot_char_img]
+                else:
+                    # 兜底：逐镜匹配失败时回退到全局主角锚点（保持原行为）
+                    refs = [sb_local] + main_char_img
                 prompt = comfyui_client._build_h3_prompt(
                     shot, character_refs, scene_refs,
                     storyboard_ref={"name": f"shot_{sid}"})
