@@ -312,6 +312,11 @@ class VideoPostProcessor:
         S-01 修复：拼接前探测每个片段的音轨参数（codec/sample_rate/channels）。
         - 全部一致 → 走 concat demuxer + -c copy（快，不重编码）
         - 不一致（或部分有音轨/部分无）→ 走 concat filter 重编码（统一采样率/声道/编码器）
+
+        返回值契约（M3/A-23）：成功返回 output_path；**任何失败/异常/空输入一律返回 ""**
+        （不抛异常，保持既有调用方语义）。⚠️ 所有调用点必须对返回值判空（`if not ret` /
+        `_nonempty(path)`）；已核实全库仅 pipeline.py:876（concat 后 `_nonempty(tmp)`）与
+        本类 :596（`if not self.concat_videos(...)`）两处，均判空。外部新增调用务必照此判空。
         """
         if not video_paths:
             logger.warning("合并视频失败：输入片段为空")

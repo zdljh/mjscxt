@@ -17,9 +17,14 @@ profiles/*.env
 profiles/local.env
 
 # ===================== 运行产物（体积大，不入库） =====================
-# output/ 下全部为生成产物（图/视频/质检/超分），总计数百 MB
+# output/ 下全部为生成产物（图/视频/质检/超分）与运行时数据（项目索引/死信/密钥库），总计数百 MB
 output/
-!output/projects/index.json
+# A-24（F-09）：此处**不能**再用 `!output/projects/index.json` 把索引拉回版本控制——
+# git 规则「父目录被整体忽略后，子文件无法再用 ! 否定重新包含」，该否定行实测恒失效
+# （git check-ignore 命中 output/ 第 21 行）。index.json 是运行时数据（项目目录指针表），
+# 配合 project_store 的 `.bak` 快照（P1-12/A-12）可恢复，缺失时应用按默认索引重建，
+# 故明确不入库。若日后确需入库，须改「选择性忽略」：逐目录忽略 output/assets/ 等 +
+# `output/projects/*`（带 /* 而非 /）配 `!output/projects/index.json`，切勿整体 output/。
 temp/
 
 # 小说原始文本与解析产物（含版权内容，不入库）
