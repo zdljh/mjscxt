@@ -10,6 +10,7 @@ import time
 import random
 import shutil
 import threading
+import copy
 import uuid
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, abort, redirect, send_from_directory
@@ -1508,6 +1509,7 @@ def api_keyframes_generate():
                 client=comfyui_client,  # S-04：注入全局 ComfyUIClient 实例（复用连接/共享状态）
                 qc_stop_cb=_qc_retry_hopeless,  # G1：尾帧连续两次缺陷相同 → 止损
                 recall_cb=_keyframe_recall_cb(project),  # T03a：尾帧质检重试召回历史教训
+                project_name=project,  # A-16：尾帧达标落盘时写旁路 .meta.json 用
             )
             ok = int(report.get("succeeded") or 0)
             with lock:
@@ -2715,7 +2717,10 @@ def api_generate_assets():
 @app.route('/api/generation/status/<task_id>', methods=['GET'])
 def api_generation_status(task_id):
     with lock:
-        state = generation_state.get(task_id, {})
+        # P2-14（A-21）：锁内深拷贝快照再出锁。旧实现在锁外 jsonify 会读到
+        # 「progress 已 100 但 results 只有 3 条」这类半更新快照（与写端点
+        # 在锁内 .append/.update 竞态）。深拷贝把一致性窗口收敛到持锁段内。
+        state = copy.deepcopy(generation_state.get(task_id, {}))
     return jsonify(state)
 
 
@@ -5443,6 +5448,8 @@ def _qc_prune_attempts(scratch_dir: str, keep: int = 4) -> None:
             info[(prefix, ext, num)] = os.path.join(scratch_dir, fn)
         removed = 0
         for (prefix, ext), nums in groups.items():
+            nums = sorted(nums)   # P2-2（A-15）：listdir 无序，必须按尝试号排序，
+                                  # 否则 `nums[-keep:]` 保留的是「最早遍历到」而非「最新尝试号」
             keep_set = set(nums[-keep:]) if len(nums) > keep else set(nums)
             for num in nums:
                 if num in keep_set:
@@ -5856,25 +5863,37 @@ def _keyframe_qc_verifier(project_name: str, script: dict = None):
         verdict = qc_client.check_image(path, desc, cfg, style=(shot.get("style") or ""),
                                         ref_images=(_qc_ref_images(shot, *_kf_idx) if _kf_idx else None))
         gate = _qc_gate(verdict)
-        # 尾帧质检不达标 → 沉淀 kind="keyframe" 教训，供下次重试 recall_cb 改写提示词。
-        # 提示词键用 preflight 自愈**之前**的确定性串（build_end_frame_prompt），与
-        # keyframe.generate_keyframes 里的 orig_prompt 同键，保证 phash 稳定。
-        if not gate.get("accept"):
-            try:
+        accepted = bool(gate.get("accept"))
+        try:
+            # A-17（P2-6）：尾帧质检结论**达标 / 不达标都落盘**一条 keyframe 质检记录 ——
+            # 旧实现只在 `if not accepted` 里写记录，达标时无痕，用户无从确认「这集尾帧
+            # 到底查没查」。这里两种结果都产生一条记录（record 内自带 ok/passed/accepted
+            # 区分口径）；只有**不达标**才进一步沉淀教训（lesson 供下次重试改写提示词）。
+            rec = _qc_record_verdict(
+                project_name, "keyframe",
+                f"shot_{item.get('seq') or item.get('shot_id')}", "尾帧质检",
+                1, None, path, verdict,
+                extra={"qc_outcome": "pass" if accepted else "fail"},
+                style=(shot.get("style") or ""))
+            if not accepted:
+                # 尾帧质检不达标 → 沉淀 kind="keyframe" 教训，供下次重试 recall_cb 改写提示词。
+                # 提示词键用 preflight 自愈**之前**的确定性串（build_end_frame_prompt），与
+                # keyframe.generate_keyframes 里的 orig_prompt 同键，保证 phash 稳定。
                 orig_prompt = keyframe.build_end_frame_prompt(
                     shot, chained=bool(item.get("chained")))
-                rec = _qc_record_verdict(
-                    project_name, "keyframe",
-                    f"shot_{item.get('seq') or item.get('shot_id')}", "尾帧质检",
-                    1, None, path, verdict, style=(shot.get("style") or ""))
                 _record_qc_lesson(project_name, "keyframe", orig_prompt, rec)
-            except Exception as e:  # noqa: BLE001 - 沉淀失败绝不影响质检结论
-                app.logger.warning(f"尾帧教训沉淀失败（忽略）：{e}")
-        # P1-18：返回 3 元组（ok, reason, unavailable）——verdict.ok=False 表示质检
-        # 「不可判定」（接口 5xx / ffmpeg 缺失等，与内容无关），由 keyframe 侧据此
-        # **不重试**并标记 qc_unavailable（口径与「不达标」分开）。
-        return (bool(gate.get("accept")), gate.get("reason") or "",
-                not bool(verdict.get("ok")))
+        except Exception as e:  # noqa: BLE001 - 落盘/沉淀失败绝不影响质检结论
+            app.logger.warning(f"尾帧质检记录/教训沉淀失败（忽略）：{e}")
+        # P1-18：返回 4 元组（ok, reason, unavailable, critical_issues）——
+        #  · verdict.ok=False 表示质检「不可判定」（接口 5xx / ffmpeg 缺失等，与内容无关），
+        #    由 keyframe 侧据此 **不重试**并标记 qc_unavailable（口径与「不达标」分开）；
+        #  · critical_issues（A-18）：本镜判定为致命的缺陷清单（gate 独立复核命中的关键
+        #    缺陷 ∪ 上游显式 critical_issues），keyframe 侧写入 r["qc"] 供 G1 止损
+        #    （_qc_retry_hopeless）比对「连续 N 次缺陷相同」。旧 3 元组下 keyframe 侧
+        #    r["qc"]["critical_issues"] 恒空 → 止损永不判无望（纯换 seed 瞎撞）。
+        return (accepted, gate.get("reason") or "",
+                not bool(verdict.get("ok")),
+                list(gate.get("critical_issues") or []))
 
     return _verify, min(2, int(cfg.get("max_retries") or 0))
 

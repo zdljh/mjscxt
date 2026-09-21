@@ -313,15 +313,25 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
                        recall_cb: Optional[Callable[[str, dict, dict], str]] = None,
                        qc_stop_cb: Optional[Callable[[list], Tuple[bool, str]]] = None,
                        client=None,
+                       project_name: str = None,
                        ) -> dict:
     """批量生成尾帧（串行；单镜失败不影响其它镜）
+
+    project_name：项目名（A-16 用于尾帧 meta 落盘）；可为 None（旧调用方不传则 meta 记 None，
+        不影响任何生成逻辑）。
 
     S-04：client 参数透传给 generate_end_frame（默认 None 时退回新建实例，向后兼容）。
     app.py 注入全局 comfyui_client 实例以复用连接与共享队列/熔断状态。
 
     chain_mode：跨镜链式（上一镜尾帧 = 下一镜首帧），见模块顶部说明。
-    verify_cb(path, shot, item) -> (ok, reason)：可选的尾帧质检回调（由 app.py 注入
-        QC 实现）。返回 False 时会换 seed 重画，最多 max_verify_retries 次；
+    verify_cb(path, shot, item) -> (ok, reason[, unavailable[, critical_issues]])：
+        可选的尾帧质检回调（由 app.py 注入 QC 实现）。2/3/4 元组均可（本函数向下取位）：
+          · 2 元组 (ok, reason)；
+          · 3 元组 (ok, reason, unavailable)：unavailable=True 表示「不可判定」（P1-18）；
+          · 4 元组 (ok, reason, unavailable, critical_issues)（A-18）：第 4 位是本镜判为
+            致命的缺陷清单，写入 r["qc"]["critical_issues"]，供 G1 止损（qc_stop_cb）比对
+            「连续 N 次缺陷相同」——旧 3 元组下该字段恒空 → 止损永不判无望。
+        返回 False 时会换 seed 重画，最多 max_verify_retries 次；
         仍不通过则本镜判失败（链式会让后续镜自动回退到自己的分镜图，不会连环污染）。
         ⚠️ G18（P1）统一口径：质检回调**抛异常**时按 **fail-closed**（阻断）处理——
         本镜尾帧不交付（r["ok"]=False，r["qc"]["qc_skipped_due_to_error"]=True），清掉
@@ -377,6 +387,53 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
                 shutil.copy2(src, dst)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"首帧镜像落盘失败（忽略）：{e}")
+
+    def _write_kf_meta(end_p: str, qc: dict, seed, project_name: str, sid, seq) -> None:
+        """A-16（P2-5）：尾帧质检达标落盘后，在正式产物旁写 `<shot_NN_end>.meta.json`。
+
+        与分镜/资产链路 `_write_artifact_meta`（app.py）同口径的**纯旁路**元数据：
+        记录 seed / 尾帧质检结论 qc / kind="keyframe" / shot_id / 工作流内容指纹（SHA256），
+        让「这张尾帧当初用哪版工作流 + 哪个 seed + 过没过质检」可追溯。
+        ⚠️ 绝不阻断生产：任何异常静默降级（只留 debug 日志），meta 缺失不影响尾帧交付。
+        本模块是叶子模块（不能 import app，避免循环依赖），故此处自持实现；工作流指纹
+        取尾帧出图用的 Qwen Edit 工作流（storyboard_gen，见 generate_end_frame）。
+        """
+        try:
+            import hashlib
+            import json
+            import datetime
+            meta = {
+                "artifact": os.path.basename(end_p),
+                "kind": "keyframe",
+                "project": project_name,
+                "shot_id": sid,
+                "seq": seq,
+                "seed": seed,
+                "qc": qc,
+                "workflow": None,
+                "workflow_sha256": None,
+                "written_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            try:
+                import config as _cfg
+                tpl = _cfg.WORKFLOW_TEMPLATE.get("storyboard_gen")
+                if tpl:
+                    wf_path = os.path.join(_cfg.COMFYUI_WORKFLOWS_DIR, tpl)
+                    if os.path.isfile(wf_path):
+                        h = hashlib.sha256()
+                        with open(wf_path, "rb") as _f:
+                            for _chunk in iter(lambda: _f.read(65536), b""):
+                                h.update(_chunk)
+                        meta["workflow"] = tpl
+                        meta["workflow_sha256"] = h.hexdigest()
+            except Exception:  # noqa: BLE001  工作流指纹算不出不影响 meta 主体
+                pass
+            out = os.path.splitext(end_p)[0] + ".meta.json"
+            with open(out, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+        except Exception as e:  # noqa: BLE001  旁路兜底：meta 写失败绝不阻断尾帧交付
+            logger.debug("A-16 尾帧元数据旁路写失败（不影响交付）：%s: %s",
+                        type(e).__name__, e)
 
     for n, item in enumerate(todo, start=1):
         sid, seq = item["shot_id"], item["seq"]
@@ -482,18 +539,29 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
                 except Exception:  # noqa: BLE001
                     pass
                 break
-            # verify_cb 允许返回 2 元组 (ok, reason) 或 3 元组 (ok, reason, unavailable)。
+            # verify_cb 允许返回 2 元组 (ok, reason)、3 元组 (ok, reason, unavailable)、
+            # 或 4 元组 (ok, reason, unavailable, critical_issues)。
             # unavailable=True 表示「质检不可判定」（接口 5xx / ffmpeg 缺失等**与内容无关**
             # 的失败）——与「不达标」分开：不重试（重试只会再失败），标记 qc_unavailable，
             # 本镜尾帧不交付（P1-18，口径与分镜/逐镜/资产的 `not verdict.ok → break` 一致）。
-            if isinstance(_vres, (tuple, list)) and len(_vres) >= 3:
+            # critical_issues（第 4 位，A-18）：本镜命中/被判为致命的具体缺陷清单，供 G1
+            # 止损（qc_stop_cb → qc_client.qc_retry_hopeless）比对「连续 N 次缺陷相同」。
+            #   旧实现只回传 3 位，keyframe 侧 r["qc"]["critical_issues"] 恒为空 → 止损恒
+            #   判「无缺陷特征」而永不判无望（_qc_retry_hopeless 返回 (False,'')）——纯
+            #   换 seed 瞎撞。这里补齐第 4 位并写入 r["qc"]，止损才真正生效。
+            _v_critic: list = []
+            if isinstance(_vres, (tuple, list)) and len(_vres) >= 4:
+                v_ok, v_reason, v_unavailable = bool(_vres[0]), _vres[1], bool(_vres[2])
+                _v_critic = list(_vres[3] or [])
+            elif isinstance(_vres, (tuple, list)) and len(_vres) >= 3:
                 v_ok, v_reason, v_unavailable = bool(_vres[0]), _vres[1], bool(_vres[2])
             elif isinstance(_vres, (tuple, list)) and len(_vres) == 2:
                 v_ok, v_reason, v_unavailable = bool(_vres[0]), _vres[1], False
             else:
                 v_ok, v_reason, v_unavailable = bool(_vres), "", False
             r["qc"] = {"ok": bool(v_ok), "reason": v_reason or "",
-                       "attempt": attempt + 1}
+                       "attempt": attempt + 1,
+                       "critical_issues": _v_critic}
             if v_unavailable:
                 # P1-18：质检不可判定 → 不重试、标记 qc_unavailable、本镜尾帧不交付
                 r["qc"]["qc_unavailable"] = True
@@ -521,6 +589,9 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
                 except Exception as e:  # noqa: BLE001
                     r.update({"ok": False, "error": f"尾帧移入正式目录失败：{e}"})
                     break
+                # A-16（P2-5）：尾帧达标落盘后写旁路 .meta.json（seed/qc/kind/shot_id/工作流指纹），
+                # 纯旁路（内部已吞异常），绝不阻断交付。放在 move 成功之后、break 之前。
+                _write_kf_meta(end_p, r.get("qc"), _seed, project_name, sid, seq)
                 break
             # G1 止损铺开：尾帧连续 N 次缺陷一字不差 → 提前停止本镜尾帧重画（尾帧在
             # 链式模式下是下一镜首帧，最贵的一处），换 seed 只是换骰子

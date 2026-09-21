@@ -729,11 +729,6 @@ def save_config(config_path: str, patch: dict, keep_key_if_blank: bool = True) -
                 cfg[k] = float(v)
             except Exception:  # noqa: BLE001
                 continue
-        elif k == "api_backoff":
-            try:
-                cfg[k] = float(v)
-            except Exception:  # noqa: BLE001
-                continue
         else:
             cfg[k] = str(v or "")
     cfg = load_config_dict(cfg)
@@ -2010,49 +2005,90 @@ def image_objective(image_path: str, cfg: dict = None) -> dict:
     return base
 
 
+# A-19（P2-8）：视频客观层缺陷的**结构化判定码** + 致命性由「检测逻辑」决定，
+# **不再靠中文字文案包含**。旧实现在 check_video 里写
+#   obj_fatal = [s for s in obj_issues if ("无音轨" in s or "时长" in s
+#                                           or "帧率" in s or "未通过校验" in s)]
+# 一旦上游把文案「无音轨」改成「音轨缺失」、把「时长」措辞微调，致命集合立刻
+# 变空 → objective_fatal=[] → blocked=False（**静默降级**，无音轨视频放行进成品）。
+# 这里给每条客观缺陷带稳定的 ``code`` + ``fatal`` 布尔：``fatal`` 在「检测出该缺陷」
+# 时由逻辑直接置位，与文案措辞彻底解耦。文案（msg）可随意改，code/fatal 不变，
+# 从而保证「改文案后 objective_fatal 集合不变」。
+#
+# 四类致命码（与旧子串筛选 4 类一一对应，口径不变）：
+#   · no_audio          ← 旧 "无音轨"
+#   · duration_drift    ← 旧 "时长"
+#   · frames_unverified ← 旧 "未通过校验"（全帧 / 部分帧都算）
+#   · fps_abnormal      ← 旧 "帧率"
+_VIDEO_OBJ_FATAL_CODES = ("no_audio", "duration_drift",
+                          "frames_unverified", "fps_abnormal")
+
+
 def _video_objective_issues(video_path: str, expected_duration: float,
                            cfg: dict, fr: dict) -> list:
     """视频质检确定性闸门（G9/O1）：不依赖模型的硬指标检测。
 
-    返回 issues 列表，``check_video`` 会据此把 fatal 项塞进 critical_issues：
+    A-19：返回**结构化**项列表，每项为 ``{"code", "fatal", "msg"}``：
+      · ``code``  稳定判定码（见 ``_VIDEO_OBJ_FATAL_CODES``）；
+      · ``fatal`` 该缺陷是否致命（由检测逻辑直接决定，与文案无关）；
+      · ``msg``   人类可读文案（可自由改措辞，不影响致命性）。
+    ``check_video`` 据此把 ``fatal=True`` 项的 msg 塞进 critical_issues / objective_fatal。
+
+    检测项（口径与旧实现一致，仅判定依据从「中文字串包含」换成「结构化 fatal 字段」）：
       1) 时长偏差：``|fr.duration - expected| / expected > video_max_drift`` → fatal；
          expected_duration 为空 / 0 → 跳过该项（调用方没传就不断言）。
       2) 音轨：``_has_audio_stream(video_path) == False`` → fatal。
-      3) 抽帧时间戳 verified：``frame_meta[i].verified == False`` → 计入 issues。
-      4) fps 异常（< 8 或 > 60）→ 计入 issues。
+      3) 抽帧时间戳 verified：``frame_meta[i].verified == False`` → fatal（全帧/部分帧）。
+      4) fps 异常（< 8 或 > 60）→ fatal。
     """
-    issues: list = []
+    items: list = []
     meta = fr.get("meta") or {}
     fr_duration = float(meta.get("duration") or fr.get("duration") or 0.0)
     fps = float(meta.get("fps") or 0.0)
+
+    def _add(code: str, msg: str, fatal: bool = True) -> None:
+        items.append({"code": code, "fatal": bool(fatal), "msg": msg})
 
     # 1) 时长偏差
     if expected_duration and expected_duration > 0 and fr_duration > 0:
         drift_th = float(cfg.get("video_max_drift", 0.30))
         drift = abs(fr_duration - float(expected_duration)) / float(expected_duration)
         if drift > drift_th:
-            issues.append(
-                f"视频实测时长 {fr_duration:.2f}s 与期望 {float(expected_duration):.2f}s "
-                f"偏差 {drift*100:.0f}% 超阈值 {drift_th*100:.0f}%（H3 可能截断/补白）")
+            _add("duration_drift",
+                 f"视频实测时长 {fr_duration:.2f}s 与期望 {float(expected_duration):.2f}s "
+                 f"偏差 {drift*100:.0f}% 超阈值 {drift_th*100:.0f}%（H3 可能截断/补白）")
 
     # 2) 音轨探测
     if not _has_audio_stream(video_path):
-        issues.append("视频无音轨（H3 输出无声 / 未合轨），需检查 ComfyUI 音轨")
+        _add("no_audio", "视频无音轨（H3 输出无声 / 未合轨），需检查 ComfyUI 音轨")
 
-    # 3) frame_meta.verified=False 计入 issues
+    # 3) frame_meta.verified=False 计入 fatal
     unverified = sum(1 for fm in (fr.get("frame_meta") or [])
                      if fm and not fm.get("verified"))
     total_frames = len(fr.get("frame_meta") or [])
     if total_frames and unverified == total_frames:
-        issues.append(f"全部 {total_frames} 帧时间戳均未通过校验（抽帧可能失败/丢帧）")
+        _add("frames_unverified",
+             f"全部 {total_frames} 帧时间戳均未通过校验（抽帧可能失败/丢帧）")
     elif unverified:
-        issues.append(f"{unverified}/{total_frames} 帧时间戳未通过校验（可能存在丢帧）")
+        _add("frames_unverified",
+             f"{unverified}/{total_frames} 帧时间戳未通过校验（可能存在丢帧）")
 
     # 4) fps 异常
     if fps and (fps < 8.0 or fps > 60.0):
-        issues.append(f"视频帧率 {fps:.1f} fps 异常（正常 24-30 fps）")
+        _add("fps_abnormal", f"视频帧率 {fps:.1f} fps 异常（正常 24-30 fps）")
 
-    return issues
+    return items
+
+
+def _video_obj_texts(items: list) -> list:
+    """结构化客观缺陷项 → 人类可读文案列表（供 ``issues`` / meta 落盘）。"""
+    return [str(it.get("msg") or "") for it in (items or []) if it.get("msg")]
+
+
+def _video_obj_fatal(items: list) -> list:
+    """结构化客观缺陷项 → **致命**项的文案列表（A-19：读 ``fatal`` 字段，非中文字串包含）。"""
+    return [str(it.get("msg") or "") for it in (items or [])
+            if it.get("fatal") and it.get("msg")]
 
 
 def check_video(video_path: str, shot_desc: str = "", cfg: dict = None,
@@ -2096,9 +2132,12 @@ def check_video(video_path: str, shot_desc: str = "", cfg: dict = None,
         prompt = prompt + STYLE_CHECK_NOTE.replace("{style}", style_norm)
     # G9/O1 确定性闸门（视频客观层，零模型依赖）：命中致命缺陷（无音轨/时长超差/全帧未校验/fps异常）
     # → blocked=True、passed=False，AI 层仍跑但不短路，避免误杀。
-    obj_issues = _video_objective_issues(video_path, expected_duration, cfg, fr)
-    obj_fatal = [s for s in obj_issues
-                 if ("无音轨" in s or "时长" in s or "帧率" in s or "未通过校验" in s)]
+    # A-19：``_video_objective_issues`` 现返回结构化项 {code, fatal, msg}，致命性由
+    # ``fatal`` 字段（检测逻辑直接置位）决定，**不再靠中文字文案包含** —— 上游改措辞
+    # （如「无音轨」→「音轨缺失」）不再让 objective_fatal 静默变空、漏掉致命缺陷。
+    obj_items = _video_objective_issues(video_path, expected_duration, cfg, fr)
+    obj_issues = _video_obj_texts(obj_items)      # 全部客观缺陷文案（并入 issues / 落盘）
+    obj_fatal = _video_obj_fatal(obj_items)       # 仅致命项文案（读 fatal 字段，非中文字串）
     (fr.get("meta") or {}).update({"objective_issues": obj_issues,
                                   "objective_fatal": obj_fatal})
     try:
