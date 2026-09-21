@@ -73,6 +73,7 @@ import prompt_qc
 import qc_client
 import style_kit
 import task_store
+import gpu_task_gate
 import video_watermark
 import watermark_cleanup
 import upscale_client
@@ -964,6 +965,7 @@ def api_status():
             ) if os.path.exists(SCENES_DIR) else 0,
         },
         "task_queue": task_queue.status(),
+        "gpu_gate": gpu_task_gate.status(),
         "interrupted_tasks": _interrupted,
     })
 
@@ -1595,7 +1597,11 @@ def api_keyframes_generate():
             if store:
                 store.fail(task_id, str(e))
 
-    th = threading.Thread(target=_kf_worker, daemon=True)
+    # B-01 P1-12：GPU 并发闸门（不接管 task_db 生命周期，worker 内部已写好）
+    def _kf_worker_gated():
+        with gpu_task_gate.run_gpu_task(task_id, "关键帧生成"):
+            _kf_worker()
+    th = threading.Thread(target=_kf_worker_gated, daemon=True)
     th.start()
     return jsonify({"success": True, "task_id": task_id, "status": "started",
                     "total": len([p for p in plan if p["need_gen"]]),
@@ -3440,10 +3446,13 @@ def api_generate_storyboards():
             },
         }
 
-    thread = threading.Thread(target=_storyboard_worker,
-                              args=(task_id, project_name, shots, char_idx, item_idx, scene_idx,
-                                    data.get('episode_no'), _project_style(project_name),
-                                    bool(data.get('overwrite'))))
+    # B-01 P1-12：GPU 并发闸门
+    def _storyboard_worker_gated():
+        with gpu_task_gate.run_gpu_task(task_id, "分镜图生成"):
+            _storyboard_worker(task_id, project_name, shots, char_idx, item_idx,
+                               scene_idx, data.get('episode_no'),
+                               _project_style(project_name), bool(data.get('overwrite')))
+    thread = threading.Thread(target=_storyboard_worker_gated, daemon=True)
     thread.daemon = True
     thread.start()
     return jsonify({"task_id": task_id, "status": "started", "total": len(shots),
@@ -3570,15 +3579,17 @@ def api_generate_videos():
     # 抽取 worker 时这里被截断了：既没启动线程也没有 return，
     # 导致 POST /api/videos/generate 抛 "did not return a valid response" (500)。
     # 现在把「启动后台线程 + 返回 task_id」补回路由本身（worker 只负责干活）。
-    thread = threading.Thread(
-        target=_video_generate_worker,
-        args=(task_id, project_name, shots, character_refs, scene_refs,
-              storyboards, use_storyboard, mode, timeout_per_segment, episode_tag,
-              data.get('episode_no')),
-        kwargs={"chain_mode": chain_mode,
-                "style": (data.get('style') or _project_style(project_name)),
-                "overwrite": bool(data.get('overwrite'))},
-    )
+    # B-01 P1-12：GPU 并发闸门
+    def _video_generate_worker_gated():
+        with gpu_task_gate.run_gpu_task(task_id, f"视频生成({mode})"):
+            _video_generate_worker(
+                task_id, project_name, shots, character_refs, scene_refs,
+                storyboards, use_storyboard, mode, timeout_per_segment,
+                episode_tag, data.get('episode_no'),
+                chain_mode=chain_mode,
+                style=(data.get('style') or _project_style(project_name)),
+                overwrite=bool(data.get('overwrite')))
+    thread = threading.Thread(target=_video_generate_worker_gated, daemon=True)
     thread.daemon = True
     thread.start()
 
@@ -4713,9 +4724,11 @@ def api_upscale_video():
             "input_path": video_path, "input_probe": before,
             "scale": scale, "engine": engine, "params": params, "created_at": time.time(),
         }
-    threading.Thread(target=_upscale_worker,
-                     args=(task_id, video_path, project_name, params),
-                     daemon=True).start()
+    # B-01 P1-12：GPU 并发闸门
+    def _upscale_worker_gated():
+        with gpu_task_gate.run_gpu_task(task_id, f"超分({engine} {scale}x)"):
+            _upscale_worker(task_id, video_path, project_name, params)
+    threading.Thread(target=_upscale_worker_gated, daemon=True).start()
     return jsonify({"success": True, "task_id": task_id, "input_path": video_path,
                     "input_probe": before, "scale": scale, "engine": engine,
                     "params": params})

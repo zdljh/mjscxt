@@ -602,14 +602,25 @@ class QwenTTSClient:
 
     # ---------- 低层 ----------
 
-    def _unload_model(self) -> None:
+    def _unload_model(self, self_task_id: str = "") -> None:
         """请求 ComfyUI 卸载已缓存的 TTS 模型（释放 GPU 显存）
 
         G-03：synthesize_batch 中途失败（_wait 超时/执行错误）时，
         前面已加载的模型未卸载（只有最后一句节点设了 unload_model_after_generate）。
         批量 TTS 是高频链路，长期 autopilot 下显存累积泄漏 → 后续任务 OOM。
         用 /free 接口（与 upscale_client 同口径）主动卸载。失败只告警不抛。
+
+        B-01 P1-12：/free 互斥守卫——本进程有其它 running GPU 任务时**跳过** /free，
+        避免卸掉分镜/视频/关键帧等其它任务正在使用的模型（反复换入换出）。
         """
+        # B-01 P1-12：/free 互斥守卫
+        try:
+            import gpu_task_gate
+            if gpu_task_gate.has_other_running_gpu_tasks(self_task_id):
+                logger.info("B-01 /free 守卫：本进程有其它 running GPU 任务，跳过 /free（避免卸他人模型）")
+                return
+        except Exception:  # noqa: BLE001  守卫失败不阻断卸载主流程
+            pass
         try:
             req = urllib.request.Request(
                 f"{self.comfyui_url}/free",
