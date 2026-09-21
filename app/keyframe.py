@@ -469,7 +469,7 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
                         pass
                 break
             try:
-                v_ok, v_reason = verify_cb(scratch_end, shot, item)
+                _vres = verify_cb(scratch_end, shot, item)
             except Exception as e:  # noqa: BLE001
                 # G18（P1）：与图片/视频质检统一口径 —— 质检回调异常 **fail-closed**（阻断），
                 # 不再 fail-open（按通过处理）。尾帧在链式模式下会成为下一镜首帧，一张"没被
@@ -488,8 +488,32 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
                 except Exception:  # noqa: BLE001
                     pass
                 break
+            # verify_cb 允许返回 2 元组 (ok, reason) 或 3 元组 (ok, reason, unavailable)。
+            # unavailable=True 表示「质检不可判定」（接口 5xx / ffmpeg 缺失等**与内容无关**
+            # 的失败）——与「不达标」分开：不重试（重试只会再失败），标记 qc_unavailable，
+            # 本镜尾帧不交付（P1-18，口径与分镜/逐镜/资产的 `not verdict.ok → break` 一致）。
+            if isinstance(_vres, (tuple, list)) and len(_vres) >= 3:
+                v_ok, v_reason, v_unavailable = bool(_vres[0]), _vres[1], bool(_vres[2])
+            elif isinstance(_vres, (tuple, list)) and len(_vres) == 2:
+                v_ok, v_reason, v_unavailable = bool(_vres[0]), _vres[1], False
+            else:
+                v_ok, v_reason, v_unavailable = bool(_vres), "", False
             r["qc"] = {"ok": bool(v_ok), "reason": v_reason or "",
                        "attempt": attempt + 1}
+            if v_unavailable:
+                # P1-18：质检不可判定 → 不重试、标记 qc_unavailable、本镜尾帧不交付
+                r["qc"]["qc_unavailable"] = True
+                r.update({"ok": False, "qc_unavailable": True,
+                          "error": f"尾帧质检不可判定（qc_unavailable，与内容无关，不重试）："
+                                   f"{v_reason or ''}"})
+                logger.warning(
+                    f"尾帧 shot {sid} 质检不可判定（qc_unavailable，不重试）：{v_reason or ''}")
+                try:
+                    if os.path.isfile(scratch_end):
+                        os.remove(scratch_end)
+                except Exception:  # noqa: BLE001
+                    pass
+                break
             # G1 止损：记录本镜质检特征（critical_issues/issues），连续相同则提前停
             if not v_ok:
                 _qc_rec = {"attempt": attempt + 1, "reason": v_reason or "",

@@ -3138,7 +3138,19 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                         })
                         item.pop("error", None)
                         if not qc_on:
-                            shutil.copy2(scratch_png, dst)   # 未开启质检：按原行为直接入库
+                            # P0-1 fail-closed：qc_declared=True 但接口未就绪（qc_on=False）→ 阻断，
+                            # **不写正式目录**。旧实现此处 `copy2(scratch_png, dst)` 属 fail-open，
+                            # 会把未质检产物当成品交付并破坏「正式目录有产物 ⟺ 已过质检」不变量。
+                            # 资产链路早已 fail-closed（见资产生成处的同型分支），此处对齐口径。
+                            if qc_declared:
+                                item["error"] = ("分镜图质检阻断（质检接口未就绪）：已开启图片质检，"
+                                                 "但 base_url / api_key / model 不可用；"
+                                                 "未质检产物不写入正式目录（暂存图见质检历史）")
+                                app.logger.warning(
+                                    "[分镜质检] qc_declared=True 但 qc_on=False → fail-closed 阻断入库"
+                                    "（不写正式目录）：project=%s shot=%s", project_name, shot_id)
+                                break
+                            shutil.copy2(scratch_png, dst)   # 质检本就未开启：按原行为直接入库
                             break
                         with lock:
                             generation_state[task_id]["phase"] = f"图片质检中（镜头 {shot_id} · 第 {attempt + 1} 次）"
@@ -3639,6 +3651,16 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                                                    float(s.get("duration") or 0.0) for s in shots))
                 gate = _qc_gate(verdict)
                 passed = bool(gate.get("accept", False))
+                if not verdict.get("ok"):
+                    # P1-18：质检「不可判定」（ffmpeg 缺失 / 接口 5xx 等，与内容无关）——
+                    # 不得当作「不达标」触发换种子整片重跑（会白烧 20~44 段 H3；见报告 P1-18）。
+                    # 标记 qc_unavailable，交由 _ep_qc_stop_cb 停止重试；口径与「不达标」分开。
+                    _ep_qc_attempt["unavailable"] = True
+                    app.logger.warning(
+                        "[整集质检] 质检不可判定 → qc_unavailable（不重试）："
+                        "project=%s attempt=%d error=%s",
+                        project_name, _ep_qc_attempt["n"],
+                        (verdict.get("error") or gate.get("reason") or ""))
                 if not passed and verdict.get("ok"):
                     try:
                         rec = _qc_record_verdict(
@@ -3663,6 +3685,42 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                         project_name, _ep_qc_attempt["n"])
                 return {"passed": passed, "verdict": verdict, "gate": gate}
 
+            def _ep_qc_stop_cb(qc_results):
+                """G1 止损 + P1-18：质检「不可判定」优先于缺陷重复判定 —— 不可判定不重试。
+
+                与分镜/逐镜/资产的既有口径一致：`not verdict.get("ok")` 时 break（不重画）。
+                这里通过止损回调把该语义传达给 comfyui_client 的整片重试循环，避免在质检
+                接口/ffmpeg 不可用时换种子白烧整集。
+                """
+                if _ep_qc_attempt.get("unavailable"):
+                    return True, "质检不可判定（接口 / ffmpeg 不可用，与内容无关），不重试"
+                return _qc_retry_hopeless(qc_results)
+
+            # P0-1 fail-closed：qc_declared=True 但质检接口未就绪（qc_on=False）→ 整集
+            # **不生成、不写正式目录**，直接阻断并如实告警。旧实现在 qc_fn=None 下仍把
+            # 未质检成片 move 进正式目录（fail-open），与资产链路口径不一致。
+            if qc_declared and not qc_on:
+                app.logger.warning(
+                    "[整集质检] qc_declared=True 但 qc_on=False → fail-closed 阻断："
+                    "整集视频不生成、不写正式目录（project=%s，enabled=%s video_enabled=%s）",
+                    project_name, qc_cfg.get("enabled"), qc_cfg.get("video_enabled"))
+                with lock:
+                    generation_state[task_id]["results"].append({
+                        "success": False, "mode": "episode",
+                        "segment_count": 0,
+                        "qc_blocked": True,
+                        "qc_unavailable": True,
+                        "error": ("整集视频质检阻断（质检接口未就绪）：已开启视频质检，"
+                                  "但 base_url / api_key / model 不可用；"
+                                  "未质检产物不写入正式目录"),
+                    })
+                    generation_state[task_id].update({
+                        "status": "failed",
+                        "success_count": 0,
+                        "error": "整集视频质检阻断（质检接口未就绪）",
+                    })
+                return
+
             with lock:
                 generation_state[task_id].update({
                     "current": 0, "progress": 5,
@@ -3681,7 +3739,7 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                 qc_cfg=qc_cfg,
                 qc_style=eff_style,
                 max_retries=max_retries,
-                qc_stop_cb=_qc_retry_hopeless if qc_on else None,
+                qc_stop_cb=(_ep_qc_stop_cb if qc_on else None),
             )
             files = result.get("files") or []
             episode_failed = bool(result.get("failed"))
@@ -3711,9 +3769,11 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
             if os.path.abspath(src) != os.path.abspath(dst):
                 shutil.move(src, dst)
             qc_passed = not episode_failed
+            qc_unavailable = bool(_ep_qc_attempt.get("unavailable"))
             item = {"success": True, "mode": "episode",
                     "segment_count": len(segs),
                     "qc_passed": qc_passed,
+                    "qc_unavailable": qc_unavailable,
                     "attempts_used": attempts_used,
                     "path": dst, "url": f"{_vurl}/{ep_name}",
                     "shots": shot_meta_map,
@@ -3727,15 +3787,20 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                 generation_state[task_id]["progress"] = 100
                 generation_state[task_id]["phase"] = (
                     f"整集 {len(segs)} 段视频生成完成（QC 通过）" if qc_passed
-                    else f"整集 {len(segs)} 段视频生成（QC 未通过，保留最后生成成片供人工复核）")
-            app.logger.info(f"[episode] 产物落盘: {dst}（qc_passed={qc_passed}，attempts={attempts_used}）")
+                    else (f"整集 {len(segs)} 段视频生成（QC 不可判定，已停止重试，保留成片供人工复核）"
+                          if qc_unavailable else
+                          f"整集 {len(segs)} 段视频生成（QC 未通过，保留最后生成成片供人工复核）"))
+            app.logger.info(f"[episode] 产物落盘: {dst}（qc_passed={qc_passed}，"
+                            f"qc_unavailable={qc_unavailable}，attempts={attempts_used}）")
             with lock:
                 results = generation_state[task_id]["results"]
                 ok = sum(1 for r in results if r.get("success"))
                 generation_state[task_id].update({
                     "status": "completed" if ok and qc_passed else "failed",
                     "success_count": ok,
-                    "error": "" if qc_passed else "整片 QC 未通过（已保留最后生成成片）",
+                    "error": ("" if qc_passed else
+                              ("整片质检不可判定（qc_unavailable，已停止重试；已保留成片供人工复核）"
+                               if qc_unavailable else "整片 QC 未通过（已保留最后生成成片）")),
                 })
             return
 
@@ -3869,9 +3934,19 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                                        "url": f"{_vurl}/shot_{seq:02d}.mp4"})
                     video_item.pop("error", None)
                     if not qc_on:
+                        # P0-1 fail-closed：qc_declared=True 但接口未就绪 → 阻断，不写正式目录
+                        # （旧实现 `move(v_scratch, dst)` 属 fail-open，未质检视频直接入库）。
+                        if qc_declared:
+                            video_item["error"] = ("视频质检阻断（质检接口未就绪）：已开启视频质检，"
+                                                   "但 base_url / api_key / model 不可用；"
+                                                   "未质检产物不写入正式目录（暂存视频见质检历史）")
+                            app.logger.warning(
+                                "[视频质检] qc_declared=True 但 qc_on=False → fail-closed 阻断入库"
+                                "（不写正式目录）：project=%s shot=%s", project_name, shot_id)
+                            break
                         if os.path.exists(dst):
                             os.remove(dst)
-                        shutil.move(v_scratch, dst)   # 未开启质检：按原行为直接入库
+                        shutil.move(v_scratch, dst)   # 质检本就未开启：按原行为直接入库
                         break
                     with lock:
                         generation_state[task_id]["phase"] = \
@@ -5774,7 +5849,11 @@ def _keyframe_qc_verifier(project_name: str, script: dict = None):
                 _record_qc_lesson(project_name, "keyframe", orig_prompt, rec)
             except Exception as e:  # noqa: BLE001 - 沉淀失败绝不影响质检结论
                 app.logger.warning(f"尾帧教训沉淀失败（忽略）：{e}")
-        return bool(gate.get("accept")), gate.get("reason") or ""
+        # P1-18：返回 3 元组（ok, reason, unavailable）——verdict.ok=False 表示质检
+        # 「不可判定」（接口 5xx / ffmpeg 缺失等，与内容无关），由 keyframe 侧据此
+        # **不重试**并标记 qc_unavailable（口径与「不达标」分开）。
+        return (bool(gate.get("accept")), gate.get("reason") or "",
+                not bool(verdict.get("ok")))
 
     return _verify, min(2, int(cfg.get("max_retries") or 0))
 

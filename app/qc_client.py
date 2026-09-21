@@ -159,13 +159,28 @@ AUDIO_CRITICAL_KEYWORDS = (
 #: 否定语境词（出现在关键词前若干字符内，说明该条是在**说明不存在缺陷**）
 _NEGATION_WORDS = ("无", "没有", "未", "不存在", "非", "不", "缺少", "未发现", "已消除")
 
+#: 子句分隔符：否定词作用域以**子句**为界（跨子句的「不/无」不影响本子句的缺陷描述）。
+#: P0-3：『五官不自然，面部畸变』里的「不」属于前一个子句（修饰「自然」），
+#: 不得据此判定后一子句的「畸变」被否定——旧实现只看关键词前固定 window 个字符，
+#: 会跨子句误吞整条真缺陷（崩坏图 blocked=False 直接入库）。
+_CLAUSE_SEP_RE = re.compile(r"[，。；！？,.;!?、\n\r]+")
+
 
 def _has_negative_context(text: str, idx: int, window: int = 6) -> bool:
     """判断 ``text[idx]`` 处的关键词是否处于否定语境（如「无明显畸变」）
 
-    只看关键词**前面** window 个字符，避免把「风格不符」这类真缺陷误当否定。
+    作用域规则（P0-3 修复）：
+      · 只在关键词**所在子句内**、且位于关键词**前面** window 个字符里找否定词；
+      · 跨子句的否定词不生效（『五官不自然，面部畸变』→「畸变」不被前句的「不」否定）；
+      · 子句起点即关键词时前缀为空 → 视为非否定（正常命中）；
+      · 同子句内的「无/没有/未」仍正常生效（『无明显畸变』不误杀）。
     """
-    ctx = str(text or "")[max(0, idx - window):idx]
+    text = str(text or "")
+    # 关键词所在子句的起点 = 该位置之前最后一个子句分隔符之后
+    clause_start = 0
+    for _m in _CLAUSE_SEP_RE.finditer(text, 0, idx):
+        clause_start = _m.end()
+    ctx = text[max(clause_start, idx - window):idx]
     return any(neg in ctx for neg in _NEGATION_WORDS)
 
 
@@ -335,7 +350,14 @@ def _finalize_verdict(verdict: dict, pass_score: int) -> dict:
         verdict["passed"] = False
         if isinstance(score, int):
             verdict["score"] = min(score, 50)
-    elif isinstance(score, int) and score < int(pass_score):
+    elif not isinstance(score, int):
+        # P1-17：模型未回可用分数（score=None / 非整数）→ 无法判定是否达线 → **fail-closed**。
+        # 旧实现把 score is None 当作「满足分数」（`score is None or score >= pass_score`），
+        # 于是 {"score":null,"pass":true} 被判 accept、漏回分数即放行。此处不再放行。
+        verdict["passed"] = False
+        verdict["score_missing"] = True
+        logger.warning("质检结论缺少可用分数（score=%r）→ fail-closed 判为不通过", score)
+    elif score < int(pass_score):
         verdict["passed"] = False
     verdict["critical_issues"] = hits
     verdict["blocked"] = blocked
@@ -1451,7 +1473,8 @@ def parse_verdict(content: str, pass_score: int) -> dict:
         else:
             sm = None
     return _finalize_verdict({
-        "passed": bool(passed) and (score is None or score >= pass_score),
+        # P1-17：分数缺失（score is None）不再视为「满足分数」——要求分数存在且达线。
+        "passed": bool(passed) and (score is not None and score >= pass_score),
         "score": score,
         "reason": str(obj.get("reason") or obj.get("comment") or "")[:500],
         "issues": [str(x)[:200] for x in issues][:6],
