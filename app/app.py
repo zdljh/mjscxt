@@ -246,8 +246,13 @@ def _project_or_400(raw, field_name="project_name"):
     漏传项目名会静默写进共享 `project` 命名空间。判空必须看**原始入参**
     （与 api_qc_project_summary 的 G3 修复同一口径）。
 
+    A-01（F-01）加固：额外**拒绝路径穿越**入参（含 `..` / 绝对路径 / 路径分隔符）。
+    仅靠 `safe_key` 收敛会把 `../../evil` 静默变成合法键 `evil`——虽不越界写盘，
+    但把越界尝试当成正常项目混淆视听；此处直接 400，作到「越界即拒 + 不落盘」。
+    收敛后仍做一次 abspath 前缀校验作为双保险（防御未来 safe_key 规则变更）。
+
     返回 (project, error)：error 为 None 表示合法（project 已 safe_key）；
-    否则 error 是「缺少 {field}」的 (jsonify, 400) 响应，直接 return 它。
+    否则 error 是 (jsonify, 400) 响应，直接 return 它。
     用法::
 
         project, err = _project_or_400((data.get('project_name') or '').strip())
@@ -256,7 +261,21 @@ def _project_or_400(raw, field_name="project_name"):
     """
     if not (isinstance(raw, str) and raw.strip()):
         return "", (jsonify({"success": False, "error": f"缺少 {field_name}"}), 400)
-    return _safe_project(raw.strip()), None
+    raw_s = raw.strip()
+    if (raw_s.startswith(("/", "\\")) or ".." in raw_s
+            or "/" in raw_s or "\\" in raw_s
+            or os.path.isabs(raw_s) or os.path.splitdrive(raw_s)[0]):
+        app.logger.warning("[A-01] 拒绝越界项目名（疑似路径穿越）：%r", raw_s)
+        return "", (jsonify({
+            "success": False,
+            "error": f"非法的 {field_name}（禁止路径分隔符 / 绝对路径 / 「..」）"}), 400)
+    project = _safe_project(raw_s)
+    _root = os.path.abspath(PROJECT_OUTPUT_DIR)
+    _pdir = os.path.abspath(os.path.join(PROJECT_OUTPUT_DIR, project))
+    if not _pdir.startswith(_root + os.sep):
+        app.logger.warning("[A-01] 项目名收敛后仍越界，拒绝：%r → %r", raw_s, project)
+        return "", (jsonify({"success": False, "error": f"非法的 {field_name}"}), 400)
+    return project, None
 
 
 def _serve_safe(base_dir: str, filename: str, **send_kw):
@@ -9457,9 +9476,10 @@ def api_autonomous_deliverables(project_name):
 @_autopilot_guard
 def api_list_characters():
     """列出项目所有角色"""
-    project_name = request.args.get('project')
-    if not project_name:
-        return jsonify({"success": False, "error": "缺少 project 参数"}), 400
+    # A-01（F-01）：统一走 _project_or_400（越界/缺失 → 400，不写盘）
+    project_name, err = _project_or_400(request.args.get('project'), field_name="project")
+    if err is not None:
+        return err
 
     project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
     mgr = CharacterManager(project_name, project_dir)
@@ -9478,8 +9498,12 @@ def api_add_character():
     description = data.get('description', '')
     outfit = data.get('outfit', '')
 
-    if not project_name or not name:
+    if not name:
         return jsonify({"success": False, "error": "缺少必要参数"}), 400
+    # A-01（F-01）：统一走 _project_or_400（越界/缺失 → 400，不写盘）
+    project_name, err = _project_or_400(project_name, field_name="project")
+    if err is not None:
+        return err
 
     project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
     mgr = CharacterManager(project_name, project_dir)
@@ -9493,7 +9517,10 @@ def api_add_character():
 def api_update_character(char_id):
     """更新角色信息"""
     data = request.get_json(silent=True) or {}
-    project_name = data.get('project')
+    # A-01（F-01）：统一走 _project_or_400（越界/缺失 → 400，不写盘）
+    project_name, err = _project_or_400(data.get('project'), field_name="project")
+    if err is not None:
+        return err
 
     project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
     mgr = CharacterManager(project_name, project_dir)
@@ -9516,8 +9543,12 @@ def api_upload_character_reference(char_id):
     view_type = request.form.get('view_type', 'front')
     file = request.files.get('image')
 
-    if not file or not project_name:
+    if not file:
         return jsonify({"success": False, "error": "缺少必要参数"}), 400
+    # A-01（F-01）：统一走 _project_or_400（越界/缺失 → 400，不写盘）
+    project_name, err = _project_or_400(project_name, field_name="project")
+    if err is not None:
+        return err
 
     project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
     mgr = CharacterManager(project_name, project_dir)
@@ -9538,7 +9569,10 @@ def api_upload_character_reference(char_id):
 @_autopilot_guard
 def api_get_character_prompt(char_id):
     """获取角色生成提示词"""
-    project_name = request.args.get('project')
+    # A-01（F-01）：统一走 _project_or_400（越界/缺失 → 400，不写盘）
+    project_name, err = _project_or_400(request.args.get('project'), field_name="project")
+    if err is not None:
+        return err
     project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
     mgr = CharacterManager(project_name, project_dir)
     prompt = mgr.get_character_prompt(char_id)
@@ -9557,8 +9591,12 @@ def api_generate_nine_grid():
     character_ids = data.get('character_ids', [])
     emotion = data.get('emotion', 'neutral')
 
-    if not project_name or not scene_description:
+    if not scene_description:
         return jsonify({"success": False, "error": "缺少必要参数"}), 400
+    # A-01（F-01）：统一走 _project_or_400（越界/缺失 → 400，不写盘）
+    project_name, err = _project_or_400(project_name, field_name="project")
+    if err is not None:
+        return err
 
     project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
     sb = NineGridStoryboard(project_name, project_dir)
@@ -9594,10 +9632,12 @@ def api_select_nine_grid_shot(grid_id):
     project_name = data.get('project')
     selected_index = data.get('selected_index')
 
-    if not project_name:
-        return jsonify({"success": False, "error": "缺少 project"}), 400
     if selected_index is None:
         return jsonify({"success": False, "error": "缺少 selected_index"}), 400
+    # A-01（F-01）：统一走 _project_or_400（越界/缺失 → 400，不写盘）
+    project_name, err = _project_or_400(project_name, field_name="project")
+    if err is not None:
+        return err
 
     project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
     sb = NineGridStoryboard(project_name, project_dir)
@@ -9672,6 +9712,10 @@ def api_export_project(project_name):
     """导出项目为多种格式"""
     data = request.get_json(silent=True) or {}
     formats = data.get('formats', ['fcpml', 'edl', 'json'])
+    # A-01（F-01）：项目名统一走 _project_or_400（越界/缺失 → 400，不写盘）
+    project_name, err = _project_or_400(project_name, field_name="project_name")
+    if err is not None:
+        return err
     # 前端不传 timeline（工作台 ExportTab 就只传 formats）。此处必须自己从剧本
     # 构建时间轴，否则会导出成空的占位文件。
     timeline = _timeline_for_export(project_name, data.get('episode_no'),
@@ -9706,6 +9750,10 @@ def api_export_project(project_name):
 @_autopilot_guard
 def api_get_export_file(project_name, format):
     """获取导出的文件"""
+    # A-01（F-01）：项目名统一走 _project_or_400（越界/缺失 → 400，不写盘）
+    project_name, err = _project_or_400(project_name, field_name="project_name")
+    if err is not None:
+        return err
     export_dir = os.path.join(PROJECT_OUTPUT_DIR, "exports", project_name)
     if format == 'fcpml':
         filename = f"{project_name}_fcpml.xml"
@@ -9731,8 +9779,10 @@ def api_export_current():
     project_name = data.get('project_name', '')
     formats = data.get('formats', ['fcpml', 'edl', 'json'])
 
-    if not project_name:
-        return jsonify({"success": False, "error": "未指定项目"}), 400
+    # A-01（F-01）：项目名统一走 _project_or_400（越界/缺失 → 400，不写盘）
+    project_name, err = _project_or_400(project_name, field_name="project_name")
+    if err is not None:
+        return err
 
     export_dir = os.path.join(PROJECT_OUTPUT_DIR, "exports", project_name)
     os.makedirs(export_dir, exist_ok=True)
@@ -9760,9 +9810,10 @@ def api_export_current():
 @_autopilot_guard
 def api_get_relation_graph():
     """获取角色关系图谱数据"""
-    project_name = request.args.get('project')
-    if not project_name:
-        return jsonify({"success": False, "error": "缺少 project 参数"}), 400
+    # A-01（F-01）：统一走 _project_or_400（越界/缺失 → 400，不写盘）
+    project_name, err = _project_or_400(request.args.get('project'), field_name="project")
+    if err is not None:
+        return err
 
     project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
     rmgr = RelationManager(project_name, project_dir)
@@ -9774,9 +9825,10 @@ def api_get_relation_graph():
 @_autopilot_guard
 def api_list_relations():
     """列出项目所有角色关系"""
-    project_name = request.args.get('project')
-    if not project_name:
-        return jsonify({"success": False, "error": "缺少 project 参数"}), 400
+    # A-01（F-01）：统一走 _project_or_400（越界/缺失 → 400，不写盘）
+    project_name, err = _project_or_400(request.args.get('project'), field_name="project")
+    if err is not None:
+        return err
 
     project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
     rmgr = RelationManager(project_name, project_dir)
@@ -9796,8 +9848,12 @@ def api_add_relation():
     strength = data.get('strength', 'medium')
     note = data.get('note', '')
 
-    if not project_name or not char_a or not char_b:
+    if not char_a or not char_b:
         return jsonify({"success": False, "error": "缺少必要参数"}), 400
+    # A-01（F-01）：统一走 _project_or_400（越界/缺失 → 400，不写盘）
+    project_name, err = _project_or_400(project_name, field_name="project")
+    if err is not None:
+        return err
 
     project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
     rmgr = RelationManager(project_name, project_dir)
@@ -9812,8 +9868,10 @@ def api_update_relation(rel_id):
     data = request.get_json(silent=True) or {}
     project_name = data.get('project')
 
-    if not project_name:
-        return jsonify({"success": False, "error": "缺少 project 参数"}), 400
+    # A-01（F-01）：统一走 _project_or_400（越界/缺失 → 400，不写盘）
+    project_name, err = _project_or_400(project_name, field_name="project")
+    if err is not None:
+        return err
 
     project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
     rmgr = RelationManager(project_name, project_dir)
@@ -9831,8 +9889,10 @@ def api_delete_relation(rel_id):
     data = request.get_json(silent=True) or {}
     project_name = data.get('project')
 
-    if not project_name:
-        return jsonify({"success": False, "error": "缺少 project 参数"}), 400
+    # A-01（F-01）：统一走 _project_or_400（越界/缺失 → 400，不写盘）
+    project_name, err = _project_or_400(project_name, field_name="project")
+    if err is not None:
+        return err
 
     project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
     rmgr = RelationManager(project_name, project_dir)
@@ -9851,8 +9911,10 @@ def api_sync_relations():
     project_name = data.get('project')
     characters = data.get('characters', {})
 
-    if not project_name:
-        return jsonify({"success": False, "error": "缺少 project 参数"}), 400
+    # A-01（F-01）：统一走 _project_or_400（越界/缺失 → 400，不写盘）
+    project_name, err = _project_or_400(project_name, field_name="project")
+    if err is not None:
+        return err
 
     project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
     rmgr = RelationManager(project_name, project_dir)
@@ -9864,9 +9926,10 @@ def api_sync_relations():
 @_autopilot_guard
 def api_check_relation_conflicts():
     """检测关系冲突"""
-    project_name = request.args.get('project')
-    if not project_name:
-        return jsonify({"success": False, "error": "缺少 project 参数"}), 400
+    # A-01（F-01）：统一走 _project_or_400（越界/缺失 → 400，不写盘）
+    project_name, err = _project_or_400(request.args.get('project'), field_name="project")
+    if err is not None:
+        return err
 
     project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
     rmgr = RelationManager(project_name, project_dir)
@@ -9883,8 +9946,10 @@ def api_export_relation_svg():
     width = int(request.args.get('width', 800))
     height = int(request.args.get('height', 600))
 
-    if not project_name:
-        return jsonify({"success": False, "error": "缺少 project 参数"}), 400
+    # A-01（F-01）：统一走 _project_or_400（越界/缺失 → 400，不写盘）
+    project_name, err = _project_or_400(project_name, field_name="project")
+    if err is not None:
+        return err
 
     project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
     rmgr = RelationManager(project_name, project_dir)

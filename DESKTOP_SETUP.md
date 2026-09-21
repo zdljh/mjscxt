@@ -99,3 +99,28 @@ pip install pyinstaller --upgrade
 ├── build.bat                # 打包脚本
 └── 漫剧工坊.spec            # PyInstaller配置
 ```
+
+## 上线 / 交付运维清单（凭据与配置安全）
+
+> 以下为**上线前必须逐条确认**的运维事项，属「F-03」上线闸门的一部分。
+
+1. **备份文件不得携带明文 key。**
+   禁止把 `qc_config.json` / `ai_config.json` / `llm_config.json` 等含 API key 的配置文件
+   以 `*.backup_*`、`*.bak`、`*.old`、`*.orig` 等任何形式复制到仓库或交付包内
+   （即便已被 `.gitignore` 忽略，**机器上的副本仍是活凭据**）。
+2. **`qc_config.backup_20260914.json` 内的 API key 视为已泄露，需轮换。**
+   该文件（位于仓库根目录）曾残留真实明文 key（形如 `sk-vZx9…`）。文件已删除，
+   但 key 需在服务商控制台**立即作废并轮换**，并更新当前生效的 `qc_config.json`。
+3. **密钥只以密文存在。** 生产配置请通过 `/api/qc/config` 写入（内部经 `secrets.enc`
+   加密），不要把明文 key 直接落进仓库文件。
+4. **交付/打包前自查：**
+
+   ```bash
+   # 列出所有可能含 key 的备份/副本文件（应为空）
+   git ls-files | grep -Ei "backup|\.bak|\.old|\.orig" ; \
+   ls -a | grep -Ei "backup|\.bak|\.old|\.orig"
+   # 全仓库扫描明文 key 指纹（应无命中）
+   grep -rEn "sk-[A-Za-z0-9]{8,}" --include=*.json --include=*.env . 2>/dev/null
+   ```
+5. **监听面保持回环。** 本应用默认 `APP_HOST=127.0.0.1` 且**无鉴权**；`serve.py` 已对
+   非回环 host 做启动拦截（见 F-02 护栏）。网络部署前必须先补鉴权。
