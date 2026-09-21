@@ -271,6 +271,20 @@ def _project_or_400(raw, field_name="project_name"):
     if not (isinstance(raw, str) and raw.strip()):
         return "", (jsonify({"success": False, "error": f"缺少 {field_name}"}), 400)
     raw_s = raw.strip()
+    # task#7 口径补齐：含控制字符（如 NUL `\x00`）/ **无任何有效字符**（如 `.` `。` `…`）的
+    # 入参 → 与空串**同口径 400**。否则 `safe_key` 会把它们坍缩成共享默认键 `project`
+    # （非越界、无写盘，但会静默写进共享命名空间，且与空串口径不一致、掩盖调用方 bug）。
+    # ⚠️ 判「有效字符」只看 isalnum/_/-（与 safe_key 的存活字符一致）：中文名（isalnum 为真，
+    #    如「剑影孤城」「蛊真人精校版」）照常通过，绝不被误杀。
+    if any(ord(_c) < 32 or ord(_c) == 0x7f for _c in raw_s):
+        app.logger.warning("[task#7] 拒绝含控制字符的项目名：%r", raw_s)
+        return "", (jsonify({"success": False,
+                             "error": f"非法的 {field_name}（含控制字符）"}), 400)
+    _cleaned = re.sub(r"[《》〈〉【】「」『』]", "", raw_s)
+    if not any((_c.isalnum() or _c in "_-") for _c in _cleaned):
+        app.logger.warning("[task#7] 拒绝无有效字符的项目名（与空串同口径）：%r", raw_s)
+        return "", (jsonify({"success": False,
+                             "error": f"非法的 {field_name}（无有效字符）"}), 400)
     if (raw_s.startswith(("/", "\\")) or ".." in raw_s
             or "/" in raw_s or "\\" in raw_s
             or os.path.isabs(raw_s) or os.path.splitdrive(raw_s)[0]):
