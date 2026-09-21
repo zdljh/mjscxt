@@ -1143,8 +1143,12 @@ class ComfyUIClient:
         views = MULTIVIEW_CONFIG["character_views"] if asset_type == "character" \
             else MULTIVIEW_CONFIG["item_scene_views"]
 
-        # 基础图必须进入 ComfyUI output 目录（分镜生成.json 用的是 LoadImageOutput）
+        # B-13 P1-14：基础图上传到 ComfyUI output 根目录时文件名带项目名，避免跨项目同名资产互相覆盖
         base_name = f"comic_drama_{asset_type}_{asset_name}_base.png"
+        if filename_prefix:
+            # filename_prefix 形如 comic_drama/<项目>_asset_<类型>_epNN，
+            # 基础图沿用同一前缀子目录，与多视角产物同目录，不产生孤儿
+            base_name = f"{filename_prefix.rstrip('/')}/{base_name}"
         try:
             output_name = self.upload_image(base_image_path, base_name, image_type="output")
         except Exception as e:

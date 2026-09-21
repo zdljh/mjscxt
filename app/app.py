@@ -247,6 +247,30 @@ def _safe_project(name: str) -> str:
     return project_store.safe_key(name)
 
 
+# B-14 P2-4：资产「取图判据」统一入口。就绪判据（_collect_asset_refs 的
+# _first_nonempty_image）与取图判据（_build_asset_index 的 _first_existing）
+# 此前各自维护一套「判有图」逻辑，口径漂移（一个只认 4 个扩展名、另一个只
+# 认 front/base 固定名）。统一为：扩展名白名单 + 取第一张非空图片。
+_ASSET_IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def _first_existing_asset_image(directory: str) -> str:
+    """在目录内取第一张非空图片（扩展名白名单），无则返回 ''。
+
+    统一判据：
+      1) 扩展名白名单 (".png", ".jpg", ".jpeg", ".webp")；
+      2) 按文件名字典序取第一张非空（size>0）图片；
+      3) 找不到任何图片 → 返回 ''，调用方自行决策（报错/跳过）。
+    """
+    if not directory or not os.path.isdir(directory):
+        return ""
+    for fn in sorted(os.listdir(directory)):
+        p = os.path.join(directory, fn)
+        if fn.lower().endswith(_ASSET_IMG_EXTS) and os.path.isfile(p) and os.path.getsize(p) > 0:
+            return p
+    return ""
+
+
 def _project_or_400(raw, field_name="project_name"):
     """G4 收口：路由层「项目入参 → 安全键 / 400」的统一入口。
 
@@ -1301,15 +1325,11 @@ def _collect_asset_refs(project: str) -> tuple:
       1) 扩展名白名单 (".png", ".jpg", ".jpeg", ".webp")，不再只认 4 个固定文件名；
       2) 同一目录下取第一张非空图片（兼容 ComfyUI 直接输出 base_123.png 等非标名）；
       3) 找不到任何图片 → 返回空 dict，**绝不静默 take-first**（由调用方决策报错/跳过）。
+    B-14 P2-4：判据统一抽到模块级 _first_existing_asset_image，取图判据
+    _build_asset_index 复用同一函数，消除两处「判有图」口径漂移。
     """
-    _ASSET_IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp")
-
     def _first_nonempty_image(d: str) -> str:
-        for fn in sorted(os.listdir(d)):
-            p = os.path.join(d, fn)
-            if fn.lower().endswith(_ASSET_IMG_EXTS) and os.path.isfile(p) and os.path.getsize(p) > 0:
-                return p
-        return ""
+        return _first_existing_asset_image(d)
 
     def _scan(root: str) -> list:
         out = []
@@ -2429,10 +2449,11 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                     
                         _set_phase(f"{name} 基础图质检不达标，修改提示词后重新生成（第 {attempt}/{max_retries} 次）",
                                    "regenerating")
-                    # G8：基础图落项目专属子目录（comic_drama/<项目>_asset_<类型>），
-                    # 不再堆在 ComfyUI output 默认目录——删项目/滚动清理才够得着。
+                    # B-13 P1-14：output 基础图改按「项目/类型/资产名」分桶，不再按
+                    # 「项目×类型」混放——同名资产跨项目、同项目不同集共享 asset_type 时
+                    # 互串基础图。资产目录仍按 name 分桶（asset_dir 不变），仅 output 桶细化。
                     base_files = gen_base(prompt_zh, seed=seed, style=gen_style, size=gen_size,
-                                          filename_prefix=f"comic_drama/{project_name}_asset_{asset_type}")
+                                          filename_prefix=f"comic_drama/{project_name}/{asset_type}/{name}")
                     if not base_files:
                         base_attempts.append({"attempt": attempt + 1, "seed": seed, "stage": "基础图生成",
                                               "ok": False, "error": "基础图生成失败"})
@@ -2530,7 +2551,7 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                     views = comfyui_client.generate_multiview(
                         base_image_path=base_dst, asset_type=asset_type, asset_name=name,
                         base_prompt_zh=prompt_zh, seed=vseed, style=gen_style, size=gen_size,
-                        filename_prefix=f"comic_drama/{project_name}_asset_{asset_type}") or {}
+                        filename_prefix=f"comic_drama/{project_name}/{asset_type}/{name}") or {}
                     view_src = {}
                     for vk, vp in views.items():
                         sp = os.path.join(scratch_dir, f"{vk}_try{attempt + 1}.png")
@@ -2693,7 +2714,9 @@ def api_generate_assets():
     if not assets:
         return jsonify({"error": "没有资产数据"}), 400
 
-    task_id = f"{asset_type}_{project_name}_{int(time.time())}"
+    # B-12 P1-15：资产任务 ID 改用 uuid（G5 只改了分镜/视频/配音/混音，资产漏改），
+    # 同秒并发请求不再互撞。
+    task_id = f"{asset_type}_{project_name}_{uuid.uuid4().hex[:12]}"
     with lock:
         generation_state[task_id] = {
             "status": "running", "asset_type": asset_type,
@@ -2758,11 +2781,15 @@ def _build_asset_index(assets: list, project_name: str, kind: str) -> dict:
     for name, payload in names:
         if name in index:
             continue
-        derived = [os.path.join(project_dir, name, f) for f in _ASSET_VIEW_FILES[kind]]
+        # B-14 P2-4：取图判据统一走 _first_existing_asset_image——
+        # 不再只认 front/base 固定名，改为「扩展名白名单 + 第一张非空」。
+        # front/base 的 http URL 仍由前端 resolve_local_path 传回本地路径；
+        # 本地推导时按 (project_dir, name) 目录取第一张可用图。
+        asset_dir_for_name = os.path.join(project_dir, name)
         local = _first_existing(
             comfyui_client.resolve_local_path(payload.get("front") or ""),
             comfyui_client.resolve_local_path(payload.get("base") or ""),
-            *derived,
+            _first_existing_asset_image(asset_dir_for_name),
         )
         index[name] = {"name": name, "image": local,
                        "url": f"/api/assets/{kind}s/{project_name}/{name}/front.png"}
@@ -3311,13 +3338,16 @@ def api_generate_storyboards():
     scene_idx = _build_asset_index(data.get('scenes', []), project_name, "scene")
 
     # G5：任务 ID 用 uuid（秒级时间戳同秒双 POST 会覆盖 generation_state 且双线程并发抢同一目标路径）；
-    # 入口幂等：同项目已有 running 的分镜任务 → 复用其 task_id（reused=True），不重复开线程。
+    # 入口幂等：同项目+同集已有 running 的分镜任务 → 复用其 task_id（reused=True），不重复开线程。
     # 匹配用稳定的 step 字段（worker 运行中 phase 会变化，不能用 phase 判）。
+    # B-11 P1-8：守卫键加 episode_no —— 第 2 集请求不再被第 1 集运行中任务吞掉。
+    _ep_no = data.get('episode_no')
     with lock:
         _existing_sb = next((tid for tid, st in generation_state.items()
                              if st.get("status") == "running"
                              and st.get("project_name") == project_name
-                             and st.get("step") == "storyboard"), None)
+                             and st.get("step") == "storyboard"
+                             and st.get("episode_no") == _ep_no), None)
         if _existing_sb:
             return jsonify({"task_id": _existing_sb, "status": "started", "reused": True,
                             "total": len(shots), "overwrite": bool(data.get('overwrite')),
@@ -3328,6 +3358,7 @@ def api_generate_storyboards():
             "current": 0, "phase": "分镜图生成", "results": [],
             "qc": _qc_brief("image"),
             "project_name": project_name, "step": "storyboard",
+            "episode_no": _ep_no,
             "refs_available": {
                 "characters": {k: bool(v["image"]) for k, v in char_idx.items()},
                 "items": {k: bool(v["image"]) for k, v in item_idx.items()},
