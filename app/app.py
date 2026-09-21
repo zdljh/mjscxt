@@ -794,7 +794,6 @@ def api_project_asset_detail(pid):
                         "supported": sorted(set(kind_map.keys()))}), 400
     folder_kind, folder, asset_type = kind_map[kind]
 
-    scripts = [project_store.script_stats(sp) for sp in project_store.project_scripts(key)]
     detail_scripts = []
     for sp in project_store.project_scripts(key):
         try:
@@ -1580,7 +1579,6 @@ def api_keyframes_generate():
                 recall_cb=_keyframe_recall_cb(project),  # T03a：尾帧质检重试召回历史教训
                 project_name=project,  # A-16：尾帧达标落盘时写旁路 .meta.json 用
             )
-            ok = int(report.get("succeeded") or 0)
             with lock:
                 generation_state[task_id].update({
                     "status": "completed" if report.get("ok") else "failed",
@@ -1713,9 +1711,8 @@ def api_storyboard_canvas(project_name):
     order = meta.get("shot_order") or []
     ordered = list(shots)
     if isinstance(order, list) and order:
-        idx = {str(s.get("shot_id")): i for i, s in enumerate(shots)}
         ordered = sorted(shots, key=lambda s: (order.index(str(s.get("shot_id")))
-                                               if str(s.get("shot_id")) in order else 10 ** 6))
+                                                if str(s.get("shot_id")) in order else 10 ** 6))
     kf_dir = _ep_dir(os.path.join(KEYFRAMES_DIR, project), _cv_ep)
     cards = []
     for i, s in enumerate(ordered):
@@ -3035,10 +3032,6 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
     """
     out_dir = _ep_dir(os.path.join(STORYBOARDS_DIR, project_name), episode_no)
     os.makedirs(out_dir, exist_ok=True)
-    try:
-        _episode = int(episode_no) if str(episode_no or "").strip() else 1
-    except (TypeError, ValueError):
-        _episode = 1
     # 风格/画幅：整批分镜共用
     # G19：风格串未含画幅关键词时以默认 9:16 为底，不再静默回落模板 16:9
     _sb_style_res = style_kit.resolve(style, default_ratio=style_kit.DEFAULT_RATIO)
@@ -4004,7 +3997,6 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
 
             try:
                 seg, sb_local = _shot_segment(shot, seq, qc_cfg)   # G13：传 worker 级配置
-                shot_refs = seg["reference_images"]
                 prompt = seg["prompt"]
 
                 # ---------- 视频 AI 质检（抽帧送检，不达标自动重生成） ----------
@@ -5000,7 +4992,9 @@ def api_ai_config_clear():
     module = (data.get("module") or "").strip() or None
     if module and module not in AI_MODULES:
         return jsonify({"success": False, "error": f"unknown module：{module}"}), 400
-    cfg = ai_config.clear_module(AI_CONFIG_PATH, module=module, legacy_path=LLM_CONFIG_PATH)
+    # A-22（M5）：clear_module 有落盘副作用（清空模块配置 + 同步清密钥库），必须保留调用；
+    # 返回值此前被赋给 cfg 却从未使用（响应改由下方 _ai_config_view() 重新取整份视图），故去掉赋值。
+    ai_config.clear_module(AI_CONFIG_PATH, module=module, legacy_path=LLM_CONFIG_PATH)
     # ⭐ 与「保存」对称：清空质检模块（或整体重置）时，同步清空质检自己的接口配置，
     # 避免出现「AI 设置显示未配置，质检却仍在用旧接口」的新的不一致。
     reset_note, reset_error = "", ""

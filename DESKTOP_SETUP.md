@@ -124,3 +124,30 @@ pip install pyinstaller --upgrade
    ```
 5. **监听面保持回环。** 本应用默认 `APP_HOST=127.0.0.1` 且**无鉴权**；`serve.py` 已对
    非回环 host 做启动拦截（见 F-02 护栏）。网络部署前必须先补鉴权。
+6. **凭据文件 ACL 收紧至当前用户最小授权（F-04）。**
+   主密钥 `.secret_key`、加密密钥库 `output/secrets.enc`、`.env` 三者齐泄即可破整个
+   密钥库（Fernet 主密钥泄露后 `secrets.enc` 的全部密文可被离线解出）。默认 Windows
+   新建文件常继承宽泛组权限（如 `CodexSandboxUsers`、`SYSTEM`/`Administrators` 全权），
+   须收紧到「仅当前交互用户读写、其它主体无权限」。在**管理员 PowerShell** 执行（路径
+   换成实际仓库根目录）：
+
+   ```powershell
+   # 1) 清空三个凭据文件上的继承权限，只保留当前用户
+   $here = "<仓库根目录>"
+   foreach ($f in @(".secret_key", ".env", "output\secrets.enc")) {
+       $p = Join-Path $here $f
+       if (Test-Path $p) {
+           # 去掉继承项（仅当前用户保留）
+           & icacls $p /inheritance:r | Out-Null
+           & icacls $p /grant:r "${env:USERNAME}:(R,W)" | Out-Null
+           & icacls $p /remove:g "NT AUTHORITY\SYSTEM" "BUILTIN\Administrators" "CodexSandboxUsers" 2>$null | Out-Null
+       }
+   }
+   # 2) 复检：除当前用户外不应再有 (R)/(F)/(W) 主体
+   icacls "$here\.secret_key"; icacls "$here\.env"; icacls "$here\output\secrets.enc"
+   ```
+
+   > 注意：`.env`/`.secret_key`/`secrets.enc` 已 `.gitignore`，**本机副本仍是活凭据**，
+   > 收紧 ACL 属必要但**非充分**——若曾以宽 ACL 暴露过，应视为已泄露，走第 2 条的
+   > 密钥轮换流程。`icacls /inheritance:r` 会移除继承来源，故须在**确认当前用户仍被
+   > 显式授权**后执行，避免把自己也锁在外面（执行前先 `icacls <file>` 记录原状）。
