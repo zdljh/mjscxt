@@ -48,7 +48,13 @@ CONTINUITY_DIR = os.path.join(_ROOT_DIR, "output", "continuity")
 # 判定阈值（可被环境变量覆盖）
 PASS_SCORE = int(os.getenv("MJSCXT_CONSISTENCY_PASS", "70"))   # ≥ 视为一致
 WARN_SCORE = int(os.getenv("MJSCXT_CONSISTENCY_WARN", "55"))   # ≥ 视为需关注，< 视为不一致
-PHASH_ALARM = int(os.getenv("MJSCXT_PHASH_ALARM", "40"))       # 感知哈希相似度警戒线（降级模式用）
+PHASH_ALARM = int(os.getenv("MJSCXT_PHASH_ALARM", "40"))       # 感知哈希相似度警戒线（降级模式用，仅报告展示）
+# A-20（P2-9）：降级（phash）模式**专用**判定阈值。无多模态模型时只能靠像素结构哈希，
+# 置信度低，判定口径应整体收紧：pass 线抬高（PHASH_PASS）、warn 下界取**非 0** 的合理值
+# （PHASH_WARN）。旧实现把降级模式 warn 下界写成 0（`score>=0` 恒成立）且 pass 线用
+# PHASH_ALARM(40)——一张噪声图（像素结构 score≈49）>= 40 就被判「pass」，降级模式形同虚设。
+PHASH_PASS = int(os.getenv("MJSCXT_PHASH_PASS", "80"))         # 降级模式「一致」线（≥ 才 pass）
+PHASH_WARN = int(os.getenv("MJSCXT_PHASH_WARN", "60"))         # 降级模式 warn 下界（非 0）
 
 CHARACTER_VIEW_FILES = ("front.png", "base.png", "left.png", "right.png", "back.png")
 
@@ -221,14 +227,27 @@ def check_pair_semantic(ref_path: str, target_path: str, cfg: dict = None,
 
 
 def _verdict(score: int, semantic: bool) -> str:
-    """分数 → 判定标签"""
-    threshold_pass = PASS_SCORE if semantic else PHASH_ALARM
-    threshold_warn = WARN_SCORE if semantic else 0
-    if score >= threshold_pass:
-        return "pass"
-    if score >= threshold_warn:
-        return "warn"
-    return "fail"
+    """分数 → 判定标签（A-20：降级模式带 `degraded` 前缀，且用收紧的非 0 阈值）
+
+    - 语义模式（有多模态模型）：阈值 PASS_SCORE / WARN_SCORE，标签 pass/warn/fail（不变）；
+    - 降级模式（phash，无模型）：阈值 PHASH_PASS / PHASH_WARN（**非 0** 合理值），
+      标签为 ``degraded_pass`` / ``degraded_warn`` / ``degraded_fail`` —— 显式标
+      ``degraded``，让调用方/前端一眼看出这是低置信度像素哈希判定，不是语义结论。
+    旧实现降级模式 `warn` 下界=0（`score>=0` 恒成立）且 pass 线取 PHASH_ALARM(40)，
+    噪声图 score≈49 就被判「pass」——降级形同虚设；A-20 收紧后不再误判 pass。
+    """
+    if semantic:
+        if score >= PASS_SCORE:
+            return "pass"
+        if score >= WARN_SCORE:
+            return "warn"
+        return "fail"
+    # 降级（phash）模式：非 0 阈值 + degraded 标记
+    if score >= PHASH_PASS:
+        return "degraded_pass"
+    if score >= PHASH_WARN:
+        return "degraded_warn"
+    return "degraded_fail"
 
 
 # ===================== ③ 设定比对层 =====================
@@ -344,9 +363,11 @@ def check_shots(project: str, character_refs: dict, shot_images: dict,
         "pairs_checked": len(results),
         "avg_score": round(sum(scores) / len(scores), 1) if scores else 0,
         "min_score": min(scores) if scores else 0,
-        "passed": sum(1 for r in results if r["verdict"] == "pass"),
-        "warn": sum(1 for r in results if r["verdict"] == "warn"),
-        "failed": sum(1 for r in results if r["verdict"] == "fail"),
+        "passed": sum(1 for r in results if r["verdict"] in ("pass", "degraded_pass")),
+        "warn": sum(1 for r in results if r["verdict"] in ("warn", "degraded_warn")),
+        "failed": sum(1 for r in results if r["verdict"] in ("fail", "degraded_fail")),
+        # A-20：单列降级（phash）判定计数，便于前端/体检区分「低置信度」结论
+        "degraded": sum(1 for r in results if str(r["verdict"]).startswith("degraded")),
         "results": results,
     }
 
