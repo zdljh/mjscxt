@@ -41,12 +41,51 @@ import json
 import logging
 import os
 import shutil
+import threading
 import time
 import traceback
 
 import cancellation
 
 logger = logging.getLogger(__name__)
+
+# ===================== 集级互斥（B-02 P0-5 并发/幂等） =====================
+# 问题：autopilot 托管守护线程（autopilot.py:805）与手动 run-once（app.py:9417）
+# 可能并发写同一集的同一批路径（正式目录 + scratch）。加「集级」锁
+# （键 = 项目 + 集号）保证同一集任何时刻只有一个执行体；不同集可并行。
+# 不可用全局锁（会让不同项目/不同集互相阻塞）。
+_EP_LOCKS: dict = {}
+_EP_LOCKS_GUARD = threading.Lock()
+
+
+def _acquire_episode_lock(project_name: str, episode_no: int) -> bool:
+    """尝试获取集级锁；拿不到（另一执行体正在跑）返回 False，不阻塞。"""
+    key = f"{project_name}#{int(episode_no)}"
+    with _EP_LOCKS_GUARD:
+        lk = _EP_LOCKS.get(key)
+        if lk is None:
+            lk = threading.Lock()
+            _EP_LOCKS[key] = lk
+    return lk.acquire(blocking=False)
+
+
+def _release_episode_lock(project_name: str, episode_no: int) -> None:
+    key = f"{project_name}#{int(episode_no)}"
+    with _EP_LOCKS_GUARD:
+        lk = _EP_LOCKS.get(key)
+    if lk is not None:
+        try:
+            lk.release()
+        except RuntimeError:
+            pass
+
+
+def is_episode_running(project_name: str, episode_no: int) -> bool:
+    """该集当前是否有执行体（供前端/诊断查询）"""
+    key = f"{project_name}#{int(episode_no)}"
+    with _EP_LOCKS_GUARD:
+        lk = _EP_LOCKS.get(key)
+    return bool(lk and lk.locked())
 
 # ===================== 步骤定义 =====================
 
@@ -388,9 +427,71 @@ def final_path(ctx) -> str:
     return os.path.join(A.FINAL_DIR, ctx["project_name"], f"ep{ctx['episode_no']:02d}_final.mp4")
 
 
+def _deliverable_review(ctx) -> dict:
+    """读取该集成片在 deliverables.json 里登记的 review 状态（找不到返回 {}）"""
+    A = _A()
+    idx_path = os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot",
+                            ctx["project_name"], "deliverables.json")
+    if not _nonempty(idx_path):
+        return {}
+    try:
+        with open(idx_path, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+    return (data.get("items") or {}).get(str(int(ctx["episode_no"]))) or {}
+
+
 def probe_final(ctx) -> dict:
     p = final_path(ctx)
-    return {"total": 1, "ready": 1 if _playable(p) else 0, "done": _playable(p), "file": p}
+    done = _playable(p)
+    # B-03 P0-4：成片被打回（review= rejected）时，即便磁盘上成片仍可播放，
+    # 也不能走幂等短路（原 done=done 会让 step_final 直接跳过、review 永不复位、
+    # 最终误报「状态同步异常」）。打回 = 该集需要重做 → 让 step_final 真正重跑。
+    review = _deliverable_review(ctx).get("review")
+    if done and review == "rejected":
+        done = False
+    return {"total": 1, "ready": 1 if done else 0, "done": done, "file": p,
+            "review": review}
+
+
+def _reset_deliverable_review(ctx, review: str, note: str = "") -> None:
+    """B-03 P0-4：成片重做后把 deliverables.json 里该集的 review 复位。
+
+    失败不阻断流水线（review 复位是「体验」问题，不影响成片本身）。
+    """
+    A = _A()
+    idx_path = os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot",
+                            ctx["project_name"], "deliverables.json")
+    if not _nonempty(idx_path):
+        return
+    try:
+        with open(idx_path, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+    except Exception:  # noqa: BLE001
+        logger.warning("复位 review 失败（读 deliverables.json 异常）：%s",
+                       ctx["project_name"])
+        return
+    item = (data.get("items") or {}).get(str(int(ctx["episode_no"])))
+    if not isinstance(item, dict):
+        return
+    item["review"] = review
+    item["review_note"] = note
+    item["reviewed_at"] = _now()
+    tmp = idx_path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, idx_path)
+        logger.info("第%s集 成片重做后 review 复位为 %s（项目 %s）",
+                    int(ctx["episode_no"]), review, ctx["project_name"])
+    except Exception:  # noqa: BLE001
+        logger.warning("复位 review 失败（写 deliverables.json 异常）：%s",
+                       ctx["project_name"])
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def dub_manifest_path(ctx) -> str:
@@ -406,8 +507,13 @@ def probe_tts(ctx) -> dict:
     try:
         with open(p, "r", encoding="utf-8") as f:
             mf = json.load(f) or {}
-    except Exception:  # noqa: BLE001
-        return {"total": 0, "ready": 0, "done": False, "file": p}
+    except Exception as e:  # noqa: BLE001
+        # B-08 P1-10：manifest 损坏/解析失败 → fail-loud（不再静默 done:False），
+        # 否则 TTS 步骤会误判「未就绪」而重烧整集配音。
+        logger.warning("配音 manifest 解析失败（项目 %s 第 %s 集）：%s",
+                       ctx["project_name"], int(ctx["episode_no"]), e)
+        return {"total": 0, "ready": 0, "done": False, "file": p,
+                "error": f"manifest 损坏或不可解析：{e}"}
     lines = [l for l in (mf.get("lines") or []) if isinstance(l, dict)]
     ok = [l for l in lines if l.get("ok") and _nonempty(l.get("out_path") or "")]
     return {"total": len(lines), "ready": len(ok),
@@ -685,6 +791,44 @@ def step_video(ctx) -> dict:
     return {"ok": True, "detail": detail, "artifact": recheck["dir"]}
 
 
+def _probe_concat_duration(concat_video: str, segments: list) -> float:
+    """B-07 P1-5：ffprobe 实测拼接后视频总时长（秒）。
+
+    字幕时间轴基准必须与成片实测时长一致，否则字幕整体漂移。
+    拼接后若存在则优先用 ffprobe 实测；无 ffprobe 时退化用各段实测时长累加。
+    """
+    import subprocess as _sp
+    import json as _json
+    # 1) 若已拼好成片（concat_video 非空且存在），直接 ffprobe 取实测时长
+    if concat_video and _nonempty(concat_video):
+        try:
+            r = _sp.run(["ffprobe", "-v", "error", "-show_entries",
+                         "format=duration", "-of", "json",
+                         os.path.abspath(concat_video)],
+                        capture_output=True, text=True, timeout=60)
+            if r.returncode == 0:
+                d = _json.loads(r.stdout or "{}")
+                dur = float((d.get("format") or {}).get("duration") or 0)
+                if dur > 0:
+                    return dur
+        except Exception:  # noqa: BLE001
+            pass
+    # 2) 退化：各段 ffprobe 实测时长累加（比剧本 duration 累加更可靠）
+    total = 0.0
+    for seg in segments:
+        try:
+            r = _sp.run(["ffprobe", "-v", "error", "-show_entries",
+                         "format=duration", "-of", "json",
+                         os.path.abspath(seg)],
+                        capture_output=True, text=True, timeout=60)
+            if r.returncode == 0:
+                d = _json.loads(r.stdout or "{}")
+                total += float((d.get("format") or {}).get("duration") or 0)
+        except Exception:  # noqa: BLE001
+            continue
+    return total
+
+
 def step_final(ctx) -> dict:
     """成片合成：按剧本镜头顺序拼接该集所有片段，可选叠加字幕"""
     A = _A()
@@ -738,12 +882,46 @@ def step_final(ctx) -> dict:
     try:
         from dialogue_utils import dialogue_text
         subs, cur = [], 0.0
-        for s in shots:
-            dur = float(s.get("duration") or 5)
-            text = dialogue_text(s.get("dialogue"))
-            if text:
-                subs.append({"start": cur, "end": cur + dur, "text": text})
-            cur += dur
+        # B-07 P1-5：时间轴基准用 ffprobe 实测各段时长累加（而非剧本 duration），
+        # 与成片实际时长一致，避免字幕整体漂移。
+        if mode == "episode":
+            # 整集模式：tmp 是整集视频，按各镜剧本时长占比近似分配（单条源片无法逐段 ffprobe）
+            _ep_total = _probe_concat_duration(tmp, [tmp])
+            for s in shots:
+                dur = float(s.get("duration") or 5)
+                _script_total = sum(float(x.get("duration") or 5) for x in shots) or 1.0
+                if _ep_total > 0:
+                    dur = dur / _script_total * _ep_total
+                text = dialogue_text(s.get("dialogue"))
+                if text:
+                    subs.append({"start": cur, "end": cur + dur, "text": text})
+                cur += dur
+        else:
+            # 逐镜模式：各段 ffprobe 实测时长累加
+            seg_durs = []
+            for p in files:
+                _d = 0.0
+                try:
+                    import subprocess as _sp2
+                    import json as _json2
+                    _r = _sp2.run(["ffprobe", "-v", "error", "-show_entries",
+                                   "format=duration", "-of", "json",
+                                   os.path.abspath(p)],
+                                  capture_output=True, text=True, timeout=60)
+                    if _r.returncode == 0:
+                        _d = float((_json2.loads(_r.stdout or "{}").get("format")
+                                    or {}).get("duration") or 0)
+                except Exception:  # noqa: BLE001
+                    _d = 0.0
+                seg_durs.append(_d)
+            for i, s in enumerate(shots):
+                dur = seg_durs[i] if i < len(seg_durs) else float(s.get("duration") or 5)
+                if dur <= 0:
+                    dur = float(s.get("duration") or 5)
+                text = dialogue_text(s.get("dialogue"))
+                if text:
+                    subs.append({"start": cur, "end": cur + dur, "text": text})
+                cur += dur
         if subs:
             subbed = A.video_processor.add_subtitles(tmp, subs, out)
     except Exception as e:  # noqa: BLE001  字幕失败不阻断成片
@@ -763,6 +941,11 @@ def step_final(ctx) -> dict:
             pass
     if not _nonempty(out):
         raise PipelineError("成片合成失败（目标文件为空）")
+    # B-03 P0-4：成片重做后，把 deliverables.json 里该集的 review 复位到 pending，
+    # 避免「打回 → 重跑 → 仍判 rejected → 又短路」的循环。
+    old_review = _deliverable_review(ctx).get("review")
+    if old_review == "rejected":
+        _reset_deliverable_review(ctx, "pending", "成片已重做，请重新验收")
     return {"ok": True, "artifact": out,
             "detail": {"segments": len(files), "subtitles": bool(subbed), "size": os.path.getsize(out)}}
 
@@ -1087,6 +1270,15 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
                 "error": f"该集此前已判定需人工介入（{dead.get('reason') or '未知原因'}）",
                 "note": "请先在「需人工介入」中处理或标记忽略后才会重新尝试"}
 
+    # B-02 P0-5：集级互斥。拿到锁才能继续，拿不到说明另一执行体（run-once / 托管轮转）
+    # 正在跑同一集 → 直接返回 busy，不并发写同一批路径。不同集/项目互不影响。
+    if not _acquire_episode_lock(project_name, int(episode_no)):
+        return {"ok": False, "status": "busy", "episode_no": int(episode_no),
+                "project": project_name, "deliverable": "", "steps": {},
+                "error": f"{project_name} 第{int(episode_no)}集 正在被另一个执行体生产，"
+                         f"请稍后再试（避免并发写同一批路径）",
+                "note": "同一集任何时刻只有一个执行体；不同集可并行"}
+
     result = {
         "ok": False, "status": "failed", "episode_no": int(episode_no),
         "project": project_name, "project_key": ctx["project_key"],
@@ -1155,6 +1347,7 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
         logger.error("第%s集流水线失败：%s\n%s", episode_no, result["error"], traceback.format_exc())
     finally:
         cancellation.reset(_cancel_token)
+        _release_episode_lock(project_name, int(episode_no))
 
     result["elapsed_sec"] = round(time.time() - started, 1)
     result["finished_at"] = _now()

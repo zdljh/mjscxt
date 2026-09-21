@@ -248,6 +248,54 @@ def _safe_project(name: str) -> str:
     return project_store.safe_key(name)
 
 
+# B-16 P2-11：失败路径清理中间产物。把「生成失败 / 质检阻断 / 异常」时的 scratch
+# 目录、.tmp 文件等中间产物统一删掉，避免只增不减。
+def _cleanup_scratch_dir(dir_path: str, logger=None) -> None:
+    """清空目录内容（保留目录本身），失败时只记日志不抛异常。"""
+    import logging
+    _log = logger or logging.getLogger(__name__)
+    if not dir_path or not os.path.isdir(dir_path):
+        return
+    try:
+        for fn in os.listdir(dir_path):
+            fp = os.path.join(dir_path, fn)
+            try:
+                if os.path.isdir(fp):
+                    import shutil
+                    shutil.rmtree(fp, ignore_errors=True)
+                else:
+                    os.remove(fp)
+            except OSError:
+                _log.warning("清理中间产物失败：%s", fp)
+        _log.info("已清理 scratch 目录：%s", dir_path)
+    except OSError as e:
+        _log.warning("清理 scratch 目录失败：%s", e)
+
+
+# B-14 P2-4：资产「取图判据」统一入口。就绪判据（_collect_asset_refs 的
+# _first_nonempty_image）与取图判据（_build_asset_index 的 _first_existing）
+# 此前各自维护一套「判有图」逻辑，口径漂移（一个只认 4 个扩展名、另一个只
+# 认 front/base 固定名）。统一为：扩展名白名单 + 取第一张非空图片。
+_ASSET_IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def _first_existing_asset_image(directory: str) -> str:
+    """在目录内取第一张非空图片（扩展名白名单），无则返回 ''。
+
+    统一判据：
+      1) 扩展名白名单 (".png", ".jpg", ".jpeg", ".webp")；
+      2) 按文件名字典序取第一张非空（size>0）图片；
+      3) 找不到任何图片 → 返回 ''，调用方自行决策（报错/跳过）。
+    """
+    if not directory or not os.path.isdir(directory):
+        return ""
+    for fn in sorted(os.listdir(directory)):
+        p = os.path.join(directory, fn)
+        if fn.lower().endswith(_ASSET_IMG_EXTS) and os.path.isfile(p) and os.path.getsize(p) > 0:
+            return p
+    return ""
+
+
 def _project_or_400(raw, field_name="project_name"):
     """G4 收口：路由层「项目入参 → 安全键 / 400」的统一入口。
 
@@ -1302,15 +1350,11 @@ def _collect_asset_refs(project: str) -> tuple:
       1) 扩展名白名单 (".png", ".jpg", ".jpeg", ".webp")，不再只认 4 个固定文件名；
       2) 同一目录下取第一张非空图片（兼容 ComfyUI 直接输出 base_123.png 等非标名）；
       3) 找不到任何图片 → 返回空 dict，**绝不静默 take-first**（由调用方决策报错/跳过）。
+    B-14 P2-4：判据统一抽到模块级 _first_existing_asset_image，取图判据
+    _build_asset_index 复用同一函数，消除两处「判有图」口径漂移。
     """
-    _ASSET_IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp")
-
     def _first_nonempty_image(d: str) -> str:
-        for fn in sorted(os.listdir(d)):
-            p = os.path.join(d, fn)
-            if fn.lower().endswith(_ASSET_IMG_EXTS) and os.path.isfile(p) and os.path.getsize(p) > 0:
-                return p
-        return ""
+        return _first_existing_asset_image(d)
 
     def _scan(root: str) -> list:
         out = []
@@ -2431,13 +2475,16 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                     
                         _set_phase(f"{name} 基础图质检不达标，修改提示词后重新生成（第 {attempt}/{max_retries} 次）",
                                    "regenerating")
-                    # G8：基础图落项目专属子目录（comic_drama/<项目>_asset_<类型>），
-                    # 不再堆在 ComfyUI output 默认目录——删项目/滚动清理才够得着。
+                    # B-13 P1-14：output 基础图改按「项目/类型/资产名」分桶，不再按
+                    # 「项目×类型」混放——同名资产跨项目、同项目不同集共享 asset_type 时
+                    # 互串基础图。资产目录仍按 name 分桶（asset_dir 不变），仅 output 桶细化。
                     base_files = gen_base(prompt_zh, seed=seed, style=gen_style, size=gen_size,
-                                          filename_prefix=f"comic_drama/{project_name}_asset_{asset_type}")
+                                          filename_prefix=f"comic_drama/{project_name}/{asset_type}/{name}")
                     if not base_files:
                         base_attempts.append({"attempt": attempt + 1, "seed": seed, "stage": "基础图生成",
                                               "ok": False, "error": "基础图生成失败"})
+                        # B-16 P2-11：基础图生成失败 → 清理本资产产生的 scratch 中间产物
+                        _cleanup_scratch_dir(scratch_dir, app.logger)
                         base_gate = {"accept": False, "blocked": True, "skipped": False,
                                      "label": "生成失败", "reason": "基础图生成失败", "critical_issues": []}
                         break
@@ -2532,7 +2579,7 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                     views = comfyui_client.generate_multiview(
                         base_image_path=base_dst, asset_type=asset_type, asset_name=name,
                         base_prompt_zh=prompt_zh, seed=vseed, style=gen_style, size=gen_size,
-                        filename_prefix=f"comic_drama/{project_name}_asset_{asset_type}") or {}
+                        filename_prefix=f"comic_drama/{project_name}/{asset_type}/{name}") or {}
                     view_src = {}
                     for vk, vp in views.items():
                         sp = os.path.join(scratch_dir, f"{vk}_try{attempt + 1}.png")
@@ -2695,7 +2742,9 @@ def api_generate_assets():
     if not assets:
         return jsonify({"error": "没有资产数据"}), 400
 
-    task_id = f"{asset_type}_{project_name}_{int(time.time())}"
+    # B-12 P1-15：资产任务 ID 改用 uuid（G5 只改了分镜/视频/配音/混音，资产漏改），
+    # 同秒并发请求不再互撞。
+    task_id = f"{asset_type}_{project_name}_{uuid.uuid4().hex[:12]}"
     with lock:
         generation_state[task_id] = {
             "status": "running", "asset_type": asset_type,
@@ -2763,11 +2812,15 @@ def _build_asset_index(assets: list, project_name: str, kind: str) -> dict:
     for name, payload in names:
         if name in index:
             continue
-        derived = [os.path.join(project_dir, name, f) for f in _ASSET_VIEW_FILES[kind]]
+        # B-14 P2-4：取图判据统一走 _first_existing_asset_image——
+        # 不再只认 front/base 固定名，改为「扩展名白名单 + 第一张非空」。
+        # front/base 的 http URL 仍由前端 resolve_local_path 传回本地路径；
+        # 本地推导时按 (project_dir, name) 目录取第一张可用图。
+        asset_dir_for_name = os.path.join(project_dir, name)
         local = _first_existing(
             comfyui_client.resolve_local_path(payload.get("front") or ""),
             comfyui_client.resolve_local_path(payload.get("base") or ""),
-            *derived,
+            _first_existing_asset_image(asset_dir_for_name),
         )
         index[name] = {"name": name, "image": local,
                        "url": f"/api/assets/{kind}s/{project_name}/{name}/front.png"}
@@ -3256,8 +3309,32 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             "qc_blocked_count": blocked,
             "shots": manifest_shots,
         }
-        with open(os.path.join(out_dir, "storyboard_manifest.json"), "w", encoding="utf-8") as f:
-            json.dump(manifest, f, ensure_ascii=False, indent=2)
+        # B-15 P2-3：manifest 原子写（.tmp + os.replace），落盘失败不回滚 success
+        _sb_mp = os.path.join(out_dir, "storyboard_manifest.json")
+        _sb_tmp = _sb_mp + ".tmp"
+        try:
+            with open(_sb_tmp, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(_sb_tmp, _sb_mp)
+        except Exception as _mp_err:
+            app.logger.warning(f"分镜 manifest 原子写失败（已回滚 status）：{_mp_err}")
+            if os.path.exists(_sb_tmp):
+                try:
+                    os.unlink(_sb_tmp)
+                except OSError:
+                    pass
+            with lock:
+                generation_state[task_id].update({
+                    "status": "failed",
+                    "progress": 100,
+                    "success_count": ok,
+                    "qc_blocked_count": blocked,
+                    "output_dir": out_dir,
+                    "error": f"分镜 manifest 落盘失败：{_mp_err}",
+                })
+            return
 
         with lock:
             generation_state[task_id].update({
@@ -3316,13 +3393,16 @@ def api_generate_storyboards():
     scene_idx = _build_asset_index(data.get('scenes', []), project_name, "scene")
 
     # G5：任务 ID 用 uuid（秒级时间戳同秒双 POST 会覆盖 generation_state 且双线程并发抢同一目标路径）；
-    # 入口幂等：同项目已有 running 的分镜任务 → 复用其 task_id（reused=True），不重复开线程。
+    # 入口幂等：同项目+同集已有 running 的分镜任务 → 复用其 task_id（reused=True），不重复开线程。
     # 匹配用稳定的 step 字段（worker 运行中 phase 会变化，不能用 phase 判）。
+    # B-11 P1-8：守卫键加 episode_no —— 第 2 集请求不再被第 1 集运行中任务吞掉。
+    _ep_no = data.get('episode_no')
     with lock:
         _existing_sb = next((tid for tid, st in generation_state.items()
                              if st.get("status") == "running"
                              and st.get("project_name") == project_name
-                             and st.get("step") == "storyboard"), None)
+                             and st.get("step") == "storyboard"
+                             and st.get("episode_no") == _ep_no), None)
         if _existing_sb:
             return jsonify({"task_id": _existing_sb, "status": "started", "reused": True,
                             "total": len(shots), "overwrite": bool(data.get('overwrite')),
@@ -3333,6 +3413,7 @@ def api_generate_storyboards():
             "current": 0, "phase": "分镜图生成", "results": [],
             "qc": _qc_brief("image"),
             "project_name": project_name, "step": "storyboard",
+            "episode_no": _ep_no,
             "refs_available": {
                 "characters": {k: bool(v["image"]) for k, v in char_idx.items()},
                 "items": {k: bool(v["image"]) for k, v in item_idx.items()},
@@ -4097,6 +4178,8 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
             })
     except Exception as e:
         app.logger.error(f"视频生成失败: {e}")
+        # B-16 P2-11：视频任务异常 → 清理本任务产生的视频 scratch 中间产物
+        _cleanup_scratch_dir(os.path.join(QC_DIR, project_name, "video_scratch"), app.logger)
         with lock:
             generation_state[task_id].update({"status": "failed", "error": str(e)})
 
@@ -8275,8 +8358,13 @@ def _dub_worker(task_id: str, project_name: str, plan: dict, out_dir: str,
                       for r in results],
         }
         manifest_path = os.path.join(out_dir, f"ep{int(episode):02d}_dub_manifest.json")
-        with open(manifest_path, "w", encoding="utf-8") as f:
+        # B-08 P1-10：manifest 原子写（先 .tmp 后 os.replace），崩溃不留下半写文件
+        _mp_tmp = manifest_path + ".tmp"
+        with open(_mp_tmp, "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(_mp_tmp, manifest_path)
 
         _msg = f"成功 {len(ok_items)} 句 / 失败 {len(results) - len(ok_items)} 句"
         if aqua.get("enabled") and aqua.get("checked"):
@@ -8296,10 +8384,20 @@ def _dub_worker(task_id: str, project_name: str, plan: dict, out_dir: str,
             })
     except (TTSError, OSError) as e:
         app.logger.error(f"配音任务失败: {e}")
+        # B-16 P2-11：配音失败 → 清理本任务产生的中间产物（lines 目录、merged 半成品）
+        _cleanup_scratch_dir(os.path.join(out_dir, "lines"), app.logger)
+        _mp_tmp_f = os.path.join(out_dir, f"ep{int(episode):02d}_dub.{fmt}.tmp")
+        if os.path.exists(_mp_tmp_f):
+            try:
+                os.remove(_mp_tmp_f)
+            except OSError:
+                pass
         with dub_lock:
             dub_tasks[task_id].update({"status": "failed", "error": str(e), "phase": "失败"})
     except Exception as e:  # noqa: BLE001
         app.logger.exception("配音任务异常")
+        # B-16 P2-11：配音异常 → 清理中间产物
+        _cleanup_scratch_dir(os.path.join(out_dir, "lines"), app.logger)
         with dub_lock:
             dub_tasks[task_id].update({"status": "failed", "error": f"异常：{e}", "phase": "失败"})
 
@@ -8641,9 +8739,28 @@ def _mix_resolve_video(data: dict, project_name: str) -> str:
     return cands[0][1]
 
 
-def _mix_segments_dir(project_name: str) -> str:
-    """定位该项目的镜头分段视频目录（用于按真实分段时长对齐时间轴）"""
+def _mix_segments_dir(project_name: str, episode: int = 0) -> str:
+    """定位该集（episode 给定）或该项目的镜头分段视频目录（用于按真实分段时长对齐时间轴）
+
+    B-10 P1-6：带集号过滤。第 2 集起不再取到第 1 集素材，避免时间轴/成片源系统性错配。
+    优先匹配该集专属目录（``<key>_第N集`` 或 ``epNN`` 子目录），找不到再回退到项目级目录。
+    """
+    ep_tag = f"ep{int(episode):02d}" if episode else ""
     best, best_key = "", (-1, 0)
+    # 优先找该集专属目录（第 2 集起视频通常落在 <项目键>_第N集/ 或 epNN/ 子目录）
+    ep_dir = ""
+    if episode:
+        for cand in (os.path.join(VIDEOS_DIR, project_name, ep_tag),
+                     os.path.join(VIDEOS_DIR, f"{project_name}_第{episode}集")):
+            if os.path.isdir(cand):
+                ep_dir = cand
+                break
+    if ep_dir:
+        # 该集目录直接采用
+        vids = [f for f in os.listdir(ep_dir) if f.lower().endswith(".mp4")]
+        if vids:
+            return ep_dir
+    # 回退：项目级目录（第 1 集或整集模式）
     for d in project_store.project_dirs(VIDEOS_DIR, project_name):
         if not os.path.isdir(d):
             continue
@@ -8804,7 +8921,7 @@ def _mix_prepare(data: dict) -> dict:
     manifest = mf["manifest"]
     episode = episode or int(manifest.get("episode") or 1)
 
-    seg_dir = _mix_segments_dir(project_name)
+    seg_dir = _mix_segments_dir(project_name, episode)
     timeline = shot_timeline(script, videos_dir=seg_dir)
 
     params = dict(MIX_DEFAULT_PARAMS)
@@ -8923,11 +9040,16 @@ def _mix_worker(task_id: str, prepared: dict, out_name: str):
             app.logger.info(f"成片未登记待验收（{project_name} 第{prepared['episode']}集）："
                             f"{reg.get('reason')}")
     except DubMixError as e:
+        app.logger.warning(f"混音合成失败: {e}")
+        # B-16 P2-11：混音失败 → 清理本任务产生的中间产物（未完成的 report / 半成品）
+        _cleanup_scratch_dir(out_dir, app.logger)
         with mix_lock:
             mix_tasks[task_id].update({"status": "failed", "phase": "合成失败",
                                        "message": str(e), "progress": 100})
     except Exception as e:  # pragma: no cover - 兜底
         app.logger.exception("音画合成异常")
+        # B-16 P2-11：混音异常 → 清理中间产物
+        _cleanup_scratch_dir(out_dir, app.logger)
         with mix_lock:
             mix_tasks[task_id].update({"status": "failed", "phase": "合成异常",
                                        "message": f"{type(e).__name__}: {e}", "progress": 100})
@@ -9434,6 +9556,11 @@ def api_autopilot_run_once():
     cfg = pipeline.normalize_config({**plan, 'novel_id': meta.get('novel_id')},
                                     default_project_key=project)
     result = pipeline.run_episode(cfg, project, ep, meta, chapter)
+    if result.get('status') == 'busy':
+        # B-02 P0-5：该集正被另一执行体（托管轮转）生产，集级锁拒绝双跑
+        return jsonify({"success": False,
+                        "error": result.get('error') or "该集正在生产中",
+                        "retry_after_sec": 30}), 409
     if result.get('ok') and result.get('deliverable'):
         pipeline.record_deliverable(project, ep, result['deliverable'], meta={
             'title': chapter.get('title') or '', 'chapter_index': chapter.get('index'),
