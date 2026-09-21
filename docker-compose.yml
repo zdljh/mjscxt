@@ -4,8 +4,9 @@ services:
   comic-drama-app:
     build: .
     container_name: comic-drama-app
+    # B-24 F-08：端口只绑 127.0.0.1（localhost-only），避免暴露到所有网卡
     ports:
-      - "5000:5000"
+      - "127.0.0.1:5000:5000"
     volumes:
       - ./output:/app/output
       - ./novels:/app/novels

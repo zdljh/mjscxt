@@ -296,6 +296,29 @@ def _first_existing_asset_image(directory: str) -> str:
     return ""
 
 
+# B-20 P2-10：磁盘余量检查。大体积写入（视频/图片/混音成片）前确认剩余空间，
+# 不足时 fail-loud（logger.warning + 返回 False），不静默写入导致半截文件。
+def _ensure_disk_headroom(directory: str, min_bytes: int, logger=None) -> bool:
+    """检查 directory 所在分区剩余空间是否 ≥ min_bytes。
+    返回 True（充足）/ False（不足，已记 warning）。失败时不影响调用方继续。
+    """
+    _log = logger
+    try:
+        # 用 shutil.disk_usage 取实际分区剩余空间
+        usage = shutil.disk_usage(os.path.abspath(directory))
+        free = usage.free
+        if free < min_bytes:
+            if _log:
+                _log.warning("磁盘余量不足：%s 剩余 %.1fMB < 需要 %.1fMB",
+                             os.path.abspath(directory), free / 1048576, min_bytes / 1048576)
+            return False
+        return True
+    except Exception as e:
+        if _log:
+            _log.warning("磁盘余量检查失败（已放行）：%s", e)
+        return True
+
+
 def _project_or_400(raw, field_name="project_name"):
     """G4 收口：路由层「项目入参 → 安全键 / 400」的统一入口。
 
@@ -2117,9 +2140,12 @@ def api_export_run():
     if not script:
         return jsonify({"success": False, "error": "剧本不存在"}), 404
     formats = data.get('formats')
+    # B-17 P2-13：传集号给 nle_export，按集号过滤视频目录，避免跨集混用素材
+    ep_no = data.get('episode_no')
     try:
         results = nle_export.export_all(project, script,
-                                        formats=formats if isinstance(formats, list) else None)
+                                        formats=formats if isinstance(formats, list) else None,
+                                        episode=ep_no)
     except Exception as e:  # noqa: BLE001
         app.logger.exception("NLE 导出失败")
         return jsonify({"success": False, "error": f"导出失败：{e}"}), 500
@@ -3606,6 +3632,9 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
         main_char_img = _collect_reference_images(character_refs[:1], [])
         app.logger.info(f"视频参考图解析结果: {ref_imgs}；主角锚点: {main_char_img}")
 
+        # B-18 P1-7：构建角色索引，供 _shot_segment 逐镜匹配参考图（与分镜链路口径对齐）
+        char_idx = _build_asset_index(character_refs, project_name, "character")
+
         # 分镜图映射（步骤5产物）→ 作为 H3 的 <Picture 1> 构图基准
         # 修复：改用合并式映射（目录扫描 + manifest + 前端传入）。
         # 原实现只认前端传入的 storyboards，前端漏传某镜时该镜会静默退化为
@@ -3666,8 +3695,20 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                     shot, character_refs, scene_refs,
                     storyboard_ref={"name": f"shot_{sid}"})
             elif sb_local:
-                # 分镜图（构图/场景基准）+ 主角外观锚点，共 2 张（H3 参考图上限）
-                refs = [sb_local] + main_char_img
+                # B-18 P1-7：参考图按 characters_in_shot 逐镜匹配，不再全段共用 main_char_img
+                # H3 参考图上限 2 张：[分镜图, 本镜主角锚点]
+                _matched_chars = _match_shot_chars(shot, char_idx)
+                _shot_char_img = None
+                for _mc in (_matched_chars or []):
+                    _p = (char_idx.get(_mc) or {}).get("image")
+                    if _p:
+                        _shot_char_img = _p
+                        break
+                if _shot_char_img:
+                    refs = [sb_local, _shot_char_img]
+                else:
+                    # 兜底：逐镜匹配失败时回退到全局主角锚点（保持原行为）
+                    refs = [sb_local] + main_char_img
                 prompt = comfyui_client._build_h3_prompt(
                     shot, character_refs, scene_refs,
                     storyboard_ref={"name": f"shot_{sid}"})
@@ -9922,7 +9963,8 @@ def _timeline_for_export(project_name: str, episode_no=None,
         return provided
 
     script = _load_script_for(project_name, episode_no)
-    tl = nle_export.build_timeline(script or {}, project_name)
+    # B-17 P2-13：传集号给 build_timeline，按集号过滤视频目录
+    tl = nle_export.build_timeline(script or {}, project_name, episode=episode_no)
     rows = tl.get("shots") or []
     clips = [
         {

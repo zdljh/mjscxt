@@ -63,20 +63,25 @@ _CALL_STATS_LOCK = threading.Lock()
 
 def get_call_stats() -> dict:
     """读取调用统计快照"""
-    return dict(_CALL_STATS)
+    with _CALL_STATS_LOCK:
+        return dict(_CALL_STATS)
 
 
 def reset_call_stats() -> dict:
     """重置调用统计"""
-    for k in list(_CALL_STATS.keys()):
-        _CALL_STATS[k] = 0 if not isinstance(_CALL_STATS[k], float) else 0.0
-    return dict(_CALL_STATS)
+    with _CALL_STATS_LOCK:
+        for k in list(_CALL_STATS.keys()):
+            _CALL_STATS[k] = 0 if not isinstance(_CALL_STATS[k], float) else 0.0
+        return dict(_CALL_STATS)
 
 
 def _bump(key: str, delta=1) -> None:
-    """安全累加统计项（统计失败绝不影响业务）"""
+    """安全累加统计项（统计失败绝不影响业务）
+    B-19 H1：读改写包锁，避免多线程并发竞争导致计数丢失。
+    """
     try:
-        _CALL_STATS[key] = _CALL_STATS.get(key, 0) + delta
+        with _CALL_STATS_LOCK:
+            _CALL_STATS[key] = _CALL_STATS.get(key, 0) + delta
     except Exception:  # noqa: BLE001
         pass
 
@@ -725,6 +730,8 @@ class ComfyUIClient:
           ③ 超时（非中止）后也 `interrupt` 一次，避免「本地判超时、远端继续跑」的双重浪费。
         ⚠️ 注意（审计 S9 备注）：cancellation 检查点**刻意不放进 ComfyUI 渲染循环**
         （会留半成品）——这里加的是「超时/取消后的远端清理」，两者不冲突。
+        B-21 P1-13：三态分离（completed / error / timeout）+ interrupt 定向到指定 prompt_id。
+        超时和 error 的 interrupt 都传 prompt_id（不再打断队列中正在执行的其他任务）。
         """
         start = time.time()
         while time.time() - start < timeout:
@@ -745,6 +752,8 @@ class ComfyUIClient:
                     if status.get("status_str") == "error":
                         logger.error(f"生成出错: {status}")
                         _bump("waited_seconds", round(time.time() - start, 2))
+                        # B-21 P1-13：error 态也定向 interrupt（清理本 prompt 的残留队列项）
+                        self.interrupt(prompt_id)
                         return entry
             except cancellation.Cancelled:
                 raise  # 中止信号必须穿透，不能被轮询的通用 except 吞掉
@@ -753,6 +762,7 @@ class ComfyUIClient:
             # ② 可被打断的短休眠（3s 轮询间隔），暂停时最多 0.25s 即有反应
             cancellation.sleep(3)
         # ③ 超时（非中止）：仍清理远端，避免本地判超时而远端白跑
+        # B-21 P1-13：超时 interrupt 定向到指定 prompt_id（不再误伤队列中其他任务）
         logger.warning(f"等待超时: {prompt_id}（清理远端队列）")
         self.interrupt(prompt_id)
         _bump("waited_seconds", round(time.time() - start, 2))
