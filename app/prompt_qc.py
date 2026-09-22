@@ -777,6 +777,24 @@ def _rebuild_hint(kind: str, verdict: dict, text: str = "") -> str:
     return ""
 
 
+def _crit_kind(msg) -> str:
+    """致命缺陷的**类型键**：取到第一个中/英文左括号之前的部分。
+
+    为什么不能按整串比：钳制只会让提示词**变短**，被剪掉的是末尾段落，于是同一条致命
+    缺陷的**描述细节会变**（H3 的缺段列表由「non_diegetic_music」变成
+    「overall_soundscape、non_diegetic_music」），整串相等就匹配不上，会把「原文本来就
+    存在的致命缺陷」误判成「本次钳制新增」而降级掉 —— 真致命被洗白（2026-09-22 QA 复验
+    P-1 的反例实测）。按类型键比对才能既降级「钳制新增的致命类型」，又保留「原文本就
+    存在的致命类型」。
+    """
+    s = str(msg or "")
+    for ch in ("（", "("):
+        i = s.find(ch)
+        if i >= 0:
+            s = s[:i]
+    return s.strip()
+
+
 def preflight(kind: str, prompt: str, ctx: dict = None, style: str = "",
               cfg: dict = None, ref_count: Optional[int] = None,
               expect_refs: Optional[bool] = None) -> dict:
@@ -838,6 +856,28 @@ def preflight(kind: str, prompt: str, ctx: dict = None, style: str = "",
     verdict["repairs"] = repairs
     # N1：暴露「本次是否因超长被钳制」，便于观测与测试（复检看到的是钳制后的文本）
     verdict["prompt_clamped"] = _prompt_clamped
+    # N1 修正（2026-09-22 QA 复验 P-1）：截断是**客户端安全闸门**，绝不能自己造出一条
+    # 原来不存在的致命缺陷。H3 的 validate 按顺序查段名，从末尾剪掉超长内容会连带剪掉
+    # overall_soundscape / non_diegetic_music → 报「结构不合规（缺段）」→ blocked=True，
+    # 把一条**结构本来完整**的提示词判废（服务端本来只是静默截断、照样出片）。
+    # 判据：只降级「本次钳制**新增**」的致命缺陷；`before`（原文本）已有的致命缺陷照旧阻断。
+    # ⚠️ 必须按**类型键**（见 _crit_kind）而不是整串比对 —— 钳制会改变同一条致命缺陷的描述
+    #    （缺段列表变长），整串比对会把「原文本来就缺段」误判成「钳制新增」而洗白真致命。
+    # 降级不等于隐藏：同时进 issues（可见）与 clamp_induced_critical（可分型统计）。
+    # ⚠️ 注意 `verdict["score"]` / `verdict["passed"]` 仍是含致命惩罚的旧值：`block` 严格模式
+    #    依旧会拦（这符合严格模式语义），`repair`（默认）模式不再误阻断。
+    if _prompt_clamped:
+        _pre_kinds = {_crit_kind(c) for c in (before.get("critical_issues") or [])}
+        _after_crit = list(verdict.get("critical_issues") or [])
+        _induced = [c for c in _after_crit if _crit_kind(c) not in _pre_kinds]
+        _kept = [c for c in _after_crit if _crit_kind(c) in _pre_kinds]
+        if _induced:
+            verdict["clamp_induced_critical"] = _induced
+            verdict["critical_issues"] = _kept
+            verdict["issues"] = list(verdict.get("issues") or []) + [
+                f"（截断致）{c}" for c in _induced]
+            logger.warning("提示词预检[%s] 钳制新增致命缺陷已降级为非阻断（%d 项）：%s",
+                           kind, len(_induced), "；".join(_induced)[:200])
     verdict["before_issues"] = list(before.get("issues") or [])
     verdict["before_score"] = before.get("score")
     verdict["mode"] = mode
