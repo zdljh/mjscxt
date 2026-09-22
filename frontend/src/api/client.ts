@@ -719,7 +719,7 @@ export const autopilotApi = {
   disable: () => request<{ success: boolean }>('/autopilot/disable', { method: 'POST' }),
   pause: () => request<{ success: boolean }>('/autopilot/pause', { method: 'POST' }),
   resume: () => request<{ success: boolean }>('/autopilot/resume', { method: 'POST' }),
-  progress: () => request<{ success: boolean; projects: AutopilotProgress[] }>('/autopilot/progress'),
+  progress: () => request<{ success: boolean; count?: number; items: AutopilotProgress[] }>('/autopilot/progress'),
   progressByProject: (project: string) =>
     request<AutopilotProgress>(`/autopilot/progress/${encodeURIComponent(project)}`),
   /** 成片清单。传 project 只取该项目的（工作台用），不传则取全部项目。 */
