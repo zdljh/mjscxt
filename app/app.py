@@ -10884,10 +10884,12 @@ def spa_fallback(path):
 #   ② 进程内 10 分钟节流（同一进程最多每 10 分钟真正扫描一次）；
 #   ③ 全容错 —— 回收是**优化**不是功能，任何异常只留 warning，绝不阻断生产。
 #
-# 为什么把包装函数集中在文件末尾追加：本仓库 D-09 回归脚本
-# `verify_silent_except.py` 以「app.py:{绝对行号}」锚定唯一的 `except: pass`
-# 白名单；把新增代码放在既有代码之后，可把行号扰动降到最低（仅在资产/分镜
-# 两个收尾点各加一行调用 → 白名单锚点随之由 5691 顺移到 5693）。
+# 为什么把包装函数集中在文件末尾追加：本文件已逾万行，把新逻辑集中放在末尾
+# 便于审阅与回滚，也避免与既有函数体交错。**注意不要再以「绝对行号」锚定任何
+# 守卫** —— 本仓库吃过亏：`verify_silent_except.py` 的白名单原本写成
+# `("app.py", 5691)`，D-11a 在上面插了两行就漂到 5693、守卫静默失效，被迫手工
+# 同步。该白名单现已改为**内容锚点**（`app/verify_project_audit.py` G5 同口径），
+# 行号扰动不再影响它。
 #
 # 调用点：`_generate_asset_task`（资产生成任务收尾）、`_storyboard_worker`
 # （分镜生成任务收尾）；成片步骤收尾见 `app/pipeline.py step_final`。
@@ -10904,11 +10906,21 @@ def _comfyui_official_dirs() -> list:
 
 
 def _maybe_reclaim_comfyui_output() -> None:
-    """薄包装：带节流地回收 ``COMFYUI_OUTPUT_DIR`` 下的重试残留（D-11a）。
+    """薄包装：带节流地回收 ``COMFYUI_OUTPUT_DIR`` 下的产物残留（D-11a）。
 
-    只有**同时**满足「位于 COMFYUI_OUTPUT_DIR 内 + 文件名含 ``_retry``/``_try``
-    + mtime 距今 > 24h + 正式产物目录已有 ``(size, sha256)`` 同内容副本 +
-    ``st_nlink == 1``」的文件才会被删（判定细节见 ``app/disk_reclaim.py``）。
+    只有**同时**满足下列条件的文件才会被删（判定细节与安全论证见
+    ``app/disk_reclaim.py`` 模块 docstring）：
+
+      ① 位于 ``COMFYUI_OUTPUT_DIR`` 下的 ``comic_drama*`` 产物目录内；
+      ② 文件名是 ComfyUI 侧产物命名（带自动编号后缀 ``_00001_``，或含
+         ``_retry``/``_try``）—— 交付件名 ``base.png`` 之类天然不匹配；
+      ③ ``mtime`` 距今 > 24h；
+      ④ 正式产物目录里已有 ``(size, sha256)`` **双匹配**的同内容副本；
+      ⑤ ``st_nlink == 1``（硬链接删了不释放空间）；
+      ⑥ 候选不在任何正式产物目录内（含大小写归一后的比较）。
+
+    性能：内容指纹按 ``(路径, size, mtime_ns)`` 进程内缓存，稳态下只有**新增**的
+    正式产物需要读盘；配合 10 分钟节流，同步调用不会给任务收尾带来可感知的延迟。
     """
     global _COMFYUI_RECLAIM_LAST_TS
     try:
@@ -10923,7 +10935,7 @@ def _maybe_reclaim_comfyui_output() -> None:
         stats = disk_reclaim.reclaim_comfyui_output(
             COMFYUI_OUTPUT_DIR, _comfyui_official_dirs(), logger=app.logger)
         if stats.get("delete"):
-            app.logger.info("D-11a ComfyUI 输出回收：删 %d 个重试残留，释放 %.2f MB",
+            app.logger.info("D-11a ComfyUI 输出回收：删 %d 个产物残留，释放 %.2f MB",
                             len(stats["delete"]),
                             (stats.get("removed_bytes") or 0) / 1048576.0)
     except Exception as e:  # noqa: BLE001  回收是优化，绝不能阻断生产

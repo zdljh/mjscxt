@@ -74,8 +74,18 @@ def _iter_py(root: str):
                 yield os.path.join(dirpath, fn)
 
 
-def _app_py_files():
-    return sorted(f for f in os.listdir(APP) if f.endswith(".py"))
+def _scan_targets():
+    """守卫的扫描面：``app/**``（递归）+ 仓库根**平层** ``*.py``。
+
+    ⚠️ 早期版本只扫 `app/` 平层（`os.listdir`），于是 `app/providers/` 与仓库根的
+    外围脚本统统落在扫描面之外 —— 守卫给出的「全库只有 1 处静默吞异常」是**假的**，
+    真实是 5 处。扫描面不足会让守卫输出虚假的安全感，比没有守卫更糟。
+    """
+    yield from _iter_py(APP)
+    for fn in sorted(os.listdir(ROOT)):
+        p = os.path.join(ROOT, fn)
+        if fn.endswith(".py") and os.path.isfile(p):
+            yield p
 
 
 # ============================================================
@@ -272,23 +282,39 @@ print("=" * 72)
 
 _EXCEPT_PASS = re.compile(r"^\s*except([^:]*):\s*(#.*)?$")
 _silent_sites = []
-for _fn in _app_py_files():
-    _lines = _read(os.path.join(APP, _fn)).splitlines()
+for _p in _scan_targets():
+    _lines = _read(_p).splitlines()
+    _rel = os.path.relpath(_p, ROOT).replace("\\", "/")
     for _i, _line in enumerate(_lines):
         if _EXCEPT_PASS.match(_line) and _i + 1 < len(_lines) \
                 and _lines[_i + 1].strip() == "pass":
             # 内容锚点：该站点前 6 行内必须有 logger —— 说明它是「日志自身失败的兜底」
             # （再调 logger 会递归，只能 pass），而不是彻底静默的吞异常。
             _ctx = "\n".join(_lines[max(0, _i - 6):_i])
-            _silent_sites.append((_fn, _i + 1, "logger" in _ctx))
-print(f"  剩余多行 except: pass 共 {len(_silent_sites)} 处（修复前 72）：")
-for _fn, _ln, _logged in _silent_sites:
-    print(f"    {_fn}:{_ln} {'（日志兜底，合规）' if _logged else '（**彻底静默，违规**）'}")
-check("5.1 多行 except: pass 计数 ≤ 10（报告验收口径）",
-      len(_silent_sites) <= 10, f"实际 {len(_silent_sites)}")
-check("5.2 剩余站点全部是「日志自身失败兜底」（前文出现过 logger）",
-      all(s[2] for s in _silent_sites),
-      f"彻底静默：{[(f, l) for f, l, ok in _silent_sites if not ok]}")
+            _silent_sites.append((_rel, _i + 1, "logger" in _ctx))
+print(f"  全仓多行 except: pass 共 {len(_silent_sites)} 处（D-09 修复前 app/ 平层为 72）：")
+for _rel, _ln, _logged in _silent_sites:
+    print(f"    {_rel}:{_ln} {'（日志兜底，合规）' if _logged else '（**彻底静默**）'}")
+
+#: 报告的验收阈值（§5 C-3）：多行 `except: pass` 计数 ≤ 10。
+MAX_TOTAL_SILENT = 10
+#: 棘轮：**非**日志兜底的静默站点数量上限 —— **只允许下降，不允许新增**。
+#: 现状 4 处，全部落在 D-09 的作用域（`app/` 平层）之外，属未治理存量：
+#:   - `app/providers/local.py` / `app/providers/__init__.py`（provider 子系统的探测/等待）
+#:   - 仓库根 `comic_drama_pipeline.py`（外围脚本的轮询）/ `restart_flask.py`（杀进程）
+#: 新增任何一处都会让守卫变红；要根治就逐个治理，然后把这个数字往下调。
+MAX_NON_LOGGING_SILENT = 4
+
+_app_flat = [s for s in _silent_sites if os.path.dirname(s[0]) == "app"]
+_non_logging = [s for s in _silent_sites if not s[2]]
+check(f"5.1 全仓多行 except: pass 计数 ≤ {MAX_TOTAL_SILENT}（报告验收口径）",
+      len(_silent_sites) <= MAX_TOTAL_SILENT, f"实际 {len(_silent_sites)}")
+check("5.2 app/ 平层（D-09 作用域）剩余站点全部是「日志自身失败兜底」",
+      all(s[2] for s in _app_flat),
+      f"彻底静默：{[(r, l) for r, l, ok in _app_flat if not ok]}")
+check(f"5.3 非日志兜底的静默站点数不增长（棘轮 ≤ {MAX_NON_LOGGING_SILENT}，只许下降）",
+      len(_non_logging) <= MAX_NON_LOGGING_SILENT,
+      f"实际 {len(_non_logging)}：{[(r, l) for r, l, _ in _non_logging]}")
 
 # ============================================================
 print()
@@ -316,6 +342,64 @@ check("6.7 novel_to_script 里 narration 带结构化 deprecated 标记",
       "DEPRECATED_SHOT_FIELDS" in _nts
       and bool(re.search(r'"narration"\s*:\s*\{[^}]*"deprecated"\s*:\s*True', _nts, re.S)),
       "未找到 DEPRECATED_SHOT_FIELDS['narration']['deprecated'] = True")
+
+# ---- 行为级守卫（比文本断言硬）：直接 import 零依赖模块，跑真实判定 ----
+# `disk_reclaim` 只依赖标准库，可以离线导入 —— 这两个不变量来自独立验证抓出的
+# 两个真缺陷，绝不能靠「源码里有某个字符串」来守。
+sys.path.insert(0, APP)
+try:
+    import disk_reclaim as _dr_mod
+except Exception as _e:  # noqa: BLE001
+    _dr_mod = None
+    check("6.8 disk_reclaim 可离线导入（否则行为级守卫无法执行）", False, repr(_e))
+
+if _dr_mod is not None:
+    # 缺陷 2（回收在真实场景无效）：ComfyUI SaveImage 只在 prefix 末段追加 `_00001_`，
+    # 所以 `comic_drama_retry/{proj}_shot_01` 的真实产物名**不含** `_retry`。
+    check("6.8 真实残留命名（无 _retry，仅 ComfyUI 编号后缀）被认作可回收候选",
+          _dr_mod.is_reclaimable_candidate("proj_shot_01_00001_.png") is True
+          and _dr_mod.is_reclaimable_candidate("proj_shot_01_retry_00001_.png") is True,
+          "真实命名未被认作候选 → 回收会静默失效")
+    check("6.9 交付件名（base.png / shot_01.png / ep01_final.mp4）不算候选",
+          not _dr_mod.is_reclaimable_candidate("base.png")
+          and not _dr_mod.is_reclaimable_candidate("shot_01.png")
+          and not _dr_mod.is_reclaimable_candidate("ep01_final.mp4"))
+    check("6.10 候选作用域限定在 comic_drama* 目录内（不碰别人的 ComfyUI 产物）",
+          _dr_mod.is_artifact_scope("/c/comfy/comic_drama_sb/a_00001_.png", "/c/comfy") is True
+          and _dr_mod.is_artifact_scope("/c/comfy/other_tool/a_00001_.png", "/c/comfy") is False
+          and _dr_mod.is_artifact_scope("/c/comfy/a_00001_.png", "/c/comfy") is False)
+    # 缺陷：`float(min_age_sec)` 在 None 时抛 TypeError → 被外层 except 吞成
+    # 「整批静默放弃」。这里用**真实文件**跑判定，两半各自可判别：
+    #   ① 老文件（25h 前）仍被判定可删 → 说明没整批放弃；
+    #   ② 新文件（刚建）被判 recent → 说明回退的是 86400 而**不是** 0
+    #      （若被当成 0，阈值失效，新文件会被误判为可删）。
+    import tempfile
+    import time as _time
+    _tmp = tempfile.mkdtemp(prefix="mjscxt-audit-")
+    _old = os.path.join(_tmp, "old_00001_.bin")
+    _new = os.path.join(_tmp, "new_00001_.bin")
+    for _f in (_old, _new):
+        with open(_f, "wb") as _fh:
+            _fh.write(b"AUDIT-FINGERPRINT-1")
+    _st_old = os.stat(_old)
+    _cand_old = [(_old, int(_st_old.st_size), _time.time() - 25 * 3600, int(_st_old.st_nlink))]
+    _fps = {(int(_st_old.st_size), _dr_mod._sha256(_old))}
+    _r_old = _dr_mod.plan_reclaim(_cand_old, _fps, now=_time.time(), min_age_sec=None)
+    _st_new = os.stat(_new)
+    _cand_new = [(_new, int(_st_new.st_size), float(_st_new.st_mtime), int(_st_new.st_nlink))]
+    _r_new = _dr_mod.plan_reclaim(_cand_new, _fps, now=_time.time(), min_age_sec=None)
+    check("6.11 min_age_sec=None 不导致整批静默放弃，且回退默认 24h（而非当成 0）",
+          _r_old["delete"] == [_old] and _r_new["skip"]["recent"] == 1,
+          f"老文件 delete={_r_old['delete']}、新文件 skip={_r_new['skip']}")
+    # 缺陷 1（大小写击穿「不碰正式目录」防线）：Windows 路径大小写不敏感，
+    # `commonpath` 不做 normcase —— 不归一就会把「在正式目录内」判成「不在」。
+    if os.path.normcase("A") == "a":
+        check("6.12 大小写不同的同一路径仍判为「在正式目录内」（防线不被击穿）",
+              _dr_mod._is_within("C:\\tmp\\Assets\\sub\\p_00001_.png", ["C:\\tmp\\assets"])
+              is True,
+              "normcase 缺失 → 可误删正式目录内文件")
+    else:
+        print("  [SKIP] 6.12 当前平台路径大小写敏感，跳过 normcase 断言（如实跳过，不伪装通过）")
 
 # ============================================================
 print()
