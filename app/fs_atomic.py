@@ -76,12 +76,16 @@ def _snapshot_bak(path: str) -> None:
     try:
         with open(path, "r", encoding="utf-8") as f:
             json.load(f)
-    except (OSError, ValueError):
-        return  # 活文件已不可解析 → 不覆盖既有 .bak
+    except (OSError, ValueError) as e:
+        # 活文件已不可解析 → 不覆盖既有 .bak。这是**预期分支**（不是故障），
+        # 但必须留痕：否则「为什么 .bak 一直停在旧版本」将无法追查。
+        # D-09 口径：清理/旁路类失败一律 logger.debug，不静默吞。
+        logger.debug("跳过 .bak 快照（活文件不可解析）：%s: %s", type(e).__name__, e)
+        return
     try:
         shutil.copy2(path, last_good_bak(path))
-    except OSError:
-        pass
+    except OSError as e:
+        logger.debug("写 .bak 快照失败（忽略，损坏时退化为无法恢复）：%s", e)
 
 
 def _restore_from_bak(path: str):
@@ -153,8 +157,10 @@ def atomic_write_json(path: str, data, *, indent: int = 2) -> None:
         try:
             if os.path.exists(tmp):
                 os.remove(tmp)          # 失败不留垃圾临时文件
-        except OSError:
-            pass
+        except OSError as e:
+            # 清理失败不能掩盖原始异常（下面照常 raise），但也不能完全静默 —— 否则
+            # 磁盘会被看不见的唯一名 .tmp 垃圾慢慢吃满。D-09 口径：清理类 → debug。
+            logger.debug("清理临时文件失败（忽略）：%s", e)
         raise
 
 
