@@ -2384,12 +2384,16 @@ def api_generate_script():
         return jsonify({"error": "请提供主题"}), 400
 
     try:
-        script = script_gen.generate_script(
-            theme=theme, episodes=episodes,
+        # 统一走前端「AI 设置 → 文本分析模型」的密钥（OpenAI 兼容，任意厂商），
+        # 不再读环境变量 ANTHROPIC_API_KEY / 硬编码 CLAUDE_MODEL。
+        client = _current_llm_client()
+        script = script_gen.generate_script_with_client(
+            client, theme=theme, episodes=episodes,
             duration_per_episode=duration, style=style
         )
         project_name = _safe_project(theme[:20])
-        script_path = script_gen.save_script(script, project_name)
+        script_path = script_gen.save_script(script, project_name,
+                                             provider="openai-compatible")
         script["metadata"]["script_path"] = script_path
 
         # S1：剧本质检接线（原为死代码——生产路径只调无质检的 generate_script，
@@ -2418,6 +2422,12 @@ def api_generate_script():
             "script_qc_active": qc_client.script_qc_ready(qc_cfg),
             "qc_result": qc_result,
         })
+    except LLMError as e:
+        # 未配置「文本分析模型」或密钥错误：给引导（400）而非裸 500，
+        # 引导用户去 AI 设置配置 base_url / api_key / model。
+        # _ai_guide_response 已返回 (jsonify, code) 元组，直接透传。
+        app.logger.error(f"剧本生成 LLM 调用失败: {e}")
+        return _ai_guide_response(str(e))
     except Exception as e:
         app.logger.error(f"生成剧本失败: {e}")
         return jsonify({"error": str(e)}), 500

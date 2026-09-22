@@ -278,15 +278,14 @@ class ScriptGenerator:
         logger.warning("未找到可用的本地兜底剧本")
         return None
 
-    def _generate_with_claude(self, theme: str, episodes: int,
-                               duration: int, style: str, audience: str,
-                               lessons_hint: str = "") -> Dict:
-        """使用 Claude API 生成剧本
+    @staticmethod
+    def _build_script_prompt(theme: str, episodes: int, duration: int, style: str,
+                             audience: str, lessons_hint: str = "") -> str:
+        """拼装剧本生成提示词（Claude 与 OpenAI 兼容两条链路共用同一份 prompt）。
 
         lessons_hint：历史质检教训，追加在 JSON 格式说明**之后**、结尾（不破坏 JSON
         输出格式要求）；空串 → 零行为变更。
         """
-
         prompt = f"""你是一个专业的AI漫剧编剧。请为以下主题生成详细的分镜脚本。
 
 主题：{theme}
@@ -363,6 +362,15 @@ class ScriptGenerator:
 
         if lessons_hint:
             prompt += f"\n\n【历史质检教训，务必规避（不要照抄进正文）】\n{lessons_hint}"
+        return prompt
+
+    def _generate_with_claude(self, theme: str, episodes: int,
+                               duration: int, style: str, audience: str,
+                               lessons_hint: str = "") -> Dict:
+        """使用 Claude API（Anthropic SDK）生成剧本。仅供 CLI / 独立链路使用，
+        Web 端主流程已改走 OpenAI 兼容的「文本分析模型」（见 generate_script_with_client）。"""
+        prompt = self._build_script_prompt(theme, episodes, duration, style, audience,
+                                            lessons_hint)
 
         message = self.client.messages.create(
             model=CLAUDE_MODEL,
@@ -390,6 +398,24 @@ class ScriptGenerator:
 
         return script
 
+    def generate_script_with_client(self, client, theme: str, episodes: int = 1,
+                                    duration_per_episode: int = 60,
+                                    style: str = "古风仙侠",
+                                    target_audience: str = "年轻观众",
+                                    lessons_hint: str = "") -> Dict:
+        """走「OpenAI 兼容」客户端生成剧本（Web 端主流程用前端 AI 设置的密钥）。
+
+        client 为 llm_client.LLMClient（由 app._current_llm_client() 构造，密钥取自
+        前端「文本分析模型」）。与 _generate_with_claude 共用同一份 prompt，仅把
+        底层调用换成 client.chat_json_robust（OpenAI chat/completions 协议，自带
+        截断感知 + 自动提高 max_tokens 重试），因此任意 OpenAI 兼容模型均可驱动。
+        """
+        if client is None:
+            raise ValueError("generate_script_with_client 需要一个 LLMClient 实例")
+        prompt = self._build_script_prompt(theme, episodes, duration_per_episode, style,
+                                           target_audience, lessons_hint)
+        return client.chat_json_robust(prompt, system=SYSTEM_PROMPT, max_tokens=8000)
+
     def _parse_fallback(self, content: str) -> Dict:
         """降级解析"""
         try:
@@ -408,8 +434,9 @@ class ScriptGenerator:
             "production_notes": {}
         }
 
-    def save_script(self, script: Dict, project_name: str) -> str:
-        """保存剧本到文件"""
+    def save_script(self, script: Dict, project_name: str, provider: str = None) -> str:
+        """保存剧本到文件；provider 缺省时用 self.provider（CLI 链路），
+        Web 端 OpenAI 兼容链路可显式传入「openai-compatible」以如实记录来源。"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         os.makedirs(SCRIPT_DIR, exist_ok=True)
         filename = f"{project_name}_{timestamp}.json"
@@ -418,7 +445,7 @@ class ScriptGenerator:
         script["metadata"] = {
             "generated_at": datetime.now().isoformat(),
             "project_name": project_name,
-            "provider": self.provider
+            "provider": provider if provider else self.provider
         }
 
         with open(filepath, 'w', encoding='utf-8') as f:
