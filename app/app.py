@@ -5818,6 +5818,25 @@ def _qc_gate(verdict: dict) -> dict:
         return {"accept": True, "blocked": False, "skipped": True, "label": "质检未执行",
                 "reason": verdict.get("reason") or "质检未执行（跳过）", "critical_issues": []}
     if not verdict.get("ok"):
+        # P0-2：区分「接口级故障」与「内容不合格」。
+        # interface_fault=True（鉴权 401/403、超时、网络抖动、未配置 key）= 根本没拿到
+        # 模型判定，**不等于**产物不合格——ComfyUI 已出好的图/片不能因质检 key 失效被丢弃。
+        # 此时 fail-open：放行已产出资产 + 响亮告警；但若客观层已命中致命缺陷
+        # （全黑/无音轨等确定性闸门，见 critical_issues）仍强制阻断，不放行真坏帧。
+        if verdict.get("interface_fault"):
+            crit = [str(x) for x in (verdict.get("critical_issues") or [])]
+            if crit:
+                return {"accept": False, "blocked": True, "skipped": False,
+                        "fault_open": False, "label": "客观层致命缺陷（AI 质检接口不可用）",
+                        "reason": "；".join(crit[:3]), "critical_issues": crit}
+            app.logger.warning(
+                "质检接口故障，已 fail-open 放行本资产（结果不可判定）：%s",
+                verdict.get("error") or "质检接口不可用")
+            return {"accept": True, "blocked": False, "skipped": False,
+                    "fault_open": True, "label": "质检接口故障·已放行",
+                    "reason": (verdict.get("error") or "质检接口不可用")
+                              + "（接口级故障，未做内容判定，已放行）",
+                    "critical_issues": []}
         return {"accept": False, "blocked": True, "skipped": False, "label": "质检调用异常",
                 "reason": verdict.get("error") or "质检调用失败，结果不可判定", "critical_issues": []}
 
@@ -5871,7 +5890,9 @@ def _qc_record_verdict(project_name: str, kind: str, shot_key, stage: str,
            "style_mismatch": bool(verdict.get("style_mismatch")),
            "style_issues": verdict.get("style_issues") or [],
            "style": style_kit.normalize_style(style),
-           "error": verdict.get("error"), "latency_ms": verdict.get("latency_ms")}
+           "error": verdict.get("error"), "latency_ms": verdict.get("latency_ms"),
+           # P0-2：接口级故障（鉴权/超时/网络）标记，供 _qc_summary 区分「故障放行」与「内容不合格」
+           "interface_fault": bool(verdict.get("interface_fault"))}
     if extra:
         rec.update(extra)
     rec["history_file"] = _qc_record(project_name, kind, shot_key, rec)
@@ -6259,25 +6280,35 @@ def _qc_summary(attempts: list, enabled: bool, ready: bool, max_retries: int) ->
                 "attempts": 0, "max_retries": max_retries}
     passed_rec = next((a for a in attempts if a.get("passed")), None)
     last = attempts[-1] if attempts else {}
-    status = "passed" if passed_rec else ("error" if last.get("error") else "failed")
-    blocked = status in ("failed", "error")
+    # P0-2：接口级故障放行——最后一次尝试是 interface_fault（鉴权/超时/网络）且无客观层
+    # 致命缺陷 → 资产已被 fail-open 写入，不算「error/不达标」，单独一档 fault_open。
+    fault_open = bool(last.get("interface_fault")) and not passed_rec and \
+        not (last.get("critical_issues") or [])
+    if fault_open:
+        status = "fault_open"
+        blocked = False
+    else:
+        status = "passed" if passed_rec else ("error" if last.get("error") else "failed")
+        blocked = status in ("failed", "error")
     crit = list((passed_rec or last).get("critical_issues") or [])
     # ★ 重试止损（_qc_retry_hopeless）：未通过且已提前停止重试时，把原因写进 label，
     #   否则用户只看到「质检不达标」，不知道系统其实已经主动止损（没在继续烧 GPU）。
     retry_stopped = bool((last or {}).get("retry_stopped")) and not passed_rec
-    _label = {"passed": "质检达标", "failed": "质检不达标", "error": "质检调用异常"}.get(status, status)
+    _label = {"passed": "质检达标", "failed": "质检不达标", "error": "质检调用异常",
+              "fault_open": "质检接口故障·已放行"}.get(status, status)
     if retry_stopped:
         _label = "质检不达标（已停止重试：连续两次缺陷完全相同）"
     return {
         "enabled": True,
         "status": status,
         "label": _label,
+        "fault_open": fault_open,
         "retry_stopped": retry_stopped,
         "retry_stopped_detail": (last or {}).get("retry_stopped_features") or "",
         "passed": bool(passed_rec),
         "blocked": blocked,
         "entry_blocked": blocked,
-        "asset_written": not blocked,
+        "asset_written": (not blocked),
         "critical_issues": crit,
         "score": (passed_rec or last).get("score"),
         "reason": (passed_rec or last).get("reason") or (last.get("error") or ""),

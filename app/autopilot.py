@@ -967,10 +967,32 @@ def ready(plan: dict = None) -> dict:
         qc_vid = A.qc_client.video_qc_ready(cfg)
     except Exception:  # noqa: BLE001
         qc_img = qc_vid = False
-    checks.append({"key": "qc", "label": "AI 质检（图片/视频）",
-                   "ok": bool(qc_img and qc_vid),
-                   "hint": "" if (qc_img and qc_vid) else
-                           "质检未开启时产物将不做 AI 判定，建议在「AI 设置 → 质检」开启"})
+    # P1-1：接口「配置就绪」≠「能真正调用」。key 存在但鉴权 401 / 模型不可用时，
+    # 上面仍会报全通、误导归因。这里在已配置时真实探测一次连通性（401/超时/网络
+    # 都会失败），并把「401 / key 未配置」显式写进 hint，避免总控再猜错方向。
+    qc_probe_hint = ""
+    if qc_img or qc_vid:
+        try:
+            probe = A.qc_client.test_vision(A.qc_client.resolve_endpoint(cfg), timeout=20)
+            if not probe.get("success"):
+                err = str(probe.get("error") or "")
+                if "401" in err or "无效" in err or "令牌" in err or "unauthorized" in err.lower():
+                    qc_probe_hint = ("质检接口鉴权失败（401 / key 无效或未配置），"
+                                     "产物将被 fail-open 放行但不会做 AI 判定。"
+                                     "请到「AI 设置 → 质检」配置有效的 api_key。")
+                else:
+                    qc_probe_hint = ("质检接口连通性探测失败：%s。"
+                                     "生成期间质检将 fail-open 放行资产（不做内容判定）。" % err[:120])
+            elif probe.get("uncertain"):
+                qc_probe_hint = ("质检接口可达但本次未确认视觉能力（正文为空，可能被思考吃掉额度），"
+                                 "建议提高质检模块 max_tokens ≥1024 后重测。")
+        except Exception as pe:  # noqa: BLE001
+            qc_probe_hint = "质检接口探测异常：%s" % pe
+    qc_ok = bool(qc_img and qc_vid) and not qc_probe_hint
+    qc_hint = qc_probe_hint if qc_probe_hint else (
+        "" if (qc_img and qc_vid) else "质检未开启时产物将不做 AI 判定，建议在「AI 设置 → 质检」开启")
+    checks.append({"key": "qc", "label": "AI 质检（图片/视频）", "ok": qc_ok,
+                   "hint": qc_hint, "qc_probe": "fail" if qc_probe_hint else "ok"})
     try:
         env = A.mix_ffmpeg_check()
         ff = bool(env.get("available"))

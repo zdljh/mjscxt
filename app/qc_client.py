@@ -1725,9 +1725,13 @@ def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
         verdict = _run_vision(ep, prompt, image_paths, cfg)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"图片质检调用失败：{e}")
+        # P0-2：显式标注「接口级故障」——调用根本没拿到模型判定（鉴权 401/403/404、
+        # 超时、网络抖动等），**不是**「图片内容不合格」。上层闸门据此 fail-open
+        # （放行已出图资产 + 响亮告警），而不是把 ComfyUI 已出好的图按内容不合格丢弃。
         return {"ok": False, "skipped": False, "error": str(e),
                 "api_attempts": getattr(e, "attempts", 1),
-                "retryable": getattr(e, "retryable", None)}
+                "retryable": getattr(e, "retryable", None),
+                "interface_fault": True}
     verdict = _apply_style_gate(verdict, style_norm)
     # 把「带了几张设定图」透出来，便于前端/体检确认该能力真的生效（而不是静默没带）
     verdict["ref_images_used"] = len(ref_list)
@@ -2217,9 +2221,12 @@ def check_video(video_path: str, shot_desc: str = "", cfg: dict = None,
     except Exception as e:  # noqa: BLE001
         logger.warning(f"视频质检调用失败：{e}")
         # AI 层失败也要透出客观层致命缺陷（不能让视频质检因 AI 不可用就漏掉无音轨/时长问题）
+        # P0-2：interface_fault=True 表示接口级故障（鉴权/超时/网络），非「视频内容不合格」。
+        # 客观层缺陷仍照常透出（fatal 会阻断），但 AI 层故障本身不丢弃已渲染的成片。
         return {"ok": False, "skipped": False, "error": str(e),
                 "api_attempts": getattr(e, "attempts", 1),
                 "retryable": getattr(e, "retryable", None),
+                "interface_fault": True,
                 "frames": fr["frames"], "duration": fr["duration"],
                 "frame_meta": fr.get("frame_meta") or [],
                 "timestamps": fr.get("timestamps") or [],
