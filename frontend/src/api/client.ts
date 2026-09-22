@@ -208,10 +208,29 @@ export const chatApi = {
       '/ai/chat',
       { method: 'POST', body: JSON.stringify({ message, project_name: project }) }
     ),
-  history: (project?: string) =>
-    request<{ messages: Array<{ role: string; content: string; timestamp: string }> }>(
+  /** 读取项目历史对话。
+   *  后端 /ai/chat/history 实际返回 { success, state: { messages } }（state 里还有 draft/settings/fields，
+   *  前端只用 messages）。旧实现按顶层 { messages } 取，d.messages 恒为 undefined → 重进项目历史永远为空，
+   *  这里归一化回 { success, messages }，并把持久化消息的 `time` 字段对齐到前端渲染用的 `timestamp`。 */
+  history: async (project?: string) => {
+    const d = await request<{
+      success: boolean;
+      state?: {
+        messages?: Array<{ role: string; content: string; time?: string; timestamp?: string; msg_id?: string }>;
+      };
+    }>(
       `/ai/chat/history${project ? `?project=${encodeURIComponent(project)}` : ''}`
-    ),
+    );
+    const raw = d.state?.messages || [];
+    return {
+      success: d.success,
+      messages: raw.map((m) => ({
+        role: m.role,
+        content: m.content,
+        timestamp: m.time || m.timestamp || '',
+      })),
+    };
+  },
   clearHistory: (project?: string) =>
     request<void>('/ai/chat/clear', {
       method: 'POST',

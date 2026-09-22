@@ -80,12 +80,19 @@ def _snapshot_bak(path: str) -> None:
         # 活文件已不可解析 → 不覆盖既有 .bak。这是**预期分支**（不是故障），
         # 但必须留痕：否则「为什么 .bak 一直停在旧版本」将无法追查。
         # D-09 口径：清理/旁路类失败一律 logger.debug，不静默吞。
+        # 级别说明（C4-2）：**本分支是预期分支**（活文件本就不可解析，不该把坏内容盖到
+        # 好版本上）故用 debug；下方「.bak 写失败」属可恢复性降级，故用 warning ——
+        # 两处级别不同是有意为之，不是遗漏。
         logger.debug("跳过 .bak 快照（活文件不可解析）：%s: %s", type(e).__name__, e)
         return
     try:
         shutil.copy2(path, last_good_bak(path))
     except OSError as e:
-        logger.debug("写 .bak 快照失败（忽略，损坏时退化为无法恢复）：%s", e)
+        # C4-2（2026-09-22 复验）：级别对齐 project_store._snapshot_bak
+        # （app/project_store.py:139 用 logger.warning）。.bak 快照是**可恢复性**保障，
+        # 写失败意味着下次损坏无法自愈；生产 root 级别是 WARNING，用 debug 会完全不可见；
+        # 且这不是逐帧热路径（仅快照失败时触发）。
+        logger.warning("写 .bak 快照失败（忽略，损坏时退化为无法恢复）：%s", e)
 
 
 def _restore_from_bak(path: str):

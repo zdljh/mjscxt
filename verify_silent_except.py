@@ -284,6 +284,53 @@ check("4.2 新增日志体的 except 均已绑定异常对象（日志能带出�
       not loose, f"{loose[:3]}")
 
 # ============================================================
+# 5. logger 方法名必须真实存在于 logging.Logger
+# ============================================================
+# 背景（2026-09-22 回归）：D-09 那批把 `except: pass` 改成打日志时，写出了
+# `logger.w(...)` / `logger.d(...)` 三处**方法名拼写错误**（正确为 warning/debug）。
+# `logging.Logger` 没有 `w`/`d`，而这三处都落在 except 处理体内 —— 一旦真的走到，
+# 就会二次抛 AttributeError，把「可降级/不阻断」的分支变成硬失败，并且把原始异常吞掉。
+# ⚠️ 这类缺陷 compileall / pyflakes **都抓不到**（它们不做属性存在性检查），
+# 只能在这里做静态断言，否则会再次回潮。
+print()
+print("=" * 72)
+print("D-09 5　logger 方法名必须真实存在于 logging.Logger（防拼写类假修复）")
+print("=" * 72)
+
+import logging as _logging  # noqa: E402
+
+# 仅允许标准级别 + 少数公开 API；出现别的名字基本可以断定是拼写错误。
+_LOGGER_ALLOWED = {
+    "debug", "info", "warning", "warn", "error", "exception",
+    "critical", "fatal", "log", "isEnabledFor", "getChild",
+    "addHandler", "removeHandler", "setLevel", "hasHandlers",
+}
+
+_bad_logger_calls = []
+_logger_call_re = re.compile(r"\blogger\.([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+for _fn in sorted(f for f in os.listdir(APP_DIR) if f.endswith(".py")):
+    _src = _read(_fn)
+    for _m in _logger_call_re.finditer(_src):
+        _name = _m.group(1)
+        if _name in _LOGGER_ALLOWED:
+            continue
+        _line = _src[: _m.start()].count("\n") + 1
+        _bad_logger_calls.append(f"{_fn}:{_line} logger.{_name}()")
+
+check("5.1 全库不存在拼错的 logger 方法名（如 logger.w / logger.d）",
+      not _bad_logger_calls, f"{_bad_logger_calls[:5]}")
+
+# 白名单本身也要与真实 logging.Logger 对齐 —— 防止「白名单写错、把错名放行」。
+_missing_on_class = [n for n in sorted(_LOGGER_ALLOWED)
+                     if not hasattr(_logging.Logger, n)]
+check("5.2 白名单里的每个方法名都真实存在于 logging.Logger",
+      not _missing_on_class, f"{_missing_on_class}")
+
+# 反向自检：确保守卫真的能抓到错名（拿一个必然不存在的名字试）
+check("5.3 守卫自检：logger.w( 能被判定为错名（防守卫本身失效）",
+      "w" not in _LOGGER_ALLOWED and not hasattr(_logging.Logger, "w"))
+
+# ============================================================
 print()
 print("=" * 72)
 total = _PASSES[0] + len(_FAILS)

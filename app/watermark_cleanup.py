@@ -17,6 +17,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 from typing import Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
@@ -110,7 +111,12 @@ def clean_image(path: str, region: Sequence[float] = DEFAULT_REGION,
         rec["region"] = box
         rec["backup"] = _backup(path, backup_dir)
         # G8：临时文件点前缀命名，且 finally 统一清理（成功则置 None 跳过）
-        tmp = path + ".clean.png"
+        # N4（2026-09-22 复验）：临时名必须**唯一** —— 固定名在同一 path 被并发清洗时，
+        # 两个 ffmpeg 会写同一个临时文件（互踩 → 产出损坏）。后缀仍保持 .png：ffmpeg
+        # 靠扩展名选图像编码器。
+        _base = os.path.splitext(path)[0]
+        tmp = (f"{_base}.{os.getpid()}.{threading.get_ident()}."
+               f"{os.urandom(3).hex()}.clean.png")
         cmd = [FFMPEG_BIN, "-y", "-v", "error", "-i", path, "-vf", filt,
                "-frames:v", "1", tmp]
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
@@ -152,7 +158,12 @@ def clean_video(path: str, region: Sequence[float] = DEFAULT_REGION,
         # G8：临时文件用 .clean.tmp（非 .mp4 后缀），避免被 *.mp4 glob 命中当"分片"；
         # 成功 replace 后置 None，失败/异常由 finally 清理。
         # ⚠️ 扩展名不再是 .mp4，必须显式 -f mp4 指定容器（ffmpeg 否则靠扩展名推断会失败）
-        tmp = os.path.splitext(path)[0] + ".clean.tmp"
+        # N4（2026-09-22 复验）：临时名必须**唯一** —— 固定名在同一 path 被并发清洗时，
+        # 两个 ffmpeg 会写同一个临时文件（互踩 → 产出损坏）。后缀保持 .tmp（非 .mp4），
+        # 避免被 *.mp4 glob 当成"分片"命中；容器由上面的 -f mp4 显式指定，不受后缀影响。
+        _base = os.path.splitext(path)[0]
+        tmp = (f"{_base}.{os.getpid()}.{threading.get_ident()}."
+               f"{os.urandom(3).hex()}.clean.tmp")
         # G6：probe_has_audio 改三态。None（探测失败）时**绝不改写原文件**——
         # 旧写法把 None 当 False 会加 -an 把原音轨丢掉，再补一条静音轨，
         # 成片"看起来有音轨"实为全静音（历史事故同型）。

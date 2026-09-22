@@ -68,7 +68,7 @@ import audio_qc
 import plugin_registry
 import project_store
 import shot_key
-from fs_atomic import atomic_write_json
+from fs_atomic import atomic_write_json, read_json_strict
 import providers
 import prompt_qc
 import qc_client
@@ -953,6 +953,28 @@ def favicon_svg():
 
 # ===== 状态 =====
 
+def _task_queue_status() -> dict:
+    """TaskQueue 状态 + 「未接线」显式标注（N2，2026-09-22 复验）。
+
+    ``TaskQueue.submit`` 在本项目**没有生产调用方**：单 GPU 并发由 ``gpu_task_gate``
+    的进程级 Semaphore 承担（见 ``gpu_task_gate.py`` 模块头「不做什么」）。D-07 给
+    submit 加的背压/去重是该模块**自身契约**的加固，供嵌入使用与测试。这里显式标注
+    ``wired=False``，避免 ``/api/status`` 的 ``task_queue`` 字段让调用方误以为它是
+    生产并发闸门（即「已修但不可达」的假象）。
+
+    既有字段（running/concurrency/queued/max_queue/pending/current/current_elapsed_sec）
+    原样保留，``wired`` / ``note`` 均为**新增**字段。
+    """
+    try:
+        st = dict(task_queue.status())
+    except Exception as e:  # noqa: BLE001  可观测性接口自身绝不能把 /api/status 打挂
+        return {"wired": False, "error": f"{type(e).__name__}: {e}"}
+    st["wired"] = False
+    st["note"] = ("本进程 GPU 并发由 gpu_gate 承担；TaskQueue.submit 未接线"
+                  "（D-07 加固属模块自身契约，非生产路径）")
+    return st
+
+
 @app.route('/api/status')
 def api_status():
     comfyui_status = comfyui_client.get_status()
@@ -969,7 +991,7 @@ def api_status():
                 len(files) for _, _, files in os.walk(SCENES_DIR)
             ) if os.path.exists(SCENES_DIR) else 0,
         },
-        "task_queue": task_queue.status(),
+        "task_queue": _task_queue_status(),
         "gpu_gate": gpu_task_gate.status(),
         "interrupted_tasks": _interrupted,
     })
@@ -993,7 +1015,7 @@ def api_tasks_list():
     except Exception as e:  # noqa: BLE001
         return jsonify({"success": False, "error": f"任务查询失败：{e}"}), 500
     return jsonify({"success": True, "count": len(items), "items": items,
-                    "queue": task_queue.status()})
+                    "queue": _task_queue_status()})
 
 
 @app.route('/api/tasks/<task_id>', methods=['GET'])
@@ -1932,8 +1954,25 @@ def api_storyboard_retry_shot():
                         "verdict": verdict, "scratch": scratch}), 200
     shutil.copy2(scratch, dst)
     # 同步更新 manifest 中该镜条目
-    _update_storyboard_manifest_shot(project, shot_id, seq, dst, prompt, refs, verdict, gate,
-                                     episode_no=_ep)
+    # B-2 收口（2026-09-22 复验）：manifest 损坏时 read_json_strict 会 fail-loud 抛错，
+    # 但此刻图片**已经**重跑成功并写进正式目录（上一行的 copy2）。若让异常直接冒泡，
+    # 会把「部分成功」整镜报成失败，前端还只能拿到裸 HTML 500（全库仅注册了
+    # BadRequest 处理器，无 JSON 500 处理器）。
+    # 这里用窄 try 做**响亮降级**（不是 fail-open）：
+    #   · 记 error 级日志（数据层异常不静默）
+    #   · 在响应里显式带 manifest_updated=False + 原因，调用方可感知
+    #   · **绝不**把 manifest 重建为 {} —— 那才会清空其他镜头的记录
+    _manifest_updated = True
+    _manifest_err = ""
+    try:
+        _update_storyboard_manifest_shot(project, shot_id, seq, dst, prompt, refs, verdict, gate,
+                                         episode_no=_ep)
+    except Exception as _m_err:  # noqa: BLE001
+        _manifest_updated = False
+        _manifest_err = f"{type(_m_err).__name__}: {_m_err}"
+        app.logger.error(
+            "单镜重跑：图片已写入正式目录，但 manifest 同步失败（不影响本次出图；"
+            "project=%s shot=%s dst=%s）：%s", project, shot_id, dst, _manifest_err)
     # 提示词预检结论也落质检历史（kind=prompt），便于回溯「这一镜出图前提示词是什么状态」
     if not _pf.get("skipped"):
         try:
@@ -1951,6 +1990,10 @@ def api_storyboard_retry_shot():
                     "path": dst,
                     "url": f"/api/storyboards/file/{project}/{_sub}shot_{seq:02d}.png",
                     "prompt": prompt, "ref_count": len(refs),
+                    # B-2：本次出图是否已同步进 manifest。False 表示图已出好、但清单未更新
+                    # （manifest 损坏等），调用方可据此提示用户「重跑成功、清单待修」。
+                    "manifest_updated": _manifest_updated,
+                    "manifest_error": _manifest_err,
                     "prompt_qc": _pf.get("verdict"), "prompt_qc_repairs": _pf.get("repairs") or [],
                     "qc": verdict})
 
@@ -1968,11 +2011,13 @@ def _update_storyboard_manifest_shot(project: str, shot_id, seq: int, dst: str,
     _url_prefix = f"{project}/{_sub}/" if _sub else f"{project}/"
     manifest = {}
     if os.path.isfile(mpath):
-        try:
-            with open(mpath, "r", encoding="utf-8") as f:
-                manifest = json.load(f) or {}
-        except Exception:  # noqa: BLE001
-            manifest = {}
+        # B-2（2026-09-22 复核补漏）：本路径与 _storyboard_worker（app.py 的
+        # atomic_write_json 落盘）写的是**同一个** storyboard_manifest.json。
+        # 旧实现用 `except: manifest = {}` 的 fail-open 读 + 裸 open(w) 非原子写，
+        # 与批量 worker 并发时会出现「读到半截 → 用残缺 manifest 覆盖回去 → 其他
+        # 镜头记录整批丢失」。这里改为与 D-03/D-04 同口径：严格读（损坏→.bak 恢复或
+        # fail-loud）+ 原子写。单镜重跑是用户显式操作，manifest 损坏时报错远好过静默清空。
+        manifest = read_json_strict(mpath, {})
     items = [s for s in (manifest.get("shots") or []) if isinstance(s, dict)]
     target = next((s for s in items if _shot_num_key(s.get("shot_id")) == _shot_num_key(shot_id)), None)
     entry = {
@@ -1999,8 +2044,9 @@ def _update_storyboard_manifest_shot(project: str, shot_id, seq: int, dst: str,
     manifest["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         os.makedirs(os.path.dirname(mpath), exist_ok=True)
-        with open(mpath, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, ensure_ascii=False, indent=2)
+        # B-2：与 worker 侧统一走 fs_atomic（唯一临时名 + fsync + .bak 快照 + replace 重试），
+        # 避免单镜重跑与批量分镜 worker 并发写同一 manifest 互相截断。
+        atomic_write_json(mpath, manifest)
     except Exception as e:  # noqa: BLE001
         app.logger.warning(f"分镜 manifest 更新失败：{e}")
 
@@ -3077,20 +3123,25 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
     # 旧 manifest：断点续跑时给「被跳过的镜头」回填上一轮的质检/提示词信息，避免信息丢失
     _prev_by_key = {}
     _prev_manifest = os.path.join(out_dir, "storyboard_manifest.json")
-    if os.path.isfile(_prev_manifest):
-        try:
-            with open(_prev_manifest, "r", encoding="utf-8") as _f:
-                for _it in (json.load(_f).get("shots") or []):
-                    if not isinstance(_it, dict):
-                        continue
-                    _sid = _it.get("shot_id")
-                    if _sid is not None:
-                        _prev_by_key[str(_sid)] = _it
-                    _sq = _shot_seq(_sid, 0)
-                    if _sq:
-                        _prev_by_key[f"shot_{_sq:02d}"] = _it
-        except Exception as _e:  # noqa: BLE001
-            app.logger.warning(f"读取旧分镜清单失败（忽略，不影响本次生成）：{_e}")
+    # C4-1（2026-09-22 复验收口）：读取口径与 D-03/D-04 统一 —— 交给 read_json_strict
+    # 自己负责三态（缺失→{}；活文件缺失但有 .bak→自动恢复；损坏→.bak 或 fail-loud），
+    # 故不再用 os.path.isfile 预判。口径与 _update_storyboard_manifest_shot（本文件
+    # L1990-1998 的 B-2 收口）一致；差异在于**本处是只读视图**：只给被跳过的镜头回填
+    # 上一轮的质检/提示词信息、从不写回，所以损坏时**响亮降级**（error 日志 + 不回填），
+    # 而不是 fail-loud 把整批分镜打挂。
+    try:
+        for _it in (read_json_strict(_prev_manifest, {}).get("shots") or []):
+            if not isinstance(_it, dict):
+                continue
+            _sid = _it.get("shot_id")
+            if _sid is not None:
+                _prev_by_key[str(_sid)] = _it
+            _sq = _shot_seq(_sid, 0)
+            if _sq:
+                _prev_by_key[f"shot_{_sq:02d}"] = _it
+    except Exception as _e:  # noqa: BLE001
+        app.logger.error("旧分镜清单 %s 不可读（%s: %s）：本次不回填被跳过镜头的信息，不影响生成",
+                         _prev_manifest, type(_e).__name__, _e)
     app.logger.info("[分镜断点续跑] overwrite=%s；待处理 %d 镜（已存在者将跳过）",
                     overwrite, len(shots))
     # G13（P1）：质检配置 worker 级读一次，本批所有镜头共用（对齐资产 worker 2302）。
