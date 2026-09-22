@@ -68,7 +68,7 @@ import audio_qc
 import plugin_registry
 import project_store
 import shot_key
-from fs_atomic import atomic_write_json
+from fs_atomic import atomic_write_json, read_json_strict
 import providers
 import prompt_qc
 import qc_client
@@ -1968,11 +1968,13 @@ def _update_storyboard_manifest_shot(project: str, shot_id, seq: int, dst: str,
     _url_prefix = f"{project}/{_sub}/" if _sub else f"{project}/"
     manifest = {}
     if os.path.isfile(mpath):
-        try:
-            with open(mpath, "r", encoding="utf-8") as f:
-                manifest = json.load(f) or {}
-        except Exception:  # noqa: BLE001
-            manifest = {}
+        # B-2（2026-09-22 复核补漏）：本路径与 _storyboard_worker（app.py 的
+        # atomic_write_json 落盘）写的是**同一个** storyboard_manifest.json。
+        # 旧实现用 `except: manifest = {}` 的 fail-open 读 + 裸 open(w) 非原子写，
+        # 与批量 worker 并发时会出现「读到半截 → 用残缺 manifest 覆盖回去 → 其他
+        # 镜头记录整批丢失」。这里改为与 D-03/D-04 同口径：严格读（损坏→.bak 恢复或
+        # fail-loud）+ 原子写。单镜重跑是用户显式操作，manifest 损坏时报错远好过静默清空。
+        manifest = read_json_strict(mpath, {})
     items = [s for s in (manifest.get("shots") or []) if isinstance(s, dict)]
     target = next((s for s in items if _shot_num_key(s.get("shot_id")) == _shot_num_key(shot_id)), None)
     entry = {
@@ -1999,8 +2001,9 @@ def _update_storyboard_manifest_shot(project: str, shot_id, seq: int, dst: str,
     manifest["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         os.makedirs(os.path.dirname(mpath), exist_ok=True)
-        with open(mpath, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, ensure_ascii=False, indent=2)
+        # B-2：与 worker 侧统一走 fs_atomic（唯一临时名 + fsync + .bak 快照 + replace 重试），
+        # 避免单镜重跑与批量分镜 worker 并发写同一 manifest 互相截断。
+        atomic_write_json(mpath, manifest)
     except Exception as e:  # noqa: BLE001
         app.logger.warning(f"分镜 manifest 更新失败：{e}")
 
