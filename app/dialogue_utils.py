@@ -11,8 +11,11 @@
 
 本模块不依赖项目内其他模块，可被任意链路安全导入。
 """
+import logging
 import re
 from typing import Iterable, List, Optional
+
+logger = logging.getLogger(__name__)
 
 # 自称句式标记（用于没有显式说话人时的名字片段匹配）
 SELF_REF_MARKERS = (
@@ -195,7 +198,14 @@ def audit_script(script: Optional[dict]) -> dict:
       - overlong_speech_shots：台词量超出单镜时长上限（配音会溢出到后面几镜）
       - warnings：可直接展示给用户的中文提示
 
-    纯函数、无副作用、不依赖项目内其它模块。
+    除了一条 ``narration`` 废弃告警日志外无副作用：本函数是纯逻辑（不依赖项目内其它模块、
+    不读写文件、不改动入参），唯一的外部可观测行为是——当统计到旧剧本残留 ``narration`` 时
+    打**一条** ``logger.warning``（一次性，不是每镜一条）。之所以允许这条极小副作用：消费方
+    （app.py 等）只把返回值展示给用户，日志里本来完全看不到痕迹，而「旁白通道已关闭」这件事
+    需要在服务端日志里可诊断；取舍是「极小副作用」换「遗留字段可见」，其余仍保持纯函数语义。
+
+    调用方契约**不变**：返回值结构（ok / stats / warnings / problem_shots）、计数语义、
+    warnings 文案与加日志前逐项一致 —— 新增的只是日志，不改任何返回值。
     """
     script = script if isinstance(script, dict) else {}
     shots = [s for s in (script.get("shots") or []) if isinstance(s, dict)]
@@ -273,6 +283,15 @@ def audit_script(script: Optional[dict]) -> dict:
             f"有 {narration_lines} 个镜头残留了「旁白」文本（{', '.join(legacy_narration[:8])}"
             f"{' 等' if narration_lines > 8 else ''}）：本系统已不再产出旁白，"
             f"这批剧本是改造前生成的，成片会带画外音解说、且旁白时长常远超画面。建议重新生成剧本。")
+        # D-11b：遗留 narration 的**一次性**服务端留痕（只在此处打一条，不按镜循环刷屏）。
+        # 返回值已能携带 warnings，但消费者只展示给前端；服务端日志此前毫无痕迹，
+        # 导致「仍产出 narration 的项目」在日志里不可见。用惰性 %s（D-09 统一日志风格）。
+        logger.warning(
+            "检测到旧剧本残留「旁白」字段（%d 个镜头：%s%s）：该字段为 2026-09-19 关闭旁白"
+            "通道之前的遗留产物，本系统剧本阶段已不再产出旁白、配音链路不会朗读、成片也不会"
+            "带画外音；建议重跑剧本生成以清掉这批 narration。",
+            narration_lines, ", ".join(legacy_narration[:8]),
+            " 等" if narration_lines > 8 else "")
     if overlong:
         warnings.append(
             f"有 {len(overlong)} 个镜头的台词量超出单镜时长上限（{', '.join(overlong[:8])}"

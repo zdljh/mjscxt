@@ -50,6 +50,25 @@ SHOT_FIELDS_DEFAULT = {
     "items_in_shot": [],
 }
 
+#: **已废弃分镜字段登记表**（结构化，替代注释里的君子协定）。
+#: 键 = 字段名；值中的 ``deprecated=True`` 供代码/回归脚本做机器可判定的守卫。
+#: 口径：这些字段**不得再写入剧本**，``_norm_shots`` 的字段白名单在标准化时会显式丢弃
+#: 模型越界输出的对应字段并留痕；读取侧（coverage / h3_prompt_kit / tts_client）仅为兼容
+#: 旧剧本做 legacy 记账，是唯一的合法消费方。
+DEPRECATED_SHOT_FIELDS = {
+    "narration": {
+        "deprecated": True,
+        "since": "2026-09-19",
+        "reason": (
+            "旁白通道已关闭（2026-09-19 产品决策）：剧本阶段不写、配音链路不念、成片不产出旁白。"
+            "历史缺陷：narration 曾被当成「心理活动 + 背景补叙 + 环境描写」的公共出口，"
+            "实测 ep04 旁白 2231 字 ≈ 496 秒铺在 100 秒画面上（4.93x 溢出），尾部被成片 -shortest "
+            "静默截断。现在 _norm_shots 不再透传模型越界输出的 narration，"
+            "保证「成片无旁白」是硬不变量；旧剧本残留字段由读取侧按需兼容。"
+        ),
+    },
+}
+
 SYSTEM_BIBLE = ("你是资深漫剧编剧与 AI 绘画提示词工程师，精通把长篇小说改编成可拍摄的漫剧分镜脚本，"
                 "并输出严格合法的 JSON。严禁在 content 中输出任何思考过程、英文推理、分析或解释文字，"
                 "只允许输出一个可被 json.loads 直接解析的 JSON 对象。")
@@ -882,9 +901,16 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
     shots = []
     sid = start_id
     dropped_empty = []
+    dropped_deprecated = []   # 已废弃字段（DEPRECATED_SHOT_FIELDS）被模型越界输出的次数
     for s in raw_shots:
         if not isinstance(s, dict):
             continue
+        # 已废弃字段可见化（见 DEPRECATED_SHOT_FIELDS）：模型若仍吐出 narration 等已废弃字段，
+        # 这里显式记账并在本函数末尾打一条 warning —— 让「重新写旁白」被**可见地拒绝/告警**，
+        # 而不是靠注释里的君子协定蒙混过关。字段本身仍照旧丢弃，不改变任何业务行为。
+        for _dep_field in DEPRECATED_SHOT_FIELDS:
+            if str(s.get(_dep_field) or "").strip():
+                dropped_deprecated.append(_dep_field)
         # 空壳镜头（画面描述 / 补充细节 / 台词 三者皆空）**必须在这里丢掉**。
         # 历史缺陷：模型偶尔会吐出一条只有 camera/location/emotion 的幽灵镜头
         #（实测《蛊真人》ep02 shot_02：description/visual_detail/dialogue/audio_cues 全空），
@@ -933,13 +959,15 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
             # h3_prompt_kit 等下游取用。
             "visual_detail": (str(s.get("visual_detail") or "").strip()[:400]
                               or _overflow_detail(s.get("description"), 200)),
-            # narration：**已废弃字段，此处显式丢弃**。
+            # narration：**已废弃字段（登记于 DEPRECATED_SHOT_FIELDS），此处显式丢弃**；
+            # 模型若越界输出会在本函数末尾打一条 warning（可见地拒绝，不是注释君子协定）。
             # 历史缺陷：narration 被当成「心理活动 + 背景补叙 + 环境描写」的公共出口，
             # 再叠加当时的「每镜必须有人声」约束，导致原著所有叙述性文字都变成画外音解说
             #（实测 ep04 旁白 2231 字 ≈ 496 秒，铺在 100 秒画面上 → 4.93x 溢出，尾部被
             # 成片 -shortest 静默截断）。现在剧本阶段不再产出旁白，这里也不再透传模型的
             # 越界输出，保证「成片无旁白」是硬不变量而不是提示词君子协定。
-            # 旧剧本文件里残留的 narration 由读取侧（coverage / h3_prompt_kit）按需兼容。
+            # 旧剧本文件里残留的 narration 由读取侧（coverage / h3_prompt_kit / tts_client）
+            # 按需兼容，这是 DEPRECATED_SHOT_FIELDS 里 narration 唯一的合法消费方。
             # 台词：结构化 [{"speaker","text"}]（分镜阶段直接写明说话人，配音链路直接读取）
             "dialogue": _dlg_lines(s.get("dialogue"), chars, chars),
             "emotion": str(s.get("emotion") or "平静").strip()[:20],
@@ -1026,6 +1054,12 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
     if dropped_empty:
         logger.warning("已丢弃 %d 条空壳镜头（无画面描述/细节/台词，出不了图且会卡死整集）：%s",
                        len(dropped_empty), dropped_empty[:12])
+    if dropped_deprecated:
+        logger.warning(
+            "分镜标准化丢弃了模型越界输出的已废弃字段 %s（共 %d 处，见 DEPRECATED_SHOT_FIELDS）："
+            "旁白通道已关闭，剧本阶段不再产出 narration；如有叙述性内容，请改写为角色自语台词"
+            "（dialogue）或画面描述（description）。",
+            "、".join(sorted(set(dropped_deprecated))), len(dropped_deprecated))
     # 分配集数
     n = len(shots)
     if n:
