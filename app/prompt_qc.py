@@ -821,11 +821,23 @@ def preflight(kind: str, prompt: str, ctx: dict = None, style: str = "",
     #    空就是空，交给调用方重建（见 rebuild_hint）。
     if mode in ("repair", "block") and text:
         final, repairs = repair_prompt(kind, text, ctx=ctx, style=style)
+    # N1（2026-09-22 复验）：自愈后的提示词可能重新超过服务端上限，使 D-06 的「≤6000」
+    # 不绝对成立。6000 是**服务端硬上限**，属安全闸门而非自愈策略，故在**启用预检**的
+    # 路径上无条件钳制（warn 模式的语义是「不因质检缺陷阻断」，不是「允许超出上限」）；
+    # 预检关闭时上面已 early-return 原样透传，保持「关闭时不改写」契约不变。
+    _clamped = h3_prompt_kit.clamp_prompt(final)
+    _prompt_clamped = _clamped != final
+    if _prompt_clamped:
+        repairs.append(f"提示词超长已截断（{len(final)} > "
+                       f"{h3_prompt_kit.MAX_PROMPT_CHARS} 字符）")
+        final = _clamped
     repairs = list(dict.fromkeys(repairs))   # 同类修复（如多次去空词）只报一次
     verdict = check_prompt(kind, final, ctx=ctx, style=style, cfg=cfg,
                            ref_count=ref_count, expect_refs=expect_refs)
     # 自愈的成效写进 verdict，便于前端/报告展示「修了什么」
     verdict["repairs"] = repairs
+    # N1：暴露「本次是否因超长被钳制」，便于观测与测试（复检看到的是钳制后的文本）
+    verdict["prompt_clamped"] = _prompt_clamped
     verdict["before_issues"] = list(before.get("issues") or [])
     verdict["before_score"] = before.get("score")
     verdict["mode"] = mode
