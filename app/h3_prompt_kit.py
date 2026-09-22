@@ -107,6 +107,97 @@ def clamp_prompt(text: str, label: str = "prompt_h3") -> str:
     return _clamp(str(text or ""), MAX_PROMPT_CHARS, label or "prompt_h3")
 
 
+_SECTION_RE_CACHE: Optional[re.Pattern] = None
+
+
+def _SECTION_RE() -> re.Pattern:
+    """段名标签行正则（模块级缓存）：``^name[:：][ \\t]*$``。
+
+    段名标签**独占一行**（``name:`` 后到行尾只有空白），这是 build_ref2va /
+    build_base 的固定格式；用整行匹配避免 body 里的普通文本被误认成段名。
+    """
+    global _SECTION_RE_CACHE
+    if _SECTION_RE_CACHE is None:
+        names = "|".join(re.escape(n) for n in REF_SECTIONS + BASE_SECTIONS)
+        _SECTION_RE_CACHE = re.compile(rf"(?m)^({names})[:：][ \t]*$")
+    return _SECTION_RE_CACHE
+
+
+def _section_spans(text: str):
+    """把 H3 文本切成 ``[(段名, 标签(含换行), body起点, 下段起点), ...]``。
+
+    识别不出 ≥2 个段标签（非结构化文本 / 结构残缺）时返回 ``None``，调用方退化。
+    """
+    ms = list(_SECTION_RE().finditer(text))
+    if len(ms) < 2:
+        return None
+    spans = []
+    for i, m in enumerate(ms):
+        body_start = m.end() + 1 if (m.end() < len(text) and text[m.end()] == "\n") else m.end()
+        next_start = ms[i + 1].start() if i + 1 < len(ms) else len(text)
+        spans.append((m.group(1), text[m.start():body_start], body_start, next_start))
+    return spans
+
+
+def _compress_structured(text: str, limit: int, label: str):
+    """按段压缩：从 body 最长的段开始逐段压到恰好 ≤ limit，保段名与末尾段。
+
+    只压缩各段**正文**（``body``），段名标签行原样保留 —— 这样 :func:`validate`
+    仍能识别出全部段名（含末尾的 ``overall_soundscape`` / ``non_diegetic_music``），
+    不会因截断把一条结构完整的提示词判成「缺段」。压缩后仍超限则返回 ``None``
+    由调用方退化到旧的末尾截断。
+    """
+    spans = _section_spans(text)
+    if not spans:
+        return None
+    segs = []
+    for (name, lab, body_start, next_start) in spans:
+        raw = text[body_start:next_start]
+        body = raw.rstrip("\n")
+        sep = raw[len(body):]
+        segs.append([name, lab, body, sep])
+    overflow = sum(len(l) + len(b) + len(s) for _, l, b, s in segs) - limit
+    if overflow <= 0:
+        return None
+    order = sorted(range(len(segs)), key=lambda i: len(segs[i][2]), reverse=True)
+    for i in order:
+        if overflow <= 0:
+            break
+        name, lab, body, sep = segs[i]
+        if not body:
+            continue
+        target = max(0, len(body) - overflow)
+        if target == 0:
+            new_b = ""
+        else:
+            new_b = _clamp(body, target, f"{label}.{name}")
+        overflow -= len(body) - len(new_b)
+        segs[i][2] = new_b
+    if overflow > 0:
+        return None
+    return "".join(l + b + s for _, l, b, s in segs)
+
+
+def clamp_h3_prompt(text: str, limit: int = MAX_PROMPT_CHARS, label: str = "h3") -> str:
+    """结构感知截断（P-2，2026-09-22）
+
+    普通 :func:`clamp_prompt` 从**末尾**截断；而 H3 规范把 ``overall_soundscape`` /
+    ``non_diegetic_music`` 放在**末尾** —— 一旦超长，末尾截断会连带砍掉这两段，
+    :func:`validate` 立刻报「结构不合规（缺段）」，把一条本来完整的提示词判废。
+
+    这里改为：超长时优先压缩**贡献超长的段**（通常是塞了超长 description 的
+    ``summary`` / ``detailed_description`` 等中段），**完整保留每个段的段名标签与
+    末尾两段**；识别不出结构、或压缩到极致仍超限时，退化到旧的末尾截断（保底，不更糟）。
+    """
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    out = _compress_structured(text, limit, label)
+    if out is not None and len(out) <= limit:
+        return out
+    return _clamp(text, limit, label)
+
+
 # --------------------------------------------------------------------------- #
 # 基础工具
 # --------------------------------------------------------------------------- #
@@ -524,13 +615,13 @@ def resolve(shot: dict, picture_defs: Sequence[Tuple[str, str]] = (),
         built = build_base(shot, "T2VA", duration=duration, style=style)
 
     if not existing:
-        return clamp_prompt(built)
+        return clamp_h3_prompt(built)
     verdict = validate(existing)
     if verdict["valid"]:
-        return clamp_prompt(existing)
+        return clamp_h3_prompt(existing)
     logger.info("prompt_h3 结构不合规（缺 %s），改用规范构建器并并入原描述",
                 ",".join(verdict["missing"]) or "未知")
-    return clamp_prompt(merge_detail(built, existing))
+    return clamp_h3_prompt(merge_detail(built, existing))
 
 
 def style_of(shot: dict, fallback: str = "") -> str:
@@ -540,7 +631,7 @@ def style_of(shot: dict, fallback: str = "") -> str:
 
 __all__ = [
     "REF_SECTIONS", "BASE_SECTIONS",
-    "MAX_PROMPT_CHARS", "MAX_DETAIL_CHARS", "clamp_prompt",
+    "MAX_PROMPT_CHARS", "MAX_DETAIL_CHARS", "clamp_prompt", "clamp_h3_prompt",
     "fmt_ts", "lang_tag", "dialogue_lines", "speaker_slots",
     "build_soundscape", "build_music", "build_summary",
     "build_detailed_description", "build_ref2va", "build_base",
