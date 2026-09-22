@@ -620,7 +620,12 @@ class QwenTTSClient:
                 logger.info("B-01 /free 守卫：本进程有其它 running GPU 任务，跳过 /free（避免卸他人模型）")
                 return
         except Exception as e:  # noqa: BLE001  守卫失败不阻断卸载主流程
-            logger.debug("B-01 /free 互斥守卫检查失败（按「无其它任务」继续）：%s", e)
+            # 级别用 warning 而非 debug：本守卫的作用正是「避免卸掉分镜/视频/关键帧等
+            # 其它任务正在使用的模型」，检查失败 = 互斥保护失效、可能误卸他人模型，
+            # 属安全类事件；且生产 root 级别为 WARNING，debug 会完全不可见。
+            # （与紧邻的「/free 请求失败」保持同级，避免出现级别倒挂。）
+            logger.warning("B-01 /free 互斥守卫检查失败（按「无其它任务」继续，"
+                           "可能误卸其它任务模型）：%s", e)
         try:
             req = urllib.request.Request(
                 f"{self.comfyui_url}/free",
