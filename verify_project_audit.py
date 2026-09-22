@@ -415,6 +415,7 @@ SIBLINGS = [
     "verify_concat_failure_logging.py",   # D-10
     "verify_comfyui_reclaim.py",          # D-11a
     "verify_narration_deprecated.py",     # D-11b
+    "verify_frontend_api_links.py",       # 前端→后端 API 链路核对（路径/方法/字段）
 ]
 _env = dict(os.environ, MJSCXT_AUTOPILOT="0")
 for _sib in SIBLINGS:
