@@ -71,6 +71,7 @@ import shot_key
 import providers
 import prompt_qc
 import qc_client
+import qc_coverage
 import style_kit
 import task_store
 import gpu_task_gate
@@ -127,6 +128,9 @@ APP_DEBUG = os.getenv("APP_DEBUG", "0").lower() in ("1", "true", "yes", "on")
 # 故在产物落盘前对固定画面区域（默认右下角比例区）做 ffmpeg delogo 插值修复。
 WATERMARK_CLEANUP_ENABLED = os.getenv("WATERMARK_CLEANUP", "1").lower() not in ("0", "false", "no", "off")
 WATERMARK_CLEANUP_BACKUP_DIR = os.path.join(QC_DIR, "_watermark_backup")
+
+# D-05（P1）整集视频质检抽帧上限：常量与纯逻辑见 app/qc_coverage.py
+# （独立零依赖模块，便于 verify_episode_qc_coverage.py 离线单测）。
 
 
 def _h3_audio_policy(path: str) -> dict:
@@ -3806,9 +3810,22 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                 _ep_qc_attempt["n"] += 1
                 fr_dir = os.path.join(QC_DIR, project_name, "frames",
                                       f"episode_full_{os.path.basename(video_path)}")
+                # D-05（P1）：按「每段中点」抽帧，取代原先「全片均布 3 帧（配置上限 6）」。
+                # 原实现下一次产出 20~44 段的整集只抽 3~6 帧，中段几十段零采样 →
+                # 崩坏镜必然漏检、整集质检形同虚设。这里把各段时长折算成全片占比传下去，
+                # 抽帧数随段数增长（>6），使每一段至少被采到一次。
+                _qc_ratios = _episode_frame_ratios(segs)
+                if _qc_ratios:
+                    app.logger.info("[整集质检] 按段抽帧：%d 段 → 请求 %d 帧（每段中点占比）",
+                                    len(segs), len(_qc_ratios))
+                else:
+                    app.logger.warning(
+                        "[整集质检] 段时长不可用（segs=%d）→ 退回配置抽帧数（可能漏检中段）",
+                        len(segs))
                 verdict = qc_client.check_video(video_path, _episode_qc_desc(shots), cfg,
                                                frames_dir=fr_dir,
                                                style=style,
+                                               frame_ratio=_qc_ratios or None,
                                                expected_duration=sum(
                                                    float(s.get("duration") or 0.0) for s in shots))
                 gate = _qc_gate(verdict)
@@ -5877,25 +5894,29 @@ def _keyframe_recall_cb(project_name: str):
     return _recall
 
 
-def _episode_qc_desc(shots: list, limit: int = 12) -> str:
-    """构造整集质检用的「镜头信息」摘要（逐镜一行，控制长度）
+def _episode_frame_ratios(segs: list, max_frames: int = None) -> list:
+    """D-05（P1）整集按段抽帧的占比列表 —— 实现见 ``qc_coverage.episode_frame_ratios``。
+
+    抽成独立零依赖模块（``app/qc_coverage.py``）以便离线单测
+    （``verify_episode_qc_coverage.py``）无需 Flask/requests 即可验证覆盖率。
+    """
+    return qc_coverage.episode_frame_ratios(segs, max_frames=max_frames)
+
+
+def _episode_qc_desc(shots: list, limit: int = qc_coverage.DEFAULT_DESC_LIMIT) -> str:
+    """构造整集质检用的「镜头信息」摘要 —— 实现见 ``qc_coverage.episode_qc_desc``。
 
     为什么不用 comfyui_client 传进来的 ``shot_desc``：整集模式下它传的是
     **所有段的 H3 提示词全文拼接**（每段都是六段式结构，几十段叠在一起），
     又长又难判读，还挤占上下文。整片质检真正需要的是「这一集有哪些镜头、
     各自什么景别和内容」，这里按镜头生成紧凑摘要。
+
+    D-05（P1）：``limit`` 由 12 提到 60 —— 原来 40 镜的整集只把前 12 镜给模型，
+    中后段镜头对模型**完全不可见**，与抽帧漏检叠加后整集质检形同虚设。
+    另：一旦真的截断，必须在串里**显式声明「其余未提供」**，让模型知道信息不完整，
+    而不是误以为整集只有 limit 个镜头。
     """
-    rows = []
-    for i, s in enumerate(shots or []):
-        if not isinstance(s, dict):
-            continue
-        if i >= limit:
-            rows.append(f"…（其余 {len(shots) - limit} 镜略）")
-            break
-        cam = str(s.get("camera") or "").strip()
-        desc = str(s.get("description") or "").strip()[:60]
-        rows.append(f"镜{s.get('shot_id', i + 1)}[{cam}] {desc}")
-    return "本集共 %d 镜：" % len(shots or []) + "；".join(rows) if rows else "（无镜头信息）"
+    return qc_coverage.episode_qc_desc(shots, limit=limit, warn=app.logger.warning)
 
 
 def _qc_shot_desc(shot: dict) -> str:

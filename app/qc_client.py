@@ -1888,12 +1888,19 @@ def video_duration(video_path: str, fallback: dict = None) -> float:
 
 
 def extract_frames(video_path: str, out_dir: str, count: int = 3,
-                   prefix: str = "frame", fallback_meta: dict = None) -> dict:
+                   prefix: str = "frame", fallback_meta: dict = None,
+                   frame_ratio: list = None) -> dict:
     """全片均匀抽帧（片头/中段/片尾），并校验每帧实际时间戳。
 
     返回 {ok, frames, frame_meta, timestamps, duration, meta, error}
       frames      : 抽帧图片路径列表（喂给多模态模型）
       frame_meta  : [{path, requested_ts, actual_ts, verified}]，actual_ts 由 ffmpeg showinfo 解析
+
+    D-05（P1）新增 ``frame_ratio``：按**占比**指定抽帧时间点（0~1 的小数，相对全片时长）。
+      整集模式（一次产出 20~44 段）必须用它按「每段中点」抽帧——只按 ``count`` 全片均布
+      3 帧时，中段几十段完全没有采样，模型拿 3 张无关帧去判整集是否崩坏 → 形同虚设。
+      传入且能读到视频时长时**不受 count 的 1~6 上限约束**（该上限只约束 count 路径，
+      保持既有配置语义不变）；时长读不到时告警并退回 count 路径（不静默）。
     """
     result = {"ok": False, "frames": [], "frame_meta": [], "timestamps": [],
               "duration": 0.0, "meta": {}, "error": ""}
@@ -1915,17 +1922,36 @@ def extract_frames(video_path: str, out_dir: str, count: int = 3,
     result["meta"] = meta
 
     count = max(1, min(6, int(count or 3)))
-    if dur > 0:
-        # 全片均匀覆盖：5% ~ 95%（避免首尾黑场/异常帧），count=1 时取正中间
-        if count == 1:
-            times = [round(dur * 0.5, 3)]
-        else:
-            lo, hi = dur * 0.05, dur * 0.95
-            times = [round(lo + (hi - lo) * i / (count - 1), 3) for i in range(count)]
+
+    # D-05：优先按占比抽帧（整集路径 = 每段中点），一次覆盖全片每段。
+    ratios = []
+    for r in (frame_ratio or []):
+        try:
+            rf = float(r)
+        except (TypeError, ValueError):
+            continue
+        ratios.append(min(1.0, max(0.0, rf)))
+    if ratios and dur > 0:
+        # 去重 + 保序：相邻段中点理论上互不相同，去重只为防御重复入参
+        times = sorted({round(dur * r, 3) for r in ratios})
+        result["meta"]["frame_mode"] = "ratio"
+        result["meta"]["frame_ratio_count"] = len(times)
     else:
-        # 时长确实无法推算：退化按固定时间点抽帧（0s/1s/2s…），并标记 degraded
-        times = [float(i) for i in range(count)]
-        result["meta"]["degraded"] = True
+        if ratios:  # 时长不可读 → 明确告警后退化，不静默丢帧
+            logger.warning(
+                "extract_frames 收到 frame_ratio(%d 个) 但视频时长不可读（%s）→ "
+                "退化按 count=%d 全片均布抽帧", len(ratios), video_path, count)
+        if dur > 0:
+            # 全片均匀覆盖：5% ~ 95%（避免首尾黑场/异常帧），count=1 时取正中间
+            if count == 1:
+                times = [round(dur * 0.5, 3)]
+            else:
+                lo, hi = dur * 0.05, dur * 0.95
+                times = [round(lo + (hi - lo) * i / (count - 1), 3) for i in range(count)]
+        else:
+            # 时长确实无法推算：退化按固定时间点抽帧（0s/1s/2s…），并标记 degraded
+            times = [float(i) for i in range(count)]
+            result["meta"]["degraded"] = True
 
     frames, frame_meta = [], []
     exe = ffmpeg_exe()
@@ -2136,12 +2162,16 @@ def _video_obj_fatal(items: list) -> list:
 def check_video(video_path: str, shot_desc: str = "", cfg: dict = None,
                 override: dict = None, frames_dir: str = None,
                 fallback_meta: dict = None, style: str = "",
-                expected_duration: float = None) -> dict:
+                expected_duration: float = None,
+                frame_ratio: list = None) -> dict:
     """视频质检：ffmpeg 抽帧 → 多模态判定。永不抛异常。
     override 仅用于「测试连通性」临时传参，不落盘。
     style：目标风格串，用于「风格达标」判定；为空则不做风格检测。
     expected_duration：期望时长（秒）—— G9/O1 确定性闸门：实测时长与期望偏差
-        超 video_max_drift（默认 30%）计入 issues；为空 / 0 时跳过该项判定。"""
+        超 video_max_drift（默认 30%）计入 issues；为空 / 0 时跳过该项判定。
+    frame_ratio：D-05（P1）—— 按占比指定抽帧时间点，整集模式传「每段中点」，
+        使抽帧真正覆盖每一段（不再受 video_frame_count 默认 3 / 上限 6 约束）。
+    """
     cfg = cfg or _empty_config()
     if not cfg.get("enabled"):
         return {"ok": False, "skipped": True, "reason": "质检总开关未开启"}
@@ -2155,7 +2185,7 @@ def check_video(video_path: str, shot_desc: str = "", cfg: dict = None,
         frames_dir = os.path.join(os.path.dirname(os.path.abspath(video_path)),
                                   "_qc_frames", os.path.splitext(os.path.basename(video_path))[0])
     fr = extract_frames(video_path, frames_dir, cfg.get("video_frame_count", 3),
-                        fallback_meta=fallback_meta)
+                        fallback_meta=fallback_meta, frame_ratio=frame_ratio)
     if not fr["ok"]:
         return {"ok": False, "skipped": False, "error": fr["error"], "duration": fr["duration"],
                 "frame_meta": fr.get("frame_meta") or [], "video_meta": fr.get("meta") or {}}
