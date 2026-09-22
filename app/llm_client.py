@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 import requests
 
 import cancellation
+from fs_atomic import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -214,10 +215,7 @@ def load_config(config_path: str) -> dict:
                     import secret_store
                     if secret_store.get_store(_PROJECT_ROOT).set_api_key("llm", str(data["api_key"]).strip()):
                         data["api_key"] = ""
-                        tmp = config_path + ".tmp"
-                        with open(tmp, "w", encoding="utf-8") as f:
-                            json.dump(data, f, ensure_ascii=False, indent=2)
-                        os.replace(tmp, config_path)
+                        atomic_write_json(config_path, data)
                         cfg["api_key"] = ""
                         logger.info("LLM 配置中的明文密钥已迁移至加密库")
                 except Exception as e:  # noqa: BLE001
@@ -270,10 +268,7 @@ def save_config(config_path: str, base_url: str, api_key: str = None,
     cfg["api_key"] = ""
     cfg["updated_at"] = datetime.now().isoformat(timespec="seconds")
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
-    tmp = config_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, config_path)
+    atomic_write_json(config_path, cfg)
     return cfg
 
 

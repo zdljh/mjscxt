@@ -68,6 +68,7 @@ import audio_qc
 import plugin_registry
 import project_store
 import shot_key
+from fs_atomic import atomic_write_json
 import providers
 import prompt_qc
 import qc_client
@@ -3337,22 +3338,13 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             "qc_blocked_count": blocked,
             "shots": manifest_shots,
         }
-        # B-15 P2-3：manifest 原子写（.tmp + os.replace），落盘失败不回滚 success
+        # A-3 P1：manifest 原子写改走 fs_atomic（唯一临时名 + flush/fsync + .bak 快照 +
+        # os.replace 重试），替代旧「固定 .tmp + os.replace」。落盘失败仍回滚 status。
         _sb_mp = os.path.join(out_dir, "storyboard_manifest.json")
-        _sb_tmp = _sb_mp + ".tmp"
         try:
-            with open(_sb_tmp, "w", encoding="utf-8") as f:
-                json.dump(manifest, f, ensure_ascii=False, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(_sb_tmp, _sb_mp)
+            atomic_write_json(_sb_mp, manifest)
         except Exception as _mp_err:
             app.logger.warning(f"分镜 manifest 原子写失败（已回滚 status）：{_mp_err}")
-            if os.path.exists(_sb_tmp):
-                try:
-                    os.unlink(_sb_tmp)
-                except OSError:
-                    pass
             with lock:
                 generation_state[task_id].update({
                     "status": "failed",
@@ -8423,13 +8415,9 @@ def _dub_worker(task_id: str, project_name: str, plan: dict, out_dir: str,
                       for r in results],
         }
         manifest_path = os.path.join(out_dir, f"ep{int(episode):02d}_dub_manifest.json")
-        # B-08 P1-10：manifest 原子写（先 .tmp 后 os.replace），崩溃不留下半写文件
-        _mp_tmp = manifest_path + ".tmp"
-        with open(_mp_tmp, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(_mp_tmp, manifest_path)
+        # A-3 P1：manifest 原子写改走 fs_atomic（唯一临时名 + flush/fsync + .bak 快照 +
+        # os.replace 重试），替代旧「固定 .tmp + os.replace」
+        atomic_write_json(manifest_path, manifest)
 
         _msg = f"成功 {len(ok_items)} 句 / 失败 {len(results) - len(ok_items)} 句"
         if aqua.get("enabled") and aqua.get("checked"):
@@ -8451,12 +8439,6 @@ def _dub_worker(task_id: str, project_name: str, plan: dict, out_dir: str,
         app.logger.error(f"配音任务失败: {e}")
         # B-16 P2-11：配音失败 → 清理本任务产生的中间产物（lines 目录、merged 半成品）
         _cleanup_scratch_dir(os.path.join(out_dir, "lines"), app.logger)
-        _mp_tmp_f = os.path.join(out_dir, f"ep{int(episode):02d}_dub.{fmt}.tmp")
-        if os.path.exists(_mp_tmp_f):
-            try:
-                os.remove(_mp_tmp_f)
-            except OSError:
-                pass
         with dub_lock:
             dub_tasks[task_id].update({"status": "failed", "error": str(e), "phase": "失败"})
     except Exception as e:  # noqa: BLE001

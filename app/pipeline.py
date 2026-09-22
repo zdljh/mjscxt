@@ -47,6 +47,8 @@ import traceback
 
 import cancellation
 
+from fs_atomic import atomic_write_json, read_json_strict
+
 logger = logging.getLogger(__name__)
 
 # ===================== 集级互斥（B-02 P0-5 并发/幂等） =====================
@@ -463,14 +465,14 @@ def _reset_deliverable_review(ctx, review: str, note: str = "") -> None:
     A = _A()
     idx_path = os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot",
                             ctx["project_name"], "deliverables.json")
-    if not _nonempty(idx_path):
-        return
+    # A-4：损坏文件不再静默当作空索引（否则下面「读改写」会用空 items 覆盖整个交付物索引）
     try:
-        with open(idx_path, "r", encoding="utf-8") as f:
-            data = json.load(f) or {}
-    except Exception:  # noqa: BLE001
-        logger.warning("复位 review 失败（读 deliverables.json 异常）：%s",
-                       ctx["project_name"])
+        data = read_json_strict(idx_path, {}) or {}
+    except (ValueError, OSError) as e:
+        # 本函数「失败不阻断流水线」是既有契约（review 复位只是体验问题），
+        # 故在**此处**显式降级：记 error 后放弃本次复位，绝不写回任何内容。
+        logger.error("复位 review 失败（deliverables.json 损坏且无可用 .bak，项目 %s）：%s",
+                     ctx["project_name"], e)
         return
     item = (data.get("items") or {}).get(str(int(ctx["episode_no"])))
     if not isinstance(item, dict):
@@ -478,20 +480,13 @@ def _reset_deliverable_review(ctx, review: str, note: str = "") -> None:
     item["review"] = review
     item["review_note"] = note
     item["reviewed_at"] = _now()
-    tmp = idx_path + ".tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, idx_path)
+        atomic_write_json(idx_path, data)
         logger.info("第%s集 成片重做后 review 复位为 %s（项目 %s）",
                     int(ctx["episode_no"]), review, ctx["project_name"])
-    except Exception:  # noqa: BLE001
-        logger.warning("复位 review 失败（写 deliverables.json 异常）：%s",
-                       ctx["project_name"])
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+    except Exception as e:  # noqa: BLE001
+        logger.warning("复位 review 失败（写 deliverables.json 异常，项目 %s）：%s",
+                       ctx["project_name"], e)
 
 
 def dub_manifest_path(ctx) -> str:
@@ -1571,13 +1566,10 @@ def record_deliverable(project_name: str, episode_no: int, path: str,
     A = _A()
     idx_path = os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot", project_name, "deliverables.json")
     os.makedirs(os.path.dirname(idx_path), exist_ok=True)
-    data = {}
-    if _nonempty(idx_path):
-        try:
-            with open(idx_path, "r", encoding="utf-8") as f:
-                data = json.load(f) or {}
-        except Exception:  # noqa: BLE001
-            data = {}
+    # A-4：这是一次「读改写」，损坏态若被静默读成空索引，会把**整个交付物索引**
+    # 覆盖成只含本集的一条。故改为 fail-loud（read_json_strict 会先尝试从 .bak
+    # 恢复，恢复不了才抛错），由流水线的步骤级错误处理记录该集失败。
+    data = read_json_strict(idx_path, {}) or {}
     items = data.setdefault("items", {})
     key = str(int(episode_no))
     prev = items.get(key) or {}
@@ -1593,10 +1585,7 @@ def record_deliverable(project_name: str, episode_no: int, path: str,
         # 重新生产会重置验收状态（内容已变，旧结论失效）
         "review": "pending" if prev.get("path") != path else (prev.get("review") or "pending"),
     }
-    tmp = idx_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, idx_path)
+    atomic_write_json(idx_path, data)
     return items[key]
 
 
@@ -1608,12 +1597,12 @@ def list_deliverables(project_name: str = "") -> list:
     out = []
     for pj in projects:
         p = os.path.join(root, pj, "deliverables.json")
-        if not _nonempty(p):
-            continue
+        # A-4 补充：索引损坏时不再「静默跳过该项目的全部成片」，改为显式记 error
+        # 后跳过（保持「只读列表视图不 500」的原契约）。
         try:
-            with open(p, "r", encoding="utf-8") as f:
-                data = json.load(f) or {}
-        except Exception:  # noqa: BLE001
+            data = read_json_strict(p, {}) or {}
+        except (ValueError, OSError) as e:
+            logger.error("交付物索引损坏且无可用 .bak，项目 %s 的成片本次不列出：%s", pj, e)
             continue
         for v in (data.get("items") or {}).values():
             if isinstance(v, dict):
@@ -1630,19 +1619,15 @@ def set_deliverable_review(project_name: str, episode_no: int, review: str,
     """验收 / 打回（打回会在下次托管轮转时重跑该集）"""
     A = _A()
     idx_path = os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot", project_name, "deliverables.json")
-    data = {}
-    if _nonempty(idx_path):
-        with open(idx_path, "r", encoding="utf-8") as f:
-            data = json.load(f) or {}
+    # A-4：统一走严格读；「文件不存在→{}」的既有契约不变，损坏时先试 .bak，
+    # 无 .bak 才抛错（app.py:2117 的调用点已有 try/except 兜底，不会 500）。
+    data = read_json_strict(idx_path, {}) or {}
     items = data.setdefault("items", {})
     item = items.get(str(int(episode_no)))
     if not item:
         return {}
     item.update({"review": review, "review_note": note, "reviewed_at": _now()})
-    tmp = idx_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, idx_path)
+    atomic_write_json(idx_path, data)
     if review == "rejected":
         # 打回 = 该集需要重做：清掉死信状态让流水线重新尝试
         resolve_dead_letter(project_name, episode_no, note="成片被打回，重新生产")
@@ -1659,13 +1644,9 @@ def mark_deliverable_stale(project_name: str, episode_no: int, reason: str,
     """
     A = _A()
     idx_path = os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot", project_name, "deliverables.json")
-    if not _nonempty(idx_path):
-        return {}
-    try:
-        with open(idx_path, "r", encoding="utf-8") as f:
-            data = json.load(f) or {}
-    except Exception:  # noqa: BLE001
-        return {}
+    # A-4：损坏不再静默 `return {}`（那会让「成片已过期」的提示彻底消失）。
+    # 记录不存在时仍返回 {}（原契约）；损坏时先试 .bak，无 .bak 才抛错。
+    data = read_json_strict(idx_path, {}) or {}
     item = (data.get("items") or {}).get(str(int(episode_no)))
     if not isinstance(item, dict):
         return {}
@@ -1673,10 +1654,7 @@ def mark_deliverable_stale(project_name: str, episode_no: int, reason: str,
     stale = meta.setdefault("stale", {})
     stale.update({"reason": reason, "detail": detail or {}, "marked_at": _now()})
     item["updated_at"] = _now()
-    tmp = idx_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, idx_path)
+    atomic_write_json(idx_path, data)
     return item
 
 
@@ -1688,12 +1666,14 @@ def deliverable_path(project_name: str, filename: str) -> str:
     """
     idx_path = os.path.join(_A().PROJECT_OUTPUT_DIR, "autopilot", project_name,
                             "deliverables.json")
-    if not _nonempty(idx_path):
-        return ""
+    # A-4 补充：损坏时不再静默返回 ""（等于「文件不存在」，会掩盖真实故障）。
+    # 这里保持「解析不出路径 → ""」的原契约（调用方据此 404），但显式记 error；
+    # 若存在 .bak，read_json_strict 会先自动恢复，故障可自愈。
     try:
-        with open(idx_path, "r", encoding="utf-8") as f:
-            data = json.load(f) or {}
-    except Exception:  # noqa: BLE001
+        data = read_json_strict(idx_path, {}) or {}
+    except (ValueError, OSError) as e:
+        logger.error("交付物索引损坏且无可用 .bak，无法解析成片路径（项目 %s）：%s",
+                     project_name, e)
         return ""
     want = os.path.basename(filename)
     for v in (data.get("items") or {}).values():

@@ -40,6 +40,8 @@ import os
 from datetime import datetime
 from typing import Optional
 
+from fs_atomic import atomic_write_json, read_json_strict
+
 logger = logging.getLogger(__name__)
 
 _ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -379,28 +381,34 @@ def report_path(project: str) -> str:
 
 
 def save_report(project: str, report: dict) -> str:
+    """原子写一致性报告（A-3）：唯一临时名 + fsync + .bak 快照 + replace 重试。
+
+    保持原契约：落盘失败只告警、不抛出（报告可由 `run()` 重新生成）。
+    """
     path = report_path(project)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
+        atomic_write_json(path, report)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"一致性报告落盘失败：{e}")
     return path
 
 
 def load_report(project: str) -> Optional[dict]:
+    """严格读一致性报告（A-4）：缺失→None；损坏→从 .bak 恢复；无 .bak→降级 None。
+
+    A-4 边界决策：报告是**只读派生数据**（随时可重新执行校验生成），且被
+    app.py 的两个**只读**接口直接调用（`/api/consistency/report` 与镜头列表视图，
+    app.py 不在本次改动范围内）。故损坏且无 .bak 时在这里显式记 error 并返回 None，
+    让接口照旧给出「暂无一致性报告」，而不是 500 —— 响亮降级，不静默清空。
+    """
     path = report_path(project)
-    if not os.path.isfile(path):
-        return None
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"一致性报告读取失败：{e}")
+        data = read_json_strict(path, None)
+    except (ValueError, OSError) as e:
+        logger.error("一致性报告 %s 损坏且无可用 .bak，本次按「暂无报告」处理：%s",
+                     project, e)
         return None
+    return data if isinstance(data, dict) else None
 
 
 def run(project: str, character_refs: dict = None, shot_images: dict = None,
