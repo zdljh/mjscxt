@@ -36,7 +36,7 @@ from config import (
     KEYFRAMES_DIR, CONTINUITY_DIR, DUB_MIX_DIR, WATERMARK_DIR,
     PROJECTS_DIR, PROJECT_INDEX_PATH, PROJECT_TRASH_DIR, PROJECT_MIGRATE_REPORT,
     PROJECT_DEFAULT_CONFIG, AI_CHAT_DIR, AI_SETTINGS_PATH, AI_CHAT_HISTORY_PATH,
-    NOVELS_DIR,
+    NOVELS_DIR, TASKS_DB_PATH,
 )
 
 INDEX_VERSION = 1
@@ -600,8 +600,43 @@ def delete_project(ref: str, confirm: bool = False) -> dict:
     index["projects"] = [x for x in index.get("projects", []) if x.get("id") != rec["id"]]
     save_index(index)
 
+    # 关联清理：ai_chat 的「按项目键分桶/分子目录」数据不在 22 类产物目录覆盖内
+    # （全局单文件 chat_history.json / project_settings.json + archive/<键>/ 子目录），
+    # 软删产物目录时收不走，会残留。这里摘除该项目的会话桶/草稿/创作设定/全量归档。
+    # 关联簿记性质：失败不阻断主删除（项目已软删成功），只响亮降级并在结果里标记。
+    ai_purge = {"purged": False, "report": None, "error": None}
+    try:
+        import ai_chat  # 延迟导入：ai_chat 不依赖 project_store，单向依赖；避免任何循环
+        ai_purge["report"] = ai_chat.purge_project(
+            history_path=AI_CHAT_HISTORY_PATH,
+            settings_path=AI_SETTINGS_PATH,
+            names=_project_alias_names(rec),
+            archive_root=AI_CHAT_DIR,
+        )
+        ai_purge["purged"] = True
+    except Exception as e:
+        logger.error("删除项目 %s 时关联清理 ai_chat 数据失败（主删除已成功，不影响）：%s",
+                     key, e)
+        ai_purge["error"] = str(e)
+
+    # 关联清理（数据库）：tasks.db 是全局单库（所有项目共用，不能整库删），
+    # 该项目登记的任务 / 断点续跑单元残留在 tasks / units 两表。按项目别名并集
+    # （dir_key + 显示名，覆盖「列里存键或存名」两种落法）级联摘除。
+    # 同样是关联簿记：失败不阻断主删除（项目已软删成功），只响亮降级并标记。
+    db_purge = {"purged": False, "report": None, "error": None}
+    try:
+        import task_store
+        db_purge["report"] = task_store.get_store(TASKS_DB_PATH).purge_project(
+            _project_alias_names(rec))
+        db_purge["purged"] = True
+    except Exception as e:
+        logger.error("删除项目 %s 时关联清理任务库数据失败（主删除已成功，不影响）：%s",
+                     key, e)
+        db_purge["error"] = str(e)
+
     return {"project": rec, "trash_dir": trash_root, "moved": moved,
-            "skipped": skipped, "recoverable": True}
+            "skipped": skipped, "recoverable": True,
+            "ai_chat_purge": ai_purge, "tasks_db_purge": db_purge}
 
 
 # =====================================================================

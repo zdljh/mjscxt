@@ -288,6 +288,42 @@ class TaskStore:
             logger.warning(f"检测到 {n} 个中断任务（进程重启），已标记为 interrupted，可续跑")
         return n
 
+    def purge_project(self, projects: list) -> dict:
+        """项目被删除时，级联摘除该项目在 tasks / units 两表里的关联记录。
+
+        tasks.db 是**全局单库**（所有项目共用，不能整库删），只能按 project
+        别名并集摘除：``projects`` 传该项目的全部别名（dir_key + 显示名），
+        用 ``IN (...)`` 覆盖「列里可能存键、也可能存名」两种落法。
+        先按 project 找出关联 task_id、级联删 units（units 只有 task_id 一个关联键），
+        再删 tasks 本体。幂等：没有匹配时两表 0 删、不动任何其它项目。
+        返回摘除统计 {tasks, units}。
+        """
+        vals = [str(p).strip() for p in (projects or []) if p and str(p).strip()]
+        if not vals:
+            return {"tasks": 0, "units": 0}
+        marks = ",".join("?" for _ in vals)
+        with self._lock:
+            conn = self._conn()
+            try:
+                ids = [r[0] for r in conn.execute(
+                    f"SELECT id FROM tasks WHERE project IN ({marks})", vals)]
+                units_n = 0
+                if ids:
+                    umarks = ",".join("?" for _ in ids)
+                    units_n = conn.execute(
+                        f"DELETE FROM units WHERE task_id IN ({umarks})",
+                        ids).rowcount or 0
+                tasks_n = conn.execute(
+                    f"DELETE FROM tasks WHERE project IN ({marks})",
+                    vals).rowcount or 0
+                conn.commit()
+            finally:
+                conn.close()
+        if tasks_n or units_n:
+            logger.info("任务库已随项目删除摘除 %d 个任务 / %d 个单元：%s",
+                        tasks_n, units_n, vals)
+        return {"tasks": tasks_n, "units": units_n}
+
 
 # ===================== 断点续跑判据 =====================
 
