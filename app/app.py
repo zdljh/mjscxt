@@ -3843,9 +3843,10 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                             project_name, "video", episode_tag or "episode", "整片质检",
                             _ep_qc_attempt["n"], None, video_path, verdict, style=style)
                         # 挂上本集的段提示词集合，供下次重试时按相似度召回
-                        _record_qc_lesson(project_name, "video",
-                                          "\n".join((sg.get("prompt") or "") for sg in segs),
-                                          rec)
+                        # A-5 P1：整片模式段数可达 20~44 段，全量拼接可达数十 KB —— 全量入
+                        # 教训库会撑爆/稀释检索。截断到 2000 字符（保留段边界换行，人可读）。
+                        _seg_blob = "\n".join((sg.get("prompt") or "") for sg in segs)
+                        _record_qc_lesson(project_name, "video", _seg_blob[:2000], rec)
                         app.logger.info(
                             "[教训][video] project=%s mode=episode attempt=%d ok=True "
                             "passed=False → 已沉淀",

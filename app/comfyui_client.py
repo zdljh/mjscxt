@@ -2136,10 +2136,16 @@ class ComfyUIClient:
             built = h3_prompt_kit.build_base(shot, "T2VA", style=style)
             existing = str(shot.get("prompt_h3") or "").strip()
             if not existing:
-                return built
+                # A-5：无参考图分支不经过 resolve()，必须自己过一道长度闸门
+                #（build_base 在超长 description 下同样可能越界）
+                return h3_prompt_kit.clamp_prompt(built)
             verdict = h3_prompt_kit.validate(existing)
-            return existing if verdict["valid"] else h3_prompt_kit.merge_detail(built, existing)
-        return h3_prompt_kit.resolve(shot, picture_defs, subjects, style=style)
+            # A-5：这条路径**完全绕过 resolve()**（既有 prompt_h3 直接生效），
+            # 能把裸 >6000 字符提示词原样送进 H3 —— 必须显式截断。
+            return h3_prompt_kit.clamp_prompt(
+                existing if verdict["valid"] else h3_prompt_kit.merge_detail(built, existing))
+        return h3_prompt_kit.clamp_prompt(
+            h3_prompt_kit.resolve(shot, picture_defs, subjects, style=style))
 
     def _build_h3_prompt(self, shot: dict, char_refs: List[dict], scene_refs: List[dict],
                          storyboard_ref: dict = None) -> str:
@@ -2152,5 +2158,9 @@ class ComfyUIClient:
         picture_defs, subjects = self._h3_picture_defs(char_refs, scene_refs, storyboard_ref)
         style = h3_prompt_kit.style_of(shot)
         if not picture_defs:
-            return h3_prompt_kit.build_base(shot, "T2VA", style=style)
-        return h3_prompt_kit.build_ref2va(shot, picture_defs, subjects, style=style)
+            # A-5 加固：本方法同样不经过 resolve()，且被 app.py 4 处直接调用
+            #（2057/2068/3715/3733），同一类"超长提示词被服务端静默截断"的口子。
+            return h3_prompt_kit.clamp_prompt(
+                h3_prompt_kit.build_base(shot, "T2VA", style=style))
+        return h3_prompt_kit.clamp_prompt(
+            h3_prompt_kit.build_ref2va(shot, picture_defs, subjects, style=style))
