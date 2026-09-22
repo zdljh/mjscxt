@@ -2376,11 +2376,15 @@ def api_generate_script():
 # ===== 步骤2/3/4：资产生成（角色/物品/场景 + 多视角） =====
 
 def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_name: str,
-                         style: str = ""):
+                         style: str = "", overwrite: bool = False):
     """后台资产生成任务：基础图 + 多视角图
 
     P0 修复（④⑤）：全链路接入 AI 质检——基础图与每一张多视角图都必须送检；
     不达标自动重生成（换 seed），重试仍不达标 / 质检调用异常 → 阻断入库并标记 qc_blocked。
+
+    A-2 P0 断点续跑：新增 overwrite 参数（默认 False）。已达标入库的资产
+    （目录内已有非空图，判据同 pipeline.probe_assets）直接跳过，不再重复
+    「生成→质检→重画」；overwrite=True 时强制全量重生成。
 
     风格落地（2026-09-18 修复）：新增 style 参数。此前该任务**完全没有风格入参**，
     资产提示词只有 bible 的 reference_prompt_zh（实测其中零风格词），于是物品/角色/场景
@@ -2430,6 +2434,21 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
             name = asset.get('name', f'{asset_type}_{i+1}')
             try:
             
+                # A-2 P0 断点续跑：已达标入库的资产不重复「生成→质检→重画」。
+                # 就绪判据与 pipeline.probe_assets / _first_existing_asset_image 一致
+                # （目录内任意一张非空白名单图）。仅 overwrite=True 时强制重生成。
+                # ⚠️ 只在「已就绪」时提前 continue；未就绪项继续走下面的重要性过滤
+                #    与完整生成链路，临时道具的 skip 路径不受影响。
+                if not overwrite:
+                    _ready_img = _first_existing_asset_image(
+                        os.path.join(base_dir, project_name, name))
+                    if _ready_img:
+                        app.logger.info("资产已达标入库，断点续跑跳过：%s（%s）",
+                                        name, _ready_img)
+                        results.append({"name": name, "status": "skipped",
+                                        "reason": "已达标入库，断点续跑跳过"})
+                        continue
+
                 # 物品过滤：只生成重要道具的参考图
                 if asset_type == 'item':
                     importance = asset.get('importance', '')
@@ -2769,6 +2788,8 @@ def api_generate_assets():
     if err is not None:
         return err
     assets = data.get('assets', [])
+    # A-2 P0：断点续跑开关。默认 False → 已达标入库的资产跳过；显式传 true 强制重生成
+    overwrite = bool(data.get('overwrite'))
 
     if asset_type not in ("character", "item", "scene"):
         return jsonify({"error": "asset_type 必须是 character/item/scene"}), 400
@@ -2782,13 +2803,14 @@ def api_generate_assets():
         generation_state[task_id] = {
             "status": "running", "asset_type": asset_type,
             "progress": 0, "total": len(assets), "current": 0,
-            "phase": "基础图", "results": []
+            "phase": "基础图", "results": [],
+            "overwrite": overwrite,
         }
 
     thread = threading.Thread(
         target=_generate_asset_task,
         args=(task_id, assets, asset_type, project_name,
-              data.get('style') or _project_style(project_name))
+              data.get('style') or _project_style(project_name), overwrite)
     )
     thread.daemon = True
     thread.start()
