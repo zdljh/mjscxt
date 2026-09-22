@@ -120,8 +120,8 @@ def get_or_create_secret_key(root_dir: str) -> Optional[bytes]:
             f.write(key)
         try:
             os.chmod(path, 0o600)
-        except Exception:  # noqa: BLE001  Windows 上可能不支持
-            pass
+        except Exception as e:  # noqa: BLE001  Windows 上可能不支持
+            logger.error("密钥库文件权限收紧（0o600）失败，密钥文件可能对同机其他用户可读：%s", e)
         logger.info(f"已生成新的本地主密钥：{path}（请勿提交到版本库）")
         return key
     except Exception as e:  # noqa: BLE001
@@ -176,8 +176,8 @@ class SecretStore:
             try:
                 if os.path.exists(tmp):
                     os.remove(tmp)
-            except OSError:
-                pass
+            except OSError as e:
+                logger.debug("清理临时文件失败（忽略）：%s", e)
             raise
         return data
 
@@ -225,8 +225,8 @@ class SecretStore:
         os.replace(tmp, path)
         try:
             os.chmod(path, 0o600)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.error("密钥库文件权限收紧（0o600）失败，密钥文件可能对同机其他用户可读：%s", e)
 
     def _encrypt(self, plain: str) -> Optional[str]:
         if not self._fernet:
@@ -242,8 +242,8 @@ class SecretStore:
             return None
         try:
             return self._fernet.decrypt(token.encode("ascii")).decode("utf-8")
-        except InvalidToken:
-            logger.warning("密钥解密失败（主密钥可能已更换），该密钥需重新配置")
+        except InvalidToken as e:
+            logger.warning("密钥解密失败（主密钥可能已更换），该密钥需重新配置：%s", e)
             return None
         except Exception as e:  # noqa: BLE001
             logger.warning(f"密钥解密异常：{e}")

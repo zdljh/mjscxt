@@ -236,8 +236,8 @@ def check_environment(comfy_url: str = COMFYUI_URL) -> Dict:
         try:
             result["comfy_version"] = str(requests.get(f"{comfy_url}/system_stats", timeout=20)
                                           .json().get("system", {}).get("comfyui_version", ""))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ComfyUI 版本探测失败（忽略）：%s", e)
     except Exception as e:
         reasons.append(f"ComfyUI 不可达（{comfy_url}）: {e}")
 
@@ -531,8 +531,8 @@ class VideoUpscaler:
             if progress_cb:
                 try:
                     progress_cb(msg, pct)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("进度回调异常（忽略，不阻断超分）：%s", e)
             logger.info(f"[超分] {msg}")
 
         # 0) 输入校验

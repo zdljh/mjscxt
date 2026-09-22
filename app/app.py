@@ -1552,8 +1552,8 @@ def api_keyframes_generate():
         if store:
             try:
                 store.start(task_id)     # 登记开始时间（否则任务列表「开始」为空）
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                app.logger.debug("任务库 start 登记失败（不影响执行）：%s", e)
 
         def _progress(done, total, item):
             with lock:
@@ -1569,8 +1569,8 @@ def api_keyframes_generate():
                                     task_store.ST_DONE if item.get("ok") else task_store.ST_FAILED,
                                     result_path=item.get("path") or "",
                                     error=item.get("error") or "")
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    app.logger.debug("任务库单元进度写入失败（忽略）：%s", e)
 
         try:
             report = keyframe.generate_keyframes(
@@ -3355,8 +3355,8 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             if os.path.exists(_sb_tmp):
                 try:
                     os.unlink(_sb_tmp)
-                except OSError:
-                    pass
+                except OSError as e:
+                    app.logger.debug("清理分镜临时文件失败（忽略）：%s", e)
             with lock:
                 generation_state[task_id].update({
                     "status": "failed",
@@ -4627,8 +4627,8 @@ def api_upscale_sources():
                 sub = os.path.join(comfy_root, name)
                 if os.path.isdir(sub):
                     comfy_dirs.append((sub, f"ComfyUI/{name}"))
-        except OSError:
-            pass
+        except OSError as e:
+            app.logger.debug("扫描 ComfyUI 子目录失败（忽略）：%s", e)
     for base, label in comfy_dirs:
         if not os.path.isdir(base):
             continue
@@ -5679,8 +5679,8 @@ def _write_artifact_meta(artifact_path: str, *, kind: str, project_name: str,
                                 h.update(_chunk)
                         meta["workflow"] = tpl_name
                         meta["workflow_sha256"] = h.hexdigest()
-            except Exception:  # noqa: BLE001  工作流指纹算不出不影响 meta 主体
-                pass
+            except Exception as e:  # noqa: BLE001  工作流指纹算不出不影响 meta 主体
+                app.logger.warning("工作流指纹计算失败（不影响 meta 主体）：%s", e)
         out = os.path.splitext(artifact_path)[0] + ".meta.json"
         with open(out, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -5862,8 +5862,8 @@ def _qc_style_of(project_name: str) -> str:
         s = style_kit.normalize_style(plan.get("style"))
         if s:
             return s
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        app.logger.debug("读取托管计划风格失败（忽略）：%s", e)
     try:
         for ep in (novel_to_script.list_episodes(SCRIPT_DIR, project_name, project_name) or []):
             path = ep.get("path") or ""
@@ -5872,8 +5872,8 @@ def _qc_style_of(project_name: str) -> str:
                 s = style_kit.normalize_style(data.get("style"))
                 if s:
                     return s
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        app.logger.debug("读取剧本风格失败（忽略）：%s", e)
     return ""
 
 
@@ -6521,8 +6521,8 @@ def _audio_qc_file_url(project: str, path: str) -> str:
         rel_mix = os.path.relpath(ap, mix_out_dir(project or 'project'))
         if not rel_mix.startswith('..'):
             return f"/api/mix/file/{project or 'project'}/{rel_mix.replace(os.sep, '/')}"
-    except ValueError:
-        pass
+    except ValueError as e:
+        app.logger.debug("混音相对路径解析失败（忽略）：%s", e)
     return ""
 
 
@@ -7981,8 +7981,8 @@ def _dub_character_desc(character: str, project_name: str) -> str:
         for ch in (script.get("characters") or []):
             if str(ch.get("name") or "") == str(character):
                 return str(ch.get("description") or ch.get("tts_voice") or "")
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        app.logger.debug("角色描述取值失败（忽略）：%s", e)
     return ""
 
 
@@ -8326,10 +8326,10 @@ def _mix_audio_qc(report: dict, cfg: dict) -> dict:
                     out_v["passed"] = False
                     try:
                         out_v["score"] = min(int(out_v.get("score") or 0), 40)
-                    except (TypeError, ValueError):
-                        pass
-        except (TypeError, ValueError, ZeroDivisionError):
-            pass
+                    except (TypeError, ValueError) as e:
+                        app.logger.debug("评分字段解析失败（忽略）：%s", e)
+        except (TypeError, ValueError, ZeroDivisionError) as e:
+            app.logger.debug("评分归一化计算失败（忽略）：%s", e)
         return out_v
     except Exception as e:  # noqa: BLE001 - 质检失败绝不影响合成结果
         app.logger.warning(f"成片音频质检异常（已跳过）：{e}")
@@ -8476,8 +8476,8 @@ def _dub_worker(task_id: str, project_name: str, plan: dict, out_dir: str,
         if os.path.exists(_mp_tmp_f):
             try:
                 os.remove(_mp_tmp_f)
-            except OSError:
-                pass
+            except OSError as e:
+                app.logger.debug("清理混音临时文件失败（忽略）：%s", e)
         with dub_lock:
             dub_tasks[task_id].update({"status": "failed", "error": str(e), "phase": "失败"})
     except Exception as e:  # noqa: BLE001
@@ -9705,8 +9705,8 @@ def api_autopilot_plan_from_settings(project_name):
     if digits:
         try:
             patch['target_shots'] = max(4, min(int(digits), 40))
-        except ValueError:
-            pass
+        except ValueError as e:
+            app.logger.debug("target_shots 字段解析失败（忽略）：%s", e)
     if not patch:
         return jsonify({"success": False,
                         "error": "总控 AI 还没有生效设定；请先在「总控 AI 对话」里谈好风格再一键设定"}), 400

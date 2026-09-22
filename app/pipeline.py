@@ -76,8 +76,8 @@ def _release_episode_lock(project_name: str, episode_no: int) -> None:
     if lk is not None:
         try:
             lk.release()
-        except RuntimeError:
-            pass
+        except RuntimeError as e:
+            logger.debug("释放集级锁失败（忽略）：%s", e)
 
 
 def is_episode_running(project_name: str, episode_no: int) -> bool:
@@ -468,9 +468,9 @@ def _reset_deliverable_review(ctx, review: str, note: str = "") -> None:
     try:
         with open(idx_path, "r", encoding="utf-8") as f:
             data = json.load(f) or {}
-    except Exception:  # noqa: BLE001
-        logger.warning("复位 review 失败（读 deliverables.json 异常）：%s",
-                       ctx["project_name"])
+    except Exception as e:  # noqa: BLE001
+        logger.warning("复位 review 失败（读 deliverables.json 异常）：%s（%s）",
+                       ctx["project_name"], e)
         return
     item = (data.get("items") or {}).get(str(int(ctx["episode_no"])))
     if not isinstance(item, dict):
@@ -485,13 +485,13 @@ def _reset_deliverable_review(ctx, review: str, note: str = "") -> None:
         os.replace(tmp, idx_path)
         logger.info("第%s集 成片重做后 review 复位为 %s（项目 %s）",
                     int(ctx["episode_no"]), review, ctx["project_name"])
-    except Exception:  # noqa: BLE001
-        logger.warning("复位 review 失败（写 deliverables.json 异常）：%s",
-                       ctx["project_name"])
+    except Exception as e:  # noqa: BLE001
+        logger.warning("复位 review 失败（写 deliverables.json 异常）：%s（%s）",
+                       ctx["project_name"], e)
         try:
             os.remove(tmp)
-        except OSError:
-            pass
+        except OSError as _ce:
+            logger.debug("清理临时文件失败（忽略）：%s", _ce)
 
 
 def dub_manifest_path(ctx) -> str:
@@ -811,8 +811,8 @@ def _probe_concat_duration(concat_video: str, segments: list) -> float:
                 dur = float((d.get("format") or {}).get("duration") or 0)
                 if dur > 0:
                     return dur
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.debug("时长探测解析失败（忽略）：%s", e)
     # 2) 退化：各段 ffprobe 实测时长累加（比剧本 duration 累加更可靠）
     total = 0.0
     for seg in segments:
@@ -937,8 +937,8 @@ def step_final(ctx) -> dict:
     if _nonempty(tmp):
         try:
             os.remove(tmp)
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug("清理临时文件失败（忽略）：%s", e)
     if not _nonempty(out):
         raise PipelineError("成片合成失败（目标文件为空）")
     # B-03 P0-4：成片重做后，把 deliverables.json 里该集的 review 复位到 pending，
@@ -1358,8 +1358,8 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
                                  int(result["elapsed_sec"]),
                                  units=len(result["steps"]),
                                  success=bool(result["ok"]))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        logger.debug("旁路统计写入失败（忽略）：%s", e)
     return result
 
 
@@ -1445,8 +1445,8 @@ def _dead_letter_snapshot_bak(path: str) -> None:
         return  # 活文件已不可解析 → 不覆盖既有 .bak（它仍是最后一份好版本）
     try:
         shutil.copy2(path, _dead_letter_bak(path))
-    except OSError:
-        pass
+    except OSError as e:
+        logger.w("死信文件 .bak 快照写入失败（既有 .bak 仍保留为最后好版本）：%s", e)
 
 
 def _dead_letter_try_restore_bak(path: str):
@@ -1473,8 +1473,8 @@ def _dead_letter_try_restore_bak(path: str):
         try:
             if os.path.exists(tmp):
                 os.remove(tmp)
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug("清理临时文件失败（忽略）：%s", e)
         return None
     return data
 

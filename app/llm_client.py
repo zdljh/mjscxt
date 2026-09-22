@@ -265,8 +265,8 @@ def save_config(config_path: str, base_url: str, api_key: str = None,
         try:
             import secret_store
             secret_store.get_store(_PROJECT_ROOT).clear_api_key("llm")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.error("清理加密库中的 LLM 密钥失败，加密库可能残留旧密钥（配置与密钥库不一致）：%s", e)
     cfg["api_key"] = ""
     cfg["updated_at"] = datetime.now().isoformat(timespec="seconds")
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
@@ -282,8 +282,8 @@ def clear_config(config_path: str) -> dict:
     try:
         import secret_store
         secret_store.get_store(_PROJECT_ROOT).clear_api_key("llm")
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        logger.error("清理加密库中的 LLM 密钥失败（clear_config），加密库可能残留旧密钥：%s", e)
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -647,16 +647,16 @@ class LLMClient:
                 text = m.group(1).strip()
         try:
             return json.loads(text)
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as e:
+            logger.debug("JSON 候选 1 解析失败（试下一个候选）：%s", e)
         start, end = text.find("{"), text.rfind("}")
         if start != -1 and end > start:
             candidate = text[start:end + 1]
             candidate = re.sub(r",\s*([}\]])", r"\1", candidate)  # 去尾逗号
             try:
                 return json.loads(candidate)
-            except json.JSONDecodeError:
-                pass
+            except json.JSONDecodeError as e:
+                logger.debug("JSON 候选 2 解析失败（试下一个候选）：%s", e)
         start, end = text.find("["), text.rfind("]")
         # 顶层已是对象（以 { 开头）时不再用中括号片段兜底，否则会返回内层数组，
         # 导致 _repair_truncated_json 无从发挥、调用方拿到语义错位的片段
@@ -664,8 +664,8 @@ class LLMClient:
             candidate = re.sub(r",\s*([}\]])", r"\1", text[start:end + 1])
             try:
                 return json.loads(candidate)
-            except json.JSONDecodeError:
-                pass
+            except json.JSONDecodeError as e:
+                logger.debug("JSON 候选 3 解析失败（试下一个候选）：%s", e)
         repaired = LLMClient._repair_truncated_json(text)
         if repaired is not None:
             logger.warning("JSON 不完整，已按截断修复（补全尾部结构）后解析成功")
@@ -795,8 +795,8 @@ class LLMClient:
             if on_event:
                 try:
                     on_event(history[-1])
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("流式事件回调异常（忽略，不阻断对话）：%s", e)
             data = None
             try:
                 data = self.parse_json(r["content"])

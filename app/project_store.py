@@ -135,8 +135,8 @@ def _snapshot_bak(path: str) -> None:
         return  # 活文件已不可解析 → 不覆盖既有 .bak
     try:
         shutil.copy2(path, _last_good_bak(path))
-    except OSError:
-        pass
+    except OSError as e:
+        logger.w("项目索引 .bak 快照写入失败（既有 .bak 仍保留为最后好版本）：%s", e)
 
 
 def _try_restore_bak(path: str):
@@ -165,8 +165,8 @@ def _try_restore_bak(path: str):
         try:
             if os.path.exists(tmp):
                 os.remove(tmp)
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug("清理临时文件失败（忽略）：%s", e)
         raise
     return data
 
@@ -270,8 +270,8 @@ def _write_json(path: str, data) -> None:
         try:
             if os.path.exists(tmp):
                 os.remove(tmp)          # 失败不留垃圾临时文件
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug("清理临时文件失败（忽略）：%s", e)
         raise
 
 
@@ -461,8 +461,8 @@ def update_config(ref: str, patch: dict) -> dict:
         if src in patch and patch[src] is not None:
             try:
                 fields[dst] = int(patch[src])
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as e:
+                logger.debug("字段整型转换失败（忽略该字段）：%s", e)
     if fields:
         update_project(rec["id"], **fields)
     return cfg
@@ -577,8 +577,8 @@ def delete_project(ref: str, confirm: bool = False) -> dict:
         _trash_base = os.path.abspath(PROJECT_TRASH_DIR)
         if os.path.isdir(_trash_base):
             os.chmod(_trash_base, stat.S_IRWXU)
-    except OSError:
-        pass
+    except OSError as e:
+        logger.error("回收站目录权限收紧（ACL）失败，软删产物可能对同机其他用户可读：%s", e)
 
     moved, skipped = [], []
     targets = [("projects_workspace", p["root"])]

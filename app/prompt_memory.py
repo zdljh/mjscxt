@@ -409,8 +409,8 @@ class PromptMemory:
             try:
                 if os.path.exists(tmp):
                     os.remove(tmp)          # 失败不留垃圾临时文件
-            except OSError:
-                pass
+            except OSError as e:
+                logger.debug("清理临时文件失败（忽略）：%s", e)
             logger.warning(f"提示词记忆写入失败：{e}")
 
     # ---------- 内部：追加一条并去重/裁剪/落盘 ----------

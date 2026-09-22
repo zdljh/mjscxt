@@ -121,8 +121,8 @@ class TaskStore:
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("PRAGMA journal_mode=WAL")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.debug("开启 SQLite WAL 失败（忽略，回落默认 journal）：%s", e)
         return conn
 
     def _init_schema(self) -> None:
@@ -447,8 +447,8 @@ class TaskQueue:
                 logger.exception(f"任务失败：{task_id} - {e}")
                 try:
                     self.store.fail(task_id, f"{type(e).__name__}: {e}")
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("任务失败态落库失败（主异常已记录）：%s", e)
                 if on_error:
                     try:
                         on_error(e)

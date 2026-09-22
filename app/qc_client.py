@@ -73,8 +73,8 @@ def _atomic_write_json(config_path: str, cfg: dict) -> None:
         try:
             if os.path.exists(tmp):
                 os.remove(tmp)               # 失败不留垃圾临时文件
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug("清理临时文件失败（忽略）：%s", e)
         raise
 
 # ===================== 默认配置 =====================
@@ -952,8 +952,8 @@ def _reset_endpoint_impl(config_path: str) -> dict:
     try:
         import secret_store
         secret_store.get_store(_PROJECT_ROOT).clear_api_key("qc")
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        logger.error("清理加密库中的质检密钥失败，加密库可能残留旧密钥：%s", e)
     cfg["base_url"], cfg["api_key"], cfg["model"] = "", "", ""
     cfg["endpoint_override"] = {"base_url": "", "api_key": "", "model": ""}
     cfg["updated_at"] = datetime.now().isoformat(timespec="seconds")
@@ -1652,16 +1652,16 @@ def parse_json_loose(content: str) -> dict:
         obj = json.loads(text)
         if isinstance(obj, dict):
             return obj
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        logger.debug("JSON 候选解析失败（试下一个候选）：%s", e)
     m = re.search(r"\{.*\}", text, re.S)
     if m:
         try:
             obj = json.loads(m.group(0))
             if isinstance(obj, dict):
                 return obj
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.debug("JSON 候选解析失败（试下一个候选）：%s", e)
     # 最后再走一次多级容错（处理内嵌未转义引号等畸形输出）
     obj = _loads_lenient(text)
     return obj if isinstance(obj, dict) else {}

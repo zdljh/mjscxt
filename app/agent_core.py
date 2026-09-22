@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -30,6 +31,8 @@ import time
 import traceback
 from datetime import datetime
 from urllib.parse import quote
+
+logger = logging.getLogger(__name__)
 
 # ===================== 护栏参数 =====================
 
@@ -627,8 +630,8 @@ def _audit(project: str, job_id: str, name: str, args: dict, result: dict):
         }
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        logger.debug("追加智能体执行记录失败（忽略）：%s", e)
 
 
 # ===================== 工具执行（含护栏） =====================

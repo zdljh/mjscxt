@@ -397,8 +397,8 @@ class ScriptGenerator:
             end = content.rfind("}")
             if start != -1 and end != -1:
                 return json.loads(content[start:end+1])
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("JSON 切片解析失败（试下一个候选）：%s", e)
         return {
             "title": "未命名剧本",
             "characters": [],

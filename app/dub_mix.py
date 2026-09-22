@@ -213,16 +213,16 @@ def build_entries(lines: List[Dict], timeline: Dict, params: Optional[Dict] = No
         start = slot["start"] if slot else cursor
         try:
             start = float(start) + float(p.get("lead_in_sec") or 0)
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as e:
+            logger.debug("lead_in_sec 解析失败（按 0 处理）：%s", e)
         try:
             start += float(offsets.get(str(ln.get("line_id")), 0) or 0)
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as e:
+            logger.debug("偏移量解析失败（按 0 处理）：%s", e)
         try:
             start += float(p.get("gap_sec") or 0)
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as e:
+            logger.debug("gap_sec 解析失败（按 0 处理）：%s", e)
         if start < cursor:  # 同一镜头多句顺排，不倒挂
             start = cursor
         info = probe_media(path)

@@ -85,8 +85,8 @@ def decode_bytes(blob: bytes):
         text = blob.decode("utf-8")
         if "\ufffd" not in text and _bad_ratio(text) < 0.001:
             return text, "utf-8", "严格 UTF-8 解码成功"
-    except UnicodeDecodeError:
-        pass
+    except UnicodeDecodeError as e:
+        logger.debug("严格 UTF-8 解码失败（试下一个候选编码）：%s", e)
 
     try:
         from charset_normalizer import from_bytes
@@ -98,10 +98,10 @@ def decode_bytes(blob: bytes):
                 text = blob.decode(enc, errors="replace")
                 if _bad_ratio(text) < 0.005:
                     return text, enc, f"charset-normalizer 统计判定为 {enc}"
-            except (LookupError, UnicodeDecodeError):
-                pass
-    except ImportError:
-        logger.warning("charset-normalizer 未安装，中文编码将使用回退策略")
+            except (LookupError, UnicodeDecodeError) as e:
+                logger.debug("统计判定编码解码失败（试下一个候选编码）：%s", e)
+    except ImportError as e:
+        logger.warning("charset-normalizer 未安装（%s），中文编码将使用回退策略", e)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"charset-normalizer 探测异常：{e}")
 

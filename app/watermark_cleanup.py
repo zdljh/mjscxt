@@ -126,8 +126,8 @@ def clean_image(path: str, region: Sequence[float] = DEFAULT_REGION,
         if tmp and os.path.exists(tmp):
             try:
                 os.remove(tmp)
-            except OSError:
-                pass
+            except OSError as e:
+                logger.debug("清理临时文件失败（忽略）：%s", e)
     return rec
 
 
@@ -179,6 +179,6 @@ def clean_video(path: str, region: Sequence[float] = DEFAULT_REGION,
         if tmp and os.path.exists(tmp):
             try:
                 os.remove(tmp)
-            except OSError:
-                pass
+            except OSError as e:
+                logger.debug("清理临时文件失败（忽略）：%s", e)
     return rec

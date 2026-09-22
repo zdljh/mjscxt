@@ -426,8 +426,8 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
                                 h.update(_chunk)
                         meta["workflow"] = tpl
                         meta["workflow_sha256"] = h.hexdigest()
-            except Exception:  # noqa: BLE001  工作流指纹算不出不影响 meta 主体
-                pass
+            except Exception as e:  # noqa: BLE001  工作流指纹算不出不影响 meta 主体
+                logger.warning("工作流指纹计算失败（不影响 meta 主体）：%s", e)
             out = os.path.splitext(end_p)[0] + ".meta.json"
             with open(out, "w", encoding="utf-8") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -454,8 +454,8 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
             if progress_cb:
                 try:
                     progress_cb(n, total, r)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("进度回调异常（忽略，不阻断尾帧生成）：%s", e)
             continue
 
         _mirror(start, start_frame_link_path(keyframes_dir, seq))
@@ -516,8 +516,8 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
                 if verify_cb is None and r.get("ok") and os.path.abspath(scratch_end) != os.path.abspath(end_p):
                     try:
                         shutil.move(scratch_end, end_p)
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("尾帧 scratch → 正式目录 promote 失败，本镜尾帧未交付：%s", e)
                 break
             try:
                 _vres = verify_cb(scratch_end, shot, item)
@@ -536,8 +536,8 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
                 try:
                     if os.path.isfile(scratch_end):
                         os.remove(scratch_end)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("清理 scratch 尾帧失败（忽略）：%s", e)
                 break
             # verify_cb 允许返回 2 元组 (ok, reason)、3 元组 (ok, reason, unavailable)、
             # 或 4 元组 (ok, reason, unavailable, critical_issues)。
@@ -573,8 +573,8 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
                 try:
                     if os.path.isfile(scratch_end):
                         os.remove(scratch_end)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("清理 scratch 尾帧失败（忽略）：%s", e)
                 break
             # G1 止损：记录本镜质检特征（critical_issues/issues），连续相同则提前停
             if not v_ok:
@@ -611,8 +611,8 @@ def generate_keyframes(shots: List[dict], sb_map: Dict[str, str], keyframes_dir:
                 try:
                     if os.path.isfile(scratch_end):
                         os.remove(scratch_end)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("清理 scratch 尾帧失败（忽略）：%s", e)
             else:
                 logger.info(f"尾帧 shot {sid} 质检不通过（{v_reason}），换 seed 重画")
 

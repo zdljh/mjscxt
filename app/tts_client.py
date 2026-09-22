@@ -202,8 +202,8 @@ def check_environment(comfyui_url: str = COMFYUI_URL) -> Dict:
         speakers = node["input"]["required"]["speaker"][0]
         if isinstance(speakers, list) and speakers:
             result["speakers"] = speakers
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("speakers 字段取值失败（忽略）：%s", e)
 
     # 模型权重：models/qwen-tts 下逐项核对
     if os.path.isdir(TTS_MODEL_ROOT):
@@ -619,8 +619,8 @@ class QwenTTSClient:
             if gpu_task_gate.has_other_running_gpu_tasks(self_task_id):
                 logger.info("B-01 /free 守卫：本进程有其它 running GPU 任务，跳过 /free（避免卸他人模型）")
                 return
-        except Exception:  # noqa: BLE001  守卫失败不阻断卸载主流程
-            pass
+        except Exception as e:  # noqa: BLE001  守卫失败不阻断卸载主流程
+            logger.d("B-01 /free 互斥守卫检查失败（按「无其它任务」继续）：%s", e)
         try:
             req = urllib.request.Request(
                 f"{self.comfyui_url}/free",
@@ -689,8 +689,8 @@ class QwenTTSClient:
         finally:
             try:
                 os.remove(tmp)
-            except OSError:
-                pass
+            except OSError as e:
+                logger.debug("清理临时文件失败（忽略）：%s", e)
         info = probe_audio(out_path)
         if not info.get("ok") or (info.get("duration") or 0) <= 0:
             raise TTSError(f"产物音频无效：{out_path}（{info.get('error') or '时长为 0'}）")

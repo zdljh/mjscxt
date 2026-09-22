@@ -142,8 +142,8 @@ def _write_json(path: str, data: dict) -> None:
         try:
             if os.path.exists(tmp):
                 os.remove(tmp)
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug("清理临时文件失败（忽略）：%s", e)
         raise
 
 

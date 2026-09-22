@@ -254,8 +254,8 @@ def isolate_sfx(media_path: str, project: str, tag: str,
         try:
             if os.path.exists(tmp_wav):
                 os.remove(tmp_wav)
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug("清理人声分离临时文件失败（忽略）：%s", e)
 
     rec.update({"ok": True, "size_bytes": os.path.getsize(out_path),
                 "elapsed_sec": round(time.time() - t0, 2)})

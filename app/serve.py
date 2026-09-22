@@ -109,9 +109,9 @@ def _safe_run():
             logger.info("线程数 %d · 连接空闲超时 %ds", threads, channel_timeout)
             serve(app, host=host, port=port, threads=threads,
                   channel_timeout=channel_timeout, ident="mjscxt")
-        except ImportError:
+        except ImportError as e:
             logger.warning("=" * 68)
-            logger.warning("未安装 waitress，回退到 Flask 开发服务器。")
+            logger.warning("未安装 waitress（%s），回退到 Flask 开发服务器。", e)
             logger.warning("开发服务器无法可靠处理文件上传，请执行：")
             logger.warning("    pip install waitress")
             logger.warning("=" * 68)

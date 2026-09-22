@@ -115,8 +115,8 @@ def probe_media(path: str) -> Dict:
                     info["fps"] = round(int(num) / int(den), 3)
                 elif num:
                     info["fps"] = float(num)
-            except (ValueError, ZeroDivisionError):
-                pass
+            except (ValueError, ZeroDivisionError) as e:
+                logger.debug("fps 字段解析失败（忽略）：%s", e)
         if audios:
             # B-04 P1-3（已修复 S-01）：补 audio 采样率/声道探测，供音轨一致性判定
             info["sample_rate"] = audios[0].get("sample_rate")
@@ -218,8 +218,8 @@ def strip_audio(video_path: str, output_path: Optional[str] = None,
     try:
         if os.path.exists(tmp_out):
             os.remove(tmp_out)
-    except OSError:
-        pass
+    except OSError as e:
+        logger.debug("清理临时输出失败（忽略）：%s", e)
     report["error"] = f"剥离音轨失败：{last_err}"
     report["elapsed_sec"] = round(time.time() - t0, 2)
     return report
@@ -277,8 +277,8 @@ def ensure_audio_track(video_path: str, sample_rate: int = 48000) -> Dict:
         try:
             if os.path.exists(tmp_out):
                 os.remove(tmp_out)
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug("清理临时输出失败（忽略）：%s", e)
         report["error"] = (r.stderr or "ffmpeg 补音轨失败").strip()[-300:]
         return report
     after = probe_media(tmp_out)
@@ -286,8 +286,8 @@ def ensure_audio_track(video_path: str, sample_rate: int = 48000) -> Dict:
         report["error"] = "补音轨后仍未检测到音频流"
         try:
             os.remove(tmp_out)
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug("清理临时输出失败（忽略）：%s", e)
         return report
     os.replace(tmp_out, video_path)
     report.update({"ok": True, "changed": True, "has_audio_after": True,
@@ -374,8 +374,8 @@ class VideoPostProcessor:
             try:
                 if os.path.exists(list_file):
                     os.remove(list_file)
-            except OSError:
-                pass
+            except OSError as e:
+                logger.debug("清理 concat 清单文件失败（忽略）：%s", e)
             return ""
 
     def _concat_reencode(self, video_paths: List[str], output_path: str,
@@ -524,8 +524,8 @@ class VideoPostProcessor:
             if srt_file and os.path.exists(srt_file):
                 try:
                     os.remove(srt_file)
-                except OSError:
-                    pass
+                except OSError as e:
+                    logger.debug("清理临时字幕文件失败（忽略）：%s", e)
 
     def _format_time(self, seconds: float) -> str:
         """格式化时间为 SRT 格式"""

@@ -82,8 +82,8 @@ def _bump(key: str, delta=1) -> None:
     try:
         with _CALL_STATS_LOCK:
             _CALL_STATS[key] = _CALL_STATS.get(key, 0) + delta
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        logger.warning("调用统计累加失败（计数可能失真）：%s", e)
 
 # 前端伪控件 / 虚拟节点（不应提交给后端）
 PSEUDO_WIDGETS = {
