@@ -1743,10 +1743,17 @@ class ComfyUIClient:
                 try:
                     qc_result = qc_fn(best_file, shot_desc, qc_cfg, qc_style)
                 except Exception as qc_err:
-                    logger.warning(f"[H3-episode] 第 {attempt + 1} 次 QC 调用异常: {qc_err}")
+                    # A-1：QC 回调抛异常 = **不可判定**（接口/ffmpeg 不可用，与内容无关），
+                    # 不是"内容不达标"。旧实现 `continue` 会换种子重跑整集，且绕过 qc_stop_cb
+                    # 止损 —— 每次整片 20~44 段 H3、几十分钟 GPU，纯白烧。这里 break：
+                    # best_file 已就位，成片照常返回给调用方人工复核。
+                    logger.warning(
+                        f"[H3-episode] 第 {attempt + 1} 次 QC 调用异常"
+                        f"（不可判定，不重试）: {qc_err}")
                     qc_results.append({"attempt": attempt + 1, "passed": None,
+                                       "unavailable": True,
                                        "reason": f"QC 异常: {qc_err}"})
-                    continue
+                    break
                 qc_passed = qc_result.get("passed", False)
                 _v = qc_result.get("verdict") or {}
                 qc_results.append({
@@ -2014,10 +2021,16 @@ class ComfyUIClient:
             built = h3_prompt_kit.build_base(shot, "T2VA", style=style)
             existing = str(shot.get("prompt_h3") or "").strip()
             if not existing:
-                return built
+                # A-5：无参考图分支不经过 resolve()，必须自己过一道长度闸门
+                #（build_base 在超长 description 下同样可能越界）
+                return h3_prompt_kit.clamp_prompt(built)
             verdict = h3_prompt_kit.validate(existing)
-            return existing if verdict["valid"] else h3_prompt_kit.merge_detail(built, existing)
-        return h3_prompt_kit.resolve(shot, picture_defs, subjects, style=style)
+            # A-5：这条路径**完全绕过 resolve()**（既有 prompt_h3 直接生效），
+            # 能把裸 >6000 字符提示词原样送进 H3 —— 必须显式截断。
+            return h3_prompt_kit.clamp_prompt(
+                existing if verdict["valid"] else h3_prompt_kit.merge_detail(built, existing))
+        return h3_prompt_kit.clamp_prompt(
+            h3_prompt_kit.resolve(shot, picture_defs, subjects, style=style))
 
     def _build_h3_prompt(self, shot: dict, char_refs: List[dict], scene_refs: List[dict],
                          storyboard_ref: dict = None) -> str:
@@ -2030,5 +2043,9 @@ class ComfyUIClient:
         picture_defs, subjects = self._h3_picture_defs(char_refs, scene_refs, storyboard_ref)
         style = h3_prompt_kit.style_of(shot)
         if not picture_defs:
-            return h3_prompt_kit.build_base(shot, "T2VA", style=style)
-        return h3_prompt_kit.build_ref2va(shot, picture_defs, subjects, style=style)
+            # A-5 加固：本方法同样不经过 resolve()，且被 app.py 4 处直接调用
+            #（2057/2068/3715/3733），同一类"超长提示词被服务端静默截断"的口子。
+            return h3_prompt_kit.clamp_prompt(
+                h3_prompt_kit.build_base(shot, "T2VA", style=style))
+        return h3_prompt_kit.clamp_prompt(
+            h3_prompt_kit.build_ref2va(shot, picture_defs, subjects, style=style))

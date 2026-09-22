@@ -36,6 +36,7 @@ from typing import Optional
 # 关键：必须经由 env_loader 保证 .env 已加载，否则 MJSCXT_SECRET_KEY 读不到，
 # 会导致已加密的密钥全部解密失败（实际踩过的坑）。
 from env_loader import PROJECT_ROOT_DIR as _ENV_ROOT  # noqa: F401
+from fs_atomic import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -420,10 +421,7 @@ def scrub_plaintext_key(config_path: str, namespace: str, root_dir: str) -> bool
         return False
 
     try:
-        tmp = config_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, config_path)
+        atomic_write_json(config_path, data)
         logger.info(f"已迁移 {os.path.basename(config_path)} 中的明文密钥到加密库")
         return True
     except Exception as e:  # noqa: BLE001

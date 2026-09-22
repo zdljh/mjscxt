@@ -68,6 +68,7 @@ import audio_qc
 import plugin_registry
 import project_store
 import shot_key
+from fs_atomic import atomic_write_json
 import providers
 import prompt_qc
 import qc_client
@@ -2379,11 +2380,15 @@ def api_generate_script():
 # ===== 步骤2/3/4：资产生成（角色/物品/场景 + 多视角） =====
 
 def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_name: str,
-                         style: str = ""):
+                         style: str = "", overwrite: bool = False):
     """后台资产生成任务：基础图 + 多视角图
 
     P0 修复（④⑤）：全链路接入 AI 质检——基础图与每一张多视角图都必须送检；
     不达标自动重生成（换 seed），重试仍不达标 / 质检调用异常 → 阻断入库并标记 qc_blocked。
+
+    A-2 P0 断点续跑：新增 overwrite 参数（默认 False）。已达标入库的资产
+    （目录内已有非空图，判据同 pipeline.probe_assets）直接跳过，不再重复
+    「生成→质检→重画」；overwrite=True 时强制全量重生成。
 
     风格落地（2026-09-18 修复）：新增 style 参数。此前该任务**完全没有风格入参**，
     资产提示词只有 bible 的 reference_prompt_zh（实测其中零风格词），于是物品/角色/场景
@@ -2433,6 +2438,21 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
             name = asset.get('name', f'{asset_type}_{i+1}')
             try:
             
+                # A-2 P0 断点续跑：已达标入库的资产不重复「生成→质检→重画」。
+                # 就绪判据与 pipeline.probe_assets / _first_existing_asset_image 一致
+                # （目录内任意一张非空白名单图）。仅 overwrite=True 时强制重生成。
+                # ⚠️ 只在「已就绪」时提前 continue；未就绪项继续走下面的重要性过滤
+                #    与完整生成链路，临时道具的 skip 路径不受影响。
+                if not overwrite:
+                    _ready_img = _first_existing_asset_image(
+                        os.path.join(base_dir, project_name, name))
+                    if _ready_img:
+                        app.logger.info("资产已达标入库，断点续跑跳过：%s（%s）",
+                                        name, _ready_img)
+                        results.append({"name": name, "status": "skipped",
+                                        "reason": "已达标入库，断点续跑跳过"})
+                        continue
+
                 # 物品过滤：只生成重要道具的参考图
                 if asset_type == 'item':
                     importance = asset.get('importance', '')
@@ -2773,6 +2793,8 @@ def api_generate_assets():
     if err is not None:
         return err
     assets = data.get('assets', [])
+    # A-2 P0：断点续跑开关。默认 False → 已达标入库的资产跳过；显式传 true 强制重生成
+    overwrite = bool(data.get('overwrite'))
 
     if asset_type not in ("character", "item", "scene"):
         return jsonify({"error": "asset_type 必须是 character/item/scene"}), 400
@@ -2786,13 +2808,14 @@ def api_generate_assets():
         generation_state[task_id] = {
             "status": "running", "asset_type": asset_type,
             "progress": 0, "total": len(assets), "current": 0,
-            "phase": "基础图", "results": []
+            "phase": "基础图", "results": [],
+            "overwrite": overwrite,
         }
 
     thread = threading.Thread(
         target=_generate_asset_task,
         args=(task_id, assets, asset_type, project_name,
-              data.get('style') or _project_style(project_name))
+              data.get('style') or _project_style(project_name), overwrite)
     )
     thread.daemon = True
     thread.start()
@@ -3342,22 +3365,13 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             "qc_blocked_count": blocked,
             "shots": manifest_shots,
         }
-        # B-15 P2-3：manifest 原子写（.tmp + os.replace），落盘失败不回滚 success
+        # A-3 P1：manifest 原子写改走 fs_atomic（唯一临时名 + flush/fsync + .bak 快照 +
+        # os.replace 重试），替代旧「固定 .tmp + os.replace」。落盘失败仍回滚 status。
         _sb_mp = os.path.join(out_dir, "storyboard_manifest.json")
-        _sb_tmp = _sb_mp + ".tmp"
         try:
-            with open(_sb_tmp, "w", encoding="utf-8") as f:
-                json.dump(manifest, f, ensure_ascii=False, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(_sb_tmp, _sb_mp)
+            atomic_write_json(_sb_mp, manifest)
         except Exception as _mp_err:
             app.logger.warning(f"分镜 manifest 原子写失败（已回滚 status）：{_mp_err}")
-            if os.path.exists(_sb_tmp):
-                try:
-                    os.unlink(_sb_tmp)
-                except OSError as e:
-                    app.logger.debug("清理分镜临时文件失败（忽略）：%s", e)
             with lock:
                 generation_state[task_id].update({
                     "status": "failed",
@@ -3848,9 +3862,10 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                             project_name, "video", episode_tag or "episode", "整片质检",
                             _ep_qc_attempt["n"], None, video_path, verdict, style=style)
                         # 挂上本集的段提示词集合，供下次重试时按相似度召回
-                        _record_qc_lesson(project_name, "video",
-                                          "\n".join((sg.get("prompt") or "") for sg in segs),
-                                          rec)
+                        # A-5 P1：整片模式段数可达 20~44 段，全量拼接可达数十 KB —— 全量入
+                        # 教训库会撑爆/稀释检索。截断到 2000 字符（保留段边界换行，人可读）。
+                        _seg_blob = "\n".join((sg.get("prompt") or "") for sg in segs)
+                        _record_qc_lesson(project_name, "video", _seg_blob[:2000], rec)
                         app.logger.info(
                             "[教训][video] project=%s mode=episode attempt=%d ok=True "
                             "passed=False → 已沉淀",
@@ -3950,7 +3965,11 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
             if os.path.abspath(src) != os.path.abspath(dst):
                 shutil.move(src, dst)
             qc_passed = not episode_failed
-            qc_unavailable = bool(_ep_qc_attempt.get("unavailable"))
+            # A-1 P1：整片 QC 调用异常（comfyui_client 已改「break + 追加 unavailable 条目」，
+            # 不再触碰 app.py 的 _ep_qc_attempt 闭包）时，仅看闭包会漏判 → 结果/UI 会误报
+            # 「QC 不通过」。这里同时看 qc_results 里是否存在 unavailable 条目，口径与闭包对齐。
+            qc_unavailable = bool(_ep_qc_attempt.get("unavailable")) or \
+                any(isinstance(r, dict) and r.get("unavailable") for r in qc_results)
             item = {"success": True, "mode": "episode",
                     "segment_count": len(segs),
                     "qc_passed": qc_passed,
@@ -8446,13 +8465,9 @@ def _dub_worker(task_id: str, project_name: str, plan: dict, out_dir: str,
                       for r in results],
         }
         manifest_path = os.path.join(out_dir, f"ep{int(episode):02d}_dub_manifest.json")
-        # B-08 P1-10：manifest 原子写（先 .tmp 后 os.replace），崩溃不留下半写文件
-        _mp_tmp = manifest_path + ".tmp"
-        with open(_mp_tmp, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(_mp_tmp, manifest_path)
+        # A-3 P1：manifest 原子写改走 fs_atomic（唯一临时名 + flush/fsync + .bak 快照 +
+        # os.replace 重试），替代旧「固定 .tmp + os.replace」
+        atomic_write_json(manifest_path, manifest)
 
         _msg = f"成功 {len(ok_items)} 句 / 失败 {len(results) - len(ok_items)} 句"
         if aqua.get("enabled") and aqua.get("checked"):
@@ -8474,12 +8489,6 @@ def _dub_worker(task_id: str, project_name: str, plan: dict, out_dir: str,
         app.logger.error(f"配音任务失败: {e}")
         # B-16 P2-11：配音失败 → 清理本任务产生的中间产物（lines 目录、merged 半成品）
         _cleanup_scratch_dir(os.path.join(out_dir, "lines"), app.logger)
-        _mp_tmp_f = os.path.join(out_dir, f"ep{int(episode):02d}_dub.{fmt}.tmp")
-        if os.path.exists(_mp_tmp_f):
-            try:
-                os.remove(_mp_tmp_f)
-            except OSError as e:
-                app.logger.debug("清理混音临时文件失败（忽略）：%s", e)
         with dub_lock:
             dub_tasks[task_id].update({"status": "failed", "error": str(e), "phase": "失败"})
     except Exception as e:  # noqa: BLE001

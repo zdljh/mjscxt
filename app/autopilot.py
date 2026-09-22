@@ -45,6 +45,8 @@ import threading
 import time
 import traceback
 
+from fs_atomic import atomic_write_json, read_json_strict
+
 logger = logging.getLogger(__name__)
 
 # ===================== 状态与持久化 =====================
@@ -144,21 +146,17 @@ def _nonempty(p: str) -> bool:
 
 
 def _write_json(path: str, data) -> None:
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    """原子写 JSON（A-3）：唯一临时名 + fsync + .bak 快照 + replace 重试。"""
+    atomic_write_json(path, data)
 
 
 def _read_json(path: str, default):
-    if not _nonempty(path):
-        return default
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f) or default
-    except Exception:  # noqa: BLE001
-        return default
+    """严格读 JSON（A-4）：缺失→default；损坏→从 .bak 恢复；无 .bak→抛错。
+
+    旧实现 `except Exception: return default` 会把「文件损坏」静默读成「空」，
+    下游 `set_plan` 这类「读改写」再基于空快照写回 → 计划被永久清空。
+    """
+    return read_json_strict(path, default)
 
 
 # ===================== 运行时状态持久化（暂停状态跨重启保持） =====================
@@ -202,7 +200,10 @@ def _restore_once() -> None:
     try:
         _restore_runtime()
     except Exception as e:  # noqa: BLE001  读取失败不得影响服务
-        logger.debug("托管运行时状态恢复失败（按未暂停处理）：%s", e)
+        # A-4：runtime.json 损坏且无 .bak 时 fail-loud，但「恢复暂停状态」失败
+        # 不能阻断服务启动，故在此边界降级为「未暂停」——必须是显式 error 级别，
+        # 不能再是 debug（旧实现等于静默）。
+        logger.error("托管运行时状态恢复失败（按未暂停处理）：%s", e)
         globals()["_RUNTIME_RESTORED"] = True
 
 
@@ -214,8 +215,23 @@ def plan_path(project_name: str) -> str:
 
 
 def get_plan(project_name: str) -> dict:
+    """读托管计划（缺字段补默认值）。
+
+    A-4 边界决策：`_read_json` 对「损坏且无 .bak」会 fail-loud 抛错，但
+    `get_plan` 被 app.py 多个**只读**接口直接调用（无法在本文件内为其加保护），
+    且 plan.json 属于「缺了可用 PLAN_DEFAULTS 兜底」的配置类文件（非不可再生数据）。
+    因此在这里显式记 error 后降级为默认计划 —— 是「响亮的降级」而非静默清空。
+    ⚠️ 注意 `set_plan` 会基于 `get_plan` 的结果回写；降级后回写的是一份「默认计划」，
+    但它比「损坏内容」更有意义，且此时 .bak 恢复已在 read_json_strict 内尝试过。
+    """
     plan = dict(PLAN_DEFAULTS)
-    plan.update(_read_json(plan_path(project_name), {}) or {})
+    try:
+        data = _read_json(plan_path(project_name), {}) or {}
+    except (ValueError, OSError) as e:
+        logger.error("项目 %s 的 plan.json 损坏且无可用 .bak，本次按默认计划处理：%s",
+                     project_name, e)
+        return plan
+    plan.update(data)
     return plan
 
 

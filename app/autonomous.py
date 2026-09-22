@@ -28,6 +28,8 @@ import time
 import threading
 from datetime import datetime
 
+from fs_atomic import atomic_write_json, read_json_strict
+
 logger = logging.getLogger(__name__)
 
 # ===================== 状态持久化 =====================
@@ -45,23 +47,18 @@ def _ensure_state_dir(project: str) -> str:
 
 
 def _read_state(project: str) -> dict:
-    path = _state_path(project)
-    if not os.path.isfile(path) or os.path.getsize(path) == 0:
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f) or {}
-    except Exception:
-        return {}
+    """严格读项目状态（A-4）：缺失→{}；损坏→从 .bak 恢复；无 .bak→抛错。
+
+    旧实现 `except Exception: return {}` 会把损坏的 state.json 静默读成空，
+    而 `stop_autonomous` / `resume_autonomous` 是「读改写」，会把空快照写回 →
+    项目风格设定 / novel_id 被永久清空。
+    """
+    return read_json_strict(_state_path(project), {})
 
 
 def _write_state(project: str, data: dict) -> None:
-    path = _state_path(project)
-    tmp = path + ".tmp"
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    """原子写项目状态（A-3）：唯一临时名 + fsync + .bak 快照 + replace 重试。"""
+    atomic_write_json(_state_path(project), data)
 
 
 # ===================== 一键全自动生产 =====================
@@ -117,6 +114,10 @@ def start_autonomous(project: str, novel_id: str, plan_overrides: dict = None) -
 
     # 3. 同步 AI 对话设定到 autopilot plan
     state_path = _ensure_state_dir(project_key)
+    # A-4 边界决策：**不**在此处吞掉损坏异常。start 下面第 5 步会用一份「新建的
+    # state」覆盖 state.json（只继承 style_brief），若把损坏态读成空再写回，
+    # AI 对话敲定的风格设定会被永久清空。故让 read_json_strict 的抛错上抛，
+    # 用户看到明确的启动失败并可按提示从 .bak 恢复。
     current_state = _read_state(project_key)
     style_brief = current_state.get("style_brief") or ""
 
@@ -191,9 +192,18 @@ def stop_autonomous(project: str = "") -> dict:
     import autopilot
     autopilot.pause("用户主动停止")
     if project:
-        state = _read_state(project)
-        state["stopped_at"] = datetime.now().isoformat()
-        _write_state(project, state)
+        # A-4 边界决策：「停止生产」必须永远可用（运维安全阀），不能因为
+        # state.json 损坏就抛错挡住用户。但绝不能用空快照覆盖 —— 读不到就
+        # 显式报错并**跳过** stopped_at 落盘，等人工修复后再写。
+        try:
+            state = _read_state(project)
+        except (ValueError, OSError) as e:
+            logger.error("项目 %s 的 state.json 损坏且无可用 .bak，"
+                         "跳过 stopped_at 落盘以免覆盖（autopilot 已暂停）：%s",
+                         project, e)
+        else:
+            state["stopped_at"] = datetime.now().isoformat()
+            _write_state(project, state)
     return {"success": True, "message": "已停止生产"}
 
 
@@ -202,9 +212,17 @@ def resume_autonomous(project: str = "") -> dict:
     import autopilot
     autopilot.resume()
     if project:
-        state = _read_state(project)
-        state.pop("stopped_at", None)
-        _write_state(project, state)
+        # A-4 边界决策：同 stop_autonomous —— 恢复动作不能被状态文件损坏挡住，
+        # 但也不能把损坏态读成空再写回；读不到就显式报错并跳过落盘。
+        try:
+            state = _read_state(project)
+        except (ValueError, OSError) as e:
+            logger.error("项目 %s 的 state.json 损坏且无可用 .bak，"
+                         "跳过 stopped_at 清除以免覆盖（autopilot 已恢复）：%s",
+                         project, e)
+        else:
+            state.pop("stopped_at", None)
+            _write_state(project, state)
     return {"success": True, "message": "已恢复生产"}
 
 
@@ -229,7 +247,15 @@ def status(project: str = "") -> dict:
 
     for proj in projects:
         proj_key = proj.get("dir_key", "")
-        state = _read_state(proj_key)
+        # A-4 边界决策：status 是**只读**轮询视图，不参与任何「读改写」，
+        # 单个项目状态损坏不应让整个状态接口 500。故显式记 error 后降级为 {}，
+        # 前端会看到该项目字段为空（响亮降级，非静默清空）。
+        try:
+            state = _read_state(proj_key)
+        except (ValueError, OSError) as e:
+            logger.error("项目 %s 的 state.json 损坏且无可用 .bak，"
+                         "该项目的状态字段本次按空处理：%s", proj_key, e)
+            state = {}
         progress = autopilot.project_progress(proj_key)
         plan = autopilot.get_plan(proj_key)
 
@@ -391,7 +417,14 @@ def list_all_projects() -> list:
     projects = []
     for proj in project_store.list_projects():
         proj_key = proj.get("dir_key", "")
-        state = _read_state(proj_key)
+        # A-4 边界决策：列表视图只读；状态损坏的项目显式报错并**跳过该条**，
+        # 既不阻断整个列表，也不用空快照冒充「有生产记录的项目」。
+        try:
+            state = _read_state(proj_key)
+        except (ValueError, OSError) as e:
+            logger.error("项目 %s 的 state.json 损坏且无可用 .bak，"
+                         "已从「有生产记录的项目」列表中跳过：%s", proj_key, e)
+            continue
         if not state:
             continue
         projects.append({

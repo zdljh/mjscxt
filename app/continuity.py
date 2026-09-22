@@ -25,6 +25,7 @@ import re
 import time
 from datetime import datetime
 
+from fs_atomic import atomic_write_json, read_json_strict
 from llm_client import LLMError, LLMTruncatedError
 from novel_to_script import (
     CHAPTER_CHUNK_CHARS,
@@ -93,23 +94,34 @@ def _path(continuity_dir: str, project_key: str, filename: str) -> str:
 
 
 def load_json(path: str, default=None):
-    if not os.path.isfile(path):
-        return default
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"连贯性文件读取失败（按默认值处理）{path}：{e}")
-        return default
+    """严格读 JSON（A-4）：缺失→default；损坏→从 .bak 恢复；无 .bak→抛错。
+
+    旧实现 `except Exception: logger.warning(...); return default` 会把「文件损坏」
+    降级成「没有内容」，而 bible / style_guide / quotes / voice_dict / camera_terms
+    这几个读取点都是「读改写」（读出来改一改再 save_json 写回）→ 损坏态被读成空后
+    写回，项目设定库被永久清空。现在改为 fail-loud，由调用方按需在边界处显式降级。
+    """
+    return read_json_strict(path, default)
 
 
 def save_json(path: str, data) -> str:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    """原子写 JSON（A-3）：唯一临时名 + fsync + .bak 快照 + replace 重试。"""
+    atomic_write_json(path, data)
     return path
+
+
+def _read_optional(path: str, what: str):
+    """**只读视图**专用：损坏且无 .bak 时显式记 error 并降级为 None。
+
+    仅用于「前端展示类」读取点 —— 它们由 app.py 直接调用（app.py 不在本次改动
+    范围内，无法在其内部加保护），且读不到只是少一块展示信息，不影响数据完整性。
+    生产链路的读取一律保持 fail-loud（`load_json` 直接抛错）。
+    """
+    try:
+        return load_json(path, None)
+    except (ValueError, OSError) as e:
+        logger.error("%s 损坏且无可用 .bak，本次按「无数据」展示：%s", what, e)
+        return None
 
 
 def _as_dict(data) -> dict:
@@ -792,7 +804,19 @@ def validation_path(continuity_dir: str, project_key: str, episode_no) -> str:
 
 
 def load_state(continuity_dir: str, project_key: str, episode_no):
-    data = load_json(state_path(continuity_dir, project_key, episode_no), None)
+    """读单集 state_in / state_out。
+
+    A-4 边界决策：这是**只读**读取点（无任何写回），且被 app.py:7669/7674 的
+    「单集连贯性视图 / 前端展示」直接调用（app.py 不在本次改动范围内）。
+    因此在这里把 read_json_strict 的 fail-loud 抛错显式降级为 None 并记 error ——
+    响亮降级，绝不静默；且因为没有写回，不会造成数据清空。
+    """
+    try:
+        data = load_json(state_path(continuity_dir, project_key, episode_no), None)
+    except (ValueError, OSError) as e:
+        logger.error("连贯性 state 文件损坏且无可用 .bak（%s 第%s集），本次按「无 state」处理：%s",
+                     project_key, episode_no, e)
+        return None
     return data if isinstance(data, dict) else None
 
 
@@ -801,7 +825,19 @@ def save_state(continuity_dir: str, project_key: str, state: dict) -> str:
 
 
 def load_summary_card(continuity_dir: str, project_key: str, episode_no):
-    data = load_json(summary_path(continuity_dir, project_key, episode_no), None)
+    """读「上集摘要卡」。
+
+    A-4 边界决策：摘要卡是**只读派生数据**（可由上一集剧本重新生成），且出现在
+    app.py 直接调用的 `episode_continuity_view` 里。故损坏时显式记 error 并降级为
+    None（响亮降级，保持原「无卡片→None」契约），不阻断视图。
+    """
+    path = summary_path(continuity_dir, project_key, episode_no)
+    try:
+        data = load_json(path, None)
+    except (ValueError, OSError) as e:
+        logger.error("连贯性摘要卡损坏且无可用 .bak（%s 第%s集），本次按「无摘要卡」处理：%s",
+                     project_key, episode_no, e)
+        return None
     return data if isinstance(data, dict) else None
 
 
@@ -1888,7 +1924,8 @@ def episode_continuity_view(continuity_dir: str, project_key: str, episode_no: i
         "summary_card": load_summary_card(continuity_dir, project_key, ep),
         "summary_path": os.path.abspath(summary_path(continuity_dir, project_key, ep)),
         "prev_summary_card": load_summary_card(continuity_dir, project_key, ep - 1),
-        "validation": load_json(validation_path(continuity_dir, project_key, ep), None),
+        "validation": _read_optional(
+            validation_path(continuity_dir, project_key, ep), "连贯性校验结果"),
         "validation_path": os.path.abspath(validation_path(continuity_dir, project_key, ep)),
         # ④⑤ 原文覆盖率摘要（字段已规整：覆盖率/阈值/达标/遗漏预览/补生成/复检轨迹，前端可直读）
         "coverage": coverage_mod.summary_for_meta(

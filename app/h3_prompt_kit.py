@@ -65,8 +65,42 @@ BEAT_MAX_SEC = 6.0
 #: 无风格时的兜底（保持历史行为；有 style 时一律以 style 为准）
 _DEFAULT_STYLE = "国漫3D渲染"
 
+#: 提示词长度闸门（A-5）：H3 服务端对超长提示词**静默截断**，被砍掉的正是末尾的
+#: ``overall_soundscape`` / ``non_diegetic_music`` 与后段动作节拍 —— 且日志里没有任何痕迹
+#: （"关键词丢失"的典型形态）。这里在客户端先截断并告警，让丢失可见、可控。
+MAX_PROMPT_CHARS = 6000
+#: 单段"补充细节"（旧裸英文提示词 / merged detail）的长度闸门
+MAX_DETAIL_CHARS = 800
+
+#: 截断标记（计入闸门额度，保证输出严格不超过 limit）
+_CLAMP_MARK = "…[截断]"
+
 _CJK_RE = re.compile(r"[\u3400-\u9fff]")
 _PAREN_NOTE_RE = re.compile(r"[（(]\s*(旁白|画外音|音效|配乐|BGM|VO|OS)[^）)]*[）)]", re.IGNORECASE)
+
+
+def _clamp(text: str, limit: int, label: str) -> str:
+    """把 ``text`` 截到 ``limit`` 字符以内；超长时告警并以 ``…[截断]`` 收尾
+
+    ⚠️ 标记本身也占额度（``text[:limit - len(mark)] + mark``），保证返回值**严格 ≤ limit**。
+    若照字面写成 ``text[:limit] + mark``，6000 的闸门会漏出 6005 字符 —— 服务端照样再砍一刀，
+    闸门就白设了。
+    """
+    if len(text) <= limit:
+        return text
+    logger.warning("提示词超长截断：%s %d→%d 字符（末尾以 …[截断] 标记）", label, len(text), limit)
+    if limit <= len(_CLAMP_MARK):
+        return text[:limit]
+    return text[:limit - len(_CLAMP_MARK)] + _CLAMP_MARK
+
+
+def clamp_prompt(text: str) -> str:
+    """对外统一入口：把最终提示词截到 :data:`MAX_PROMPT_CHARS`（标签 ``prompt_h3``）
+
+    任何产出最终 H3 提示词的路径都应过一道这里，避免绕过 :func:`resolve` 的裸返回
+    （例如 ``comfyui_client.resolve_h3_prompt`` 里直接放行既有 ``prompt_h3`` 的分支）。
+    """
+    return _clamp(str(text or ""), MAX_PROMPT_CHARS, "prompt_h3")
 
 
 # --------------------------------------------------------------------------- #
@@ -286,6 +320,9 @@ def build_detailed_description(shot: dict, duration: float, style: str = "",
     out: List[str] = []
     for idx, (start, _span, text) in enumerate(beats, start=1):
         clause = _strip_end(text)
+        # A-5：单节拍的画面细节（description + visual_detail）也设闸门，
+        # 否则历史超长描述会把 detailed_description 整段撑爆。
+        clause = _clamp(clause, MAX_DETAIL_CHARS, "build_detailed_description.detail")
         if idx == 1 and first_ref:
             clause += f"，构图、景别与人物位置以 {first_ref} 为基准"
         line = f"[Shot {idx}] {fmt_ts(start)} {camera}：{clause}。"
@@ -444,7 +481,7 @@ def merge_detail(prompt: str, detail: str) -> str:
     失去参考图语义；丢弃又浪费了模型写出的画面信息。折中做法是把它作为
     补充细节粘到详细描述之后，既保住结构化语义，又不丢信息。
     """
-    detail = str(detail or "").strip()
+    detail = _clamp(str(detail or "").strip(), MAX_DETAIL_CHARS, "merge_detail.detail")
     if not detail:
         return prompt
     lines = str(prompt or "").split("\n")
@@ -483,13 +520,13 @@ def resolve(shot: dict, picture_defs: Sequence[Tuple[str, str]] = (),
         built = build_base(shot, "T2VA", duration=duration, style=style)
 
     if not existing:
-        return built
+        return clamp_prompt(built)
     verdict = validate(existing)
     if verdict["valid"]:
-        return existing
+        return clamp_prompt(existing)
     logger.info("prompt_h3 结构不合规（缺 %s），改用规范构建器并并入原描述",
                 ",".join(verdict["missing"]) or "未知")
-    return merge_detail(built, existing)
+    return clamp_prompt(merge_detail(built, existing))
 
 
 def style_of(shot: dict, fallback: str = "") -> str:
@@ -499,6 +536,7 @@ def style_of(shot: dict, fallback: str = "") -> str:
 
 __all__ = [
     "REF_SECTIONS", "BASE_SECTIONS",
+    "MAX_PROMPT_CHARS", "MAX_DETAIL_CHARS", "clamp_prompt",
     "fmt_ts", "lang_tag", "dialogue_lines", "speaker_slots",
     "build_soundscape", "build_music", "build_summary",
     "build_detailed_description", "build_ref2va", "build_base",
