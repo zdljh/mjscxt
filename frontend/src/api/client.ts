@@ -77,7 +77,8 @@ export const projectsApi = {
     method: 'POST',
     body: JSON.stringify(data),
   }),
-  delete: (id: string) => request<void>(`/projects/${id}`, { method: 'DELETE' }),
+  // 删除统一走 deleteV2（POST /projects/<id>/delete）；旧 delete（DELETE /projects/<id>）
+  // 后端该路由仅支持 GET、无对应删除端点且前端零调用，已作为死方法移除。
   deleteV2: (id: string, confirm?: boolean) =>
     request<{ success: boolean }>(`/projects/${id}/delete`, {
       method: 'POST',
@@ -178,8 +179,8 @@ export const charactersApi = {
       method: 'PUT',
       body: JSON.stringify(data),
     }),
-  delete: (id: string) =>
-    request<void>(`/characters/${id}`, { method: 'DELETE' }),
+  // 旧 delete（DELETE /characters/<id>）后端无对应删除端点（单资源仅 PUT）
+  // 且前端零调用，已作为死方法移除；角色删除如需支持应走后端新增端点。
 };
 
 // --- Relations ---

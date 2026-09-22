@@ -1218,6 +1218,35 @@ def _deliverable_of(ctx, steps: dict) -> str:
     return ""
 
 
+def backfill_style_from_ai_settings(config: dict, project_name: str,
+                                    episode_no: int = 0) -> str:
+    """风格回填（2026-09-22 P-2 风格未生效）：config.style 为空时，从 AI 总控落盘的
+    创作设定（ai_chat/project_settings.json 的 style_brief）回填。
+
+    根因：总控 apply 设定的风格只写 project_settings.json，而托管 plan.json 缺 style
+    字段 → run-once / 托管轮转 / 总控 produce_episode 三条生产入口一律带空 style 进
+    流水线，剧本与提示词全落回硬编码默认「3D动漫渲染」。此处单点回填覆盖全部入口。
+
+    返回实际回填的风格串（未回填/读取失败返回 ""）。就地更新 config。
+    """
+    if (config.get("style") or "").strip():
+        return config["style"]
+    try:
+        A = _A()
+        brief = (A.ai_chat.settings_view(A.AI_SETTINGS_PATH, project_name)
+                 .get("style_brief") or "").strip()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("AI 总控风格设定读取失败（本集沿用默认风格）：%s", e)
+        return ""
+    if not brief:
+        return ""
+    norm = _A().style_kit.normalize_style(brief) or brief
+    config["style"] = norm
+    logger.info("第%s集：风格回填自 AI 总控设定（托管计划未带 style）：%s",
+                episode_no, norm)
+    return norm
+
+
 def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: dict,
                 chapter: dict, progress_cb=None, should_stop=None) -> dict:
     """跑完一集的完整流水线，返回可直接落库的结果字典
@@ -1238,6 +1267,7 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
     """
     A = _A()
     started = time.time()
+    backfill_style_from_ai_settings(config, project_name, episode_no)
     # 进度单调化：各步骤内部回报的百分比（如剧本步骤的 4%~18%）与整体锚点百分比
     # 来源不同，直接透传会让进度条回退（实测出现 18% → 16% → 17%）。无人值守界面里
     # 「进度倒退」非常误导，这里统一钳住只增不减。
