@@ -305,8 +305,25 @@ class VideoPostProcessor:
     def __init__(self, comfyui_url: str = COMFYUI_URL):
         self.comfyui_url = comfyui_url
 
+    def _concat_fail(self, caller: str, reason: str) -> str:
+        """拼接失败的**唯一出口**：按契约返回 ``""``，但必须先把原因留痕。
+
+        D-10（P2，契约脆弱）：``concat_videos`` 用空串同时表达「失败」与「无输出」，
+        且不抛异常 —— 返回值**无法携带失败理由**。调用方一旦漏判空，就会把 ``""``
+        当成合法路径继续喂给 ffmpeg，报出与真实原因无关的错误，排障时被彻底带偏。
+
+        保持返回契约不变（改动风险大于收益），改为在返回前把「谁调的 + 为什么失败」
+        写进 error 日志：``reason`` 必须带上 ffmpeg 的真实输出（stderr / 返回码 / 异常类型），
+        而不是「合并失败」这种无信息量的套话。
+        """
+        logger.error("concat_videos 失败[调用方=%s]：%s"
+                     "（按契约返回空串，调用方必须判空后才能继续）",
+                     (caller or "未标注"), reason)
+        return ""
+
     def concat_videos(self, video_paths: List[str], output_path: str,
-                     audio_paths: Optional[List[str]] = None) -> str:
+                     audio_paths: Optional[List[str]] = None,
+                     caller: str = "") -> str:
         """使用 FFmpeg 合并视频
 
         S-01 修复：拼接前探测每个片段的音轨参数（codec/sample_rate/channels）。
@@ -316,15 +333,17 @@ class VideoPostProcessor:
         返回值契约（M3/A-23）：成功返回 output_path；**任何失败/异常/空输入一律返回 ""**
         （不抛异常，保持既有调用方语义）。⚠️ 所有调用点必须对返回值判空（`if not ret` /
         `_nonempty(path)`）；已核实全库仅 pipeline.py:876（concat 后 `_nonempty(tmp)`）与
-        本类 :596（`if not self.concat_videos(...)`）两处，均判空。外部新增调用务必照此判空。
+        本类（`if not self.concat_videos(...)`）两处，均判空。外部新增调用务必照此判空，
+        并在 `verify_project_audit.py` 的守卫里登记（脚本会断言「所有调用点都判空」）。
+
+        D-10：因为返回值带不了失败理由，特新增 `caller` 参数（调用方自报标识）—— 每条
+        返回 `""` 的路径都会经 :meth:`_concat_fail` 打一条带调用方标识 + ffmpeg 真实原因的
+        error 日志。**新调用点请务必传 `caller`**（如 `caller="pipeline.step_final"`）。
         """
         if not video_paths:
-            logger.warning("合并视频失败：输入片段为空")
-            return ""
+            return self._concat_fail(caller, "输入片段为空（video_paths 为空列表）")
 
-        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-
-        # 探测音轨参数一致性
+        # 探测音轨参数一致性（probe_media 自身不抛异常，任何异常落到 info.error）
         probes = [probe_media(p) for p in video_paths]
         audio_params = set()
         has_any_audio = False
@@ -339,47 +358,51 @@ class VideoPostProcessor:
 
         if need_reencode:
             logger.info(f"音轨参数不一致（{len(audio_params)} 种），走 concat filter 重编码路径")
-            return self._concat_reencode(video_paths, output_path, probes)
+            return self._concat_reencode(video_paths, output_path, probes, caller=caller)
 
         # 参数一致 → 走 concat demuxer（快，不重编码）
         list_file = output_path + ".list"
-        with open(list_file, 'w', encoding='utf-8') as f:
-            for v in video_paths:
-                f.write(f"file '{os.path.abspath(v)}'\n")
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", list_file,
-            "-c", "copy",
-            output_path
-        ]
 
         try:
+            # 建目录也放进 try：docstring 承诺「任何失败/异常一律返回 ""」，建目录失败
+            # （盘不存在/无权限）同样属于失败路径，不能把异常抛给调用方。
+            os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+            with open(list_file, 'w', encoding='utf-8') as f:
+                for v in video_paths:
+                    f.write(f"file '{os.path.abspath(v)}'\n")
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", list_file,
+                "-c", "copy",
+                output_path
+            ]
+
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if result.returncode == 0:
                 logger.info(f"视频合并成功（demuxer -c copy）: {output_path}")
                 os.remove(list_file)
                 return output_path
-            else:
-                # -c copy 失败（常见原因：音视频参数实际不一致但探测未捕获，
-                # 如 H265 vs H264 混拼、关键帧对齐失败）→ 降级重编码兜底
-                logger.warning(f"demuxer 拼接失败，降级 concat filter 重编码：{result.stderr[-300:]}")
-                os.remove(list_file) if os.path.exists(list_file) else None
-                return self._concat_reencode(video_paths, output_path, probes)
+            # -c copy 失败（常见原因：音视频参数实际不一致但探测未捕获，
+            # 如 H265 vs H264 混拼、关键帧对齐失败）→ 降级重编码兜底
+            logger.warning(f"demuxer 拼接失败，降级 concat filter 重编码：{(result.stderr or '')[-300:]}")
+            if os.path.exists(list_file):
+                os.remove(list_file)
+            return self._concat_reencode(video_paths, output_path, probes, caller=caller)
         except Exception as e:
-            logger.error(f"合并视频失败: {e}")
             # G8：异常路径也要清掉 concat list 临时文件，不留 .list 残片
             try:
                 if os.path.exists(list_file):
                     os.remove(list_file)
-            except OSError as e:
-                logger.debug("清理 concat 清单文件失败（忽略）：%s", e)
-            return ""
+            except OSError as _ce:
+                logger.debug("清理 concat 清单文件失败（忽略）：%s", _ce)
+            return self._concat_fail(
+                caller, f"concat demuxer 执行异常：{type(e).__name__}: {e}")
 
     def _concat_reencode(self, video_paths: List[str], output_path: str,
-                         probes: List[Dict]) -> str:
+                         probes: List[Dict], caller: str = "") -> str:
         """concat filter 重编码拼接（分辨率/帧率由源片实测推导，不硬编码）
 
         B-05 P1-4：原实现硬编码 scale=1280:720 + fps=30 → 竖屏 9:16 项目被悄悄
@@ -391,9 +414,11 @@ class VideoPostProcessor:
           [i:a?]aresample/aformat → [ai]
           [v0][v1]...concat=n:1:0 → [outv]
           [a0][a1]...concat=n:0:1 → [outa]
+
+        D-10：失败同样经 `_concat_fail` 出口，`caller` 由 `concat_videos` 透传。
         """
         if not video_paths:
-            return ""
+            return self._concat_fail(caller, "重编码路径输入片段为空（video_paths 为空列表）")
         n = len(video_paths)
 
         # B-05：从源片实测推导目标分辨率/帧率（以出现最多的宽/高/帧率为准）
@@ -459,11 +484,17 @@ class VideoPostProcessor:
             if result.returncode == 0 and os.path.exists(output_path):
                 logger.info(f"视频合并成功（filter 重编码）: {output_path}")
                 return output_path
-            logger.error(f"视频合并失败（filter 重编码）: {result.stderr[-500:]}")
-            return ""
+            if result.returncode == 0:
+                # 返回码 0 却没产出文件：不是 ffmpeg 报错，而是输出被吞（磁盘满/被杀）
+                return self._concat_fail(
+                    caller, f"ffmpeg 返回码 0 但输出文件不存在：{output_path}"
+                            f"（疑磁盘写满或进程被回收；stderr={(result.stderr or '')[-300:]!r}）")
+            return self._concat_fail(
+                caller, f"ffmpeg 重编码返回码 {result.returncode}，"
+                        f"stderr={(result.stderr or '')[-500:]!r}")
         except Exception as e:
-            logger.error(f"视频合并异常（filter 重编码）: {e}")
-            return ""
+            return self._concat_fail(
+                caller, f"ffmpeg 重编码调用异常：{type(e).__name__}: {e}")
 
     def add_subtitles(self, video_path: str, subtitles: List[dict],
                      output_path: str) -> str:
@@ -598,8 +629,10 @@ class VideoPostProcessor:
 
         # 合并视频
         output_path = os.path.join(final_dir, f"ep{ep:02d}_final.mp4")
-        if not self.concat_videos(video_files, output_path):
+        if not self.concat_videos(video_files, output_path,
+                                  caller=f"ep{ep:02d}_final（{project_name}）"):
             # ⚠️ 必须判返回值：否则拼失败时对外抛出一个**不存在**的 URL，还被登记成交付物
+            # （具体失败原因已由 concat_videos 内部按 D-10 打了 error 日志，此处只补调用点）
             logger.error(f"第 {ep} 集成片拼接失败（未产出有效文件）：{output_path}")
             return ""
 

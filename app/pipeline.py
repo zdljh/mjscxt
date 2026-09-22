@@ -873,7 +873,7 @@ def step_final(ctx) -> dict:
         tmp = out + ".concat.mp4"
         if os.path.exists(tmp):
             os.remove(tmp)
-        A.video_processor.concat_videos(files, tmp)
+        A.video_processor.concat_videos(files, tmp, caller="pipeline.step_final")
     if not _nonempty(tmp):
         raise PipelineError("片段拼接失败（未产出有效文件）")
 
