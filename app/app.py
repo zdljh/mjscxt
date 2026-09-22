@@ -1932,8 +1932,25 @@ def api_storyboard_retry_shot():
                         "verdict": verdict, "scratch": scratch}), 200
     shutil.copy2(scratch, dst)
     # 同步更新 manifest 中该镜条目
-    _update_storyboard_manifest_shot(project, shot_id, seq, dst, prompt, refs, verdict, gate,
-                                     episode_no=_ep)
+    # B-2 收口（2026-09-22 复验）：manifest 损坏时 read_json_strict 会 fail-loud 抛错，
+    # 但此刻图片**已经**重跑成功并写进正式目录（上一行的 copy2）。若让异常直接冒泡，
+    # 会把「部分成功」整镜报成失败，前端还只能拿到裸 HTML 500（全库仅注册了
+    # BadRequest 处理器，无 JSON 500 处理器）。
+    # 这里用窄 try 做**响亮降级**（不是 fail-open）：
+    #   · 记 error 级日志（数据层异常不静默）
+    #   · 在响应里显式带 manifest_updated=False + 原因，调用方可感知
+    #   · **绝不**把 manifest 重建为 {} —— 那才会清空其他镜头的记录
+    _manifest_updated = True
+    _manifest_err = ""
+    try:
+        _update_storyboard_manifest_shot(project, shot_id, seq, dst, prompt, refs, verdict, gate,
+                                         episode_no=_ep)
+    except Exception as _m_err:  # noqa: BLE001
+        _manifest_updated = False
+        _manifest_err = f"{type(_m_err).__name__}: {_m_err}"
+        app.logger.error(
+            "单镜重跑：图片已写入正式目录，但 manifest 同步失败（不影响本次出图；"
+            "project=%s shot=%s dst=%s）：%s", project, shot_id, dst, _manifest_err)
     # 提示词预检结论也落质检历史（kind=prompt），便于回溯「这一镜出图前提示词是什么状态」
     if not _pf.get("skipped"):
         try:
@@ -1951,6 +1968,10 @@ def api_storyboard_retry_shot():
                     "path": dst,
                     "url": f"/api/storyboards/file/{project}/{_sub}shot_{seq:02d}.png",
                     "prompt": prompt, "ref_count": len(refs),
+                    # B-2：本次出图是否已同步进 manifest。False 表示图已出好、但清单未更新
+                    # （manifest 损坏等），调用方可据此提示用户「重跑成功、清单待修」。
+                    "manifest_updated": _manifest_updated,
+                    "manifest_error": _manifest_err,
                     "prompt_qc": _pf.get("verdict"), "prompt_qc_repairs": _pf.get("repairs") or [],
                     "qc": verdict})
 
