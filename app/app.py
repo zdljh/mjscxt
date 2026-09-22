@@ -953,6 +953,28 @@ def favicon_svg():
 
 # ===== 状态 =====
 
+def _task_queue_status() -> dict:
+    """TaskQueue 状态 + 「未接线」显式标注（N2，2026-09-22 复验）。
+
+    ``TaskQueue.submit`` 在本项目**没有生产调用方**：单 GPU 并发由 ``gpu_task_gate``
+    的进程级 Semaphore 承担（见 ``gpu_task_gate.py`` 模块头「不做什么」）。D-07 给
+    submit 加的背压/去重是该模块**自身契约**的加固，供嵌入使用与测试。这里显式标注
+    ``wired=False``，避免 ``/api/status`` 的 ``task_queue`` 字段让调用方误以为它是
+    生产并发闸门（即「已修但不可达」的假象）。
+
+    既有字段（running/concurrency/queued/max_queue/pending/current/current_elapsed_sec）
+    原样保留，``wired`` / ``note`` 均为**新增**字段。
+    """
+    try:
+        st = dict(task_queue.status())
+    except Exception as e:  # noqa: BLE001  可观测性接口自身绝不能把 /api/status 打挂
+        return {"wired": False, "error": f"{type(e).__name__}: {e}"}
+    st["wired"] = False
+    st["note"] = ("本进程 GPU 并发由 gpu_gate 承担；TaskQueue.submit 未接线"
+                  "（D-07 加固属模块自身契约，非生产路径）")
+    return st
+
+
 @app.route('/api/status')
 def api_status():
     comfyui_status = comfyui_client.get_status()
@@ -969,7 +991,7 @@ def api_status():
                 len(files) for _, _, files in os.walk(SCENES_DIR)
             ) if os.path.exists(SCENES_DIR) else 0,
         },
-        "task_queue": task_queue.status(),
+        "task_queue": _task_queue_status(),
         "gpu_gate": gpu_task_gate.status(),
         "interrupted_tasks": _interrupted,
     })
@@ -993,7 +1015,7 @@ def api_tasks_list():
     except Exception as e:  # noqa: BLE001
         return jsonify({"success": False, "error": f"任务查询失败：{e}"}), 500
     return jsonify({"success": True, "count": len(items), "items": items,
-                    "queue": task_queue.status()})
+                    "queue": _task_queue_status()})
 
 
 @app.route('/api/tasks/<task_id>', methods=['GET'])

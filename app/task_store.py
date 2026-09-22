@@ -338,6 +338,14 @@ class TaskQueue:
     ② 加 ``task_id`` **去重**（``_pending_ids``）—— 同一 task_id 在队列中/执行中时
     重复提交被忽略并告警，避免 ``concurrency > 1`` 时同一任务被并发执行两次
     （两遍 GPU 生成、同一输出目录互写）。
+
+    N2（2026-09-22 复验）**接线状态声明**：本项目中 ``submit`` / ``start`` / ``join``
+    **刻意未接线到生产链路** —— 单 GPU 并发由 ``gpu_task_gate`` 的进程级
+    ``Semaphore(TASK_QUEUE_CONCURRENCY)`` 承担（见 ``gpu_task_gate.py`` 模块头
+    「不做什么」第 2 条：「不真正接线 submit —— 改用 Semaphore 方案」）。
+    本类保留是为 ``.status()`` 可观测性（``/api/status`` 的 ``task_queue`` 字段）
+    与嵌入使用 / 测试。因此 D-07 的背压与去重是该模块**自身契约**的加固，
+    **不构成「已在生产生效」的宣称**；调用方勿据此认为生产路径已有并发闸门。
     """
 
     def __init__(self, store: TaskStore, concurrency: int = 1,
