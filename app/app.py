@@ -2760,6 +2760,7 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                 "status": "failed", "error": str(e), "results": _partial,
                 "success_count": sum(1 for r in _partial if r.get("success")),
             })
+    _maybe_reclaim_comfyui_output()   # D-11a：任务收尾滚动回收 ComfyUI 重试残留（节流+全容错）
 
 
 @app.route('/api/assets/generate', methods=['POST'])
@@ -3381,6 +3382,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         app.logger.error(f"分镜图任务失败: {e}")
         with lock:
             generation_state[task_id].update({"status": "failed", "error": str(e)})
+    _maybe_reclaim_comfyui_output()   # D-11a：任务收尾滚动回收 ComfyUI 重试残留（节流+全容错）
 
 
 def _project_style(project_name: str = "") -> str:
@@ -10870,3 +10872,61 @@ def spa_fallback(path):
     if '.' in path.split('/')[-1]:
         abort(404)
     return send_from_directory(_STATIC_DIR, 'index.html')
+
+
+# ==========================================================================
+# D-11a（P2）：ComfyUI 输出目录滚动回收 —— 任务收尾接线
+# --------------------------------------------------------------------------
+# 判定与删除**全部委托**零第三方依赖的 disk_reclaim 模块（可用
+# `MJSCXT_AUTOPILOT=0 python verify_comfyui_reclaim.py` 离线单测）；
+# 这里只做三件事：
+#   ① 从 config 常量推导「正式产物目录」清单（不硬编码任何盘符路径）；
+#   ② 进程内 10 分钟节流（同一进程最多每 10 分钟真正扫描一次）；
+#   ③ 全容错 —— 回收是**优化**不是功能，任何异常只留 warning，绝不阻断生产。
+#
+# 为什么把包装函数集中在文件末尾追加：本仓库 D-09 回归脚本
+# `verify_silent_except.py` 以「app.py:{绝对行号}」锚定唯一的 `except: pass`
+# 白名单；把新增代码放在既有代码之后，可把行号扰动降到最低（仅在资产/分镜
+# 两个收尾点各加一行调用 → 白名单锚点随之由 5691 顺移到 5693）。
+#
+# 调用点：`_generate_asset_task`（资产生成任务收尾）、`_storyboard_worker`
+# （分镜生成任务收尾）；成片步骤收尾见 `app/pipeline.py step_final`。
+# ==========================================================================
+_COMFYUI_RECLAIM_LAST_TS = 0.0          # 上次真正扫描的时间戳（模块级节流状态）
+_COMFYUI_RECLAIM_INTERVAL_SEC = 600.0   # 同一进程 10 分钟内只真正扫描一次
+_COMFYUI_RECLAIM_LOCK = threading.Lock()
+
+
+def _comfyui_official_dirs() -> list:
+    """正式产物目录清单（全部由 config 常量推导，不硬编码盘符路径）。"""
+    return [d for d in (CHARACTERS_DIR, ITEMS_DIR, SCENES_DIR, STORYBOARDS_DIR,
+                        KEYFRAMES_DIR, VIDEOS_DIR, FINAL_DIR) if d]
+
+
+def _maybe_reclaim_comfyui_output() -> None:
+    """薄包装：带节流地回收 ``COMFYUI_OUTPUT_DIR`` 下的重试残留（D-11a）。
+
+    只有**同时**满足「位于 COMFYUI_OUTPUT_DIR 内 + 文件名含 ``_retry``/``_try``
+    + mtime 距今 > 24h + 正式产物目录已有 ``(size, sha256)`` 同内容副本 +
+    ``st_nlink == 1``」的文件才会被删（判定细节见 ``app/disk_reclaim.py``）。
+    """
+    global _COMFYUI_RECLAIM_LAST_TS
+    try:
+        now = time.time()
+        with _COMFYUI_RECLAIM_LOCK:
+            if now - _COMFYUI_RECLAIM_LAST_TS < _COMFYUI_RECLAIM_INTERVAL_SEC:
+                return
+            _COMFYUI_RECLAIM_LAST_TS = now
+        if not COMFYUI_OUTPUT_DIR or not os.path.isdir(COMFYUI_OUTPUT_DIR):
+            return
+        import disk_reclaim   # 延迟导入：与本文件其它叶子模块一致，避免加载期副作用
+        stats = disk_reclaim.reclaim_comfyui_output(
+            COMFYUI_OUTPUT_DIR, _comfyui_official_dirs(), logger=app.logger)
+        if stats.get("delete"):
+            app.logger.info("D-11a ComfyUI 输出回收：删 %d 个重试残留，释放 %.2f MB",
+                            len(stats["delete"]),
+                            (stats.get("removed_bytes") or 0) / 1048576.0)
+    except Exception as e:  # noqa: BLE001  回收是优化，绝不能阻断生产
+        app.logger.warning("D-11a ComfyUI 输出回收失败（不影响生产）：%s: %s",
+                           type(e).__name__, e)
+

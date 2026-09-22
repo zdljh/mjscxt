@@ -38,7 +38,9 @@ _EXCEPT_PASS = re.compile(r"^\s*except([^:]*):\s*(#.*)?$")
 
 #: 有意保留为 `pass` 的点：**logger 自身失败的兜底** —— 再调 logger 会递归。
 #: 这是「已经记录过、不再重复记录」的正确写法，不属于静默吞异常。
-KEEP_PASS_WHITELIST = {("app.py", 5691)}
+#: ⚠️ 该白名单以**绝对行号**锚定：D-11a 在 app.py 上方新增了 2 行回收调用后，
+#: 该站点由 5691 顺移到 5693（仍是同一个 `except: pass` 兜底点，未新增静默吞）。
+KEEP_PASS_WHITELIST = {("app.py", 5693)}
 MAX_REMAINING = 10
 
 _FAILS = []

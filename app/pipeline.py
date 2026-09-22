@@ -946,6 +946,12 @@ def step_final(ctx) -> dict:
     old_review = _deliverable_review(ctx).get("review")
     if old_review == "rejected":
         _reset_deliverable_review(ctx, "pending", "成片已重做，请重新验收")
+    # D-11a：成片步骤收尾 —— 滚动回收 ComfyUI 输出目录里的重试残留
+    # （带进程内节流、全容错；回收是优化，任何异常都不影响成片）
+    try:
+        A._maybe_reclaim_comfyui_output()
+    except Exception as e:  # noqa: BLE001  回收是优化，绝不能阻断成片
+        logger.debug("D-11a 成片收尾回收跳过：%s: %s", type(e).__name__, e)
     return {"ok": True, "artifact": out,
             "detail": {"segments": len(files), "subtitles": bool(subbed), "size": os.path.getsize(out)}}
 
