@@ -329,7 +329,7 @@
     "novelLabel": "小说文件",
     "stylePreset": "快速风格预设",
     "uploadText": "点击或拖拽上传",
-    "uploadHint": "支持 .txt / .docx / .pdf / .epub，最大 200MB",
+    "uploadHint": "支持 .txt / .md / .docx / .pdf / .epub，最大 200MB",
     "uploading": "上传并创建项目",
     "uploadSuccess": "上传成功",
     "uploadFailed": "上传失败",
@@ -345,7 +345,7 @@
       "school": "校园青春 · 日式赛璐璐 · 温情治愈",
       "fantasy": "玄幻热血 · 3D动漫渲染 · 快节奏卡点"
     },
-    "fileHint": "支持 .txt / .docx / .pdf / .epub，单文件最大 200MB"
+    "fileHint": "支持 .txt / .md / .docx / .pdf / .epub，单文件最大 200MB"
   },
   "deliver": {
     "title": "成品验收",

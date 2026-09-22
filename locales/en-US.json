@@ -325,7 +325,7 @@
     "novelLabel": "Novel File",
     "stylePreset": "Quick Style Preset",
     "uploadText": "Click or drag to upload",
-    "uploadHint": "Supports .txt / .docx / .pdf / .epub, max 200MB",
+    "uploadHint": "Supports .txt / .md / .docx / .pdf / .epub, max 200MB",
     "uploading": "Upload & Create Project",
     "uploadSuccess": "Upload successful",
     "uploadFailed": "Upload failed",

@@ -218,8 +218,11 @@ TOOLS = [
         "description": "在经验记忆库里检索历史成功/失败经验，用于决定这次怎么调参。",
         "parameters": _schema({"q": {"type": "string", "description": "检索关键词"}}, ["q"]),
         "risk": "safe", "expensive": False,
+        # P2-2：端点读的是 `query` 参数（见 api_memory_search 的 request.args.get('query')），
+        # 此前误发 `q` → 端点永远拿到空 query → 400「缺少 query 参数」→ 工具恒 ok=False。
+        # 入参对用户仍叫 q（schema 不变），但请求要落到 `query` 上。
         "call": lambda a, c: ("GET",
-                              "/api/memory/search?q=" + quote(_p(a.get("q")), safe=""), {}),
+                              "/api/memory/search?query=" + quote(_p(a.get("q")), safe=""), {}),
     },
 
     # ---------- 配置写入 ----------
@@ -740,6 +743,69 @@ def get_job(jid: str):
         return dict(job) if job else None
 
 
+def _persist_agent_reply(job):
+    """P1-1：任务收尾时**立即**把总控最终回复写进聊天历史（在 agent 线程内完成）。
+
+    旧实现只在 /api/agent/job/<id> 被前端轮询到时才落盘（app.py 的收尾钩子）——
+    用户若在长任务（实测 13 分钟）期间离开页面/关标签，轮询中断，回复就永远没写进
+    历史（当天 14:46/14:51 两条用户消息至今无 assistant 回复，即此因）。改为线程内
+    收尾即落盘；前端轮询钩子仅作幂等兜底。
+
+    竞态处理：线程与轮询钩子都可能在「已收尾」后各调一次本函数。为避免重复追加，
+    先持锁**认领**（_persisting）再落盘，成功后置 _persisted；失败则回滚 _persisting，
+    让兜底方再试。已认领/已完成时直接返回。
+    """
+    reply = (job.get("reply") or "").strip()
+    if not reply:
+        return
+    with _LOCK:
+        if job.get("_persisted") or job.get("_persisting"):
+            return
+        job["_persisting"] = True
+        _JOBS[job["id"]] = job
+    project = job.get("project") or ""
+    try:
+        import ai_chat
+        import config
+        history = ai_chat.load_history(config.AI_CHAT_HISTORY_PATH)
+        ai_chat.append_message(history, "assistant", reply, project)
+        ai_chat.save_history(config.AI_CHAT_HISTORY_PATH, history)
+        with _LOCK:
+            job["_persisted"] = True
+            job.pop("_persisting", None)
+            _JOBS[job["id"]] = job
+    except Exception as e:  # noqa: BLE001
+        # 落盘失败不阻断任务收尾；回滚认领，让前端轮询兜底再试一次。
+        with _LOCK:
+            job.pop("_persisting", None)
+            _JOBS[job["id"]] = job
+        _log_persist_fail(e)
+
+
+def _log_persist_fail(e):
+    try:
+        if _APP is not None and getattr(_APP, "logger", None):
+            _APP.logger.warning("总控回复落历史失败（线程内）：%s", e)
+        else:
+            import logging
+            logging.getLogger(__name__).warning("总控回复落历史失败（线程内）：%s", e)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def persist_job_reply(job_id: str):
+    """前端轮询兜底入口（幂等）：线程内已落盘时直接返回，否则再试一次。
+
+    与线程内 `_finish` 的即时落盘共用同一份认领/去重逻辑，保证最终回复
+    **只追加一次**到聊天历史（不重复、不丢失）。
+    """
+    with _LOCK:
+        job = _JOBS.get(job_id)
+        if job is None:
+            return
+    _persist_agent_reply(job)
+
+
 def _finish(job, status, reply="", error=""):
     job["status"] = status
     job["reply"] = reply
@@ -747,6 +813,8 @@ def _finish(job, status, reply="", error=""):
     job["updated"] = time.time()
     with _LOCK:
         _JOBS[job["id"]] = job
+    # P1-1：有最终回复就立即落盘（不再依赖前端轮询触发）。
+    _persist_agent_reply(job)
 
 
 def _fallback_parse_actions(text: str):

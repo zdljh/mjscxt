@@ -10932,18 +10932,11 @@ def api_agent_job(job_id):
     job = agent_core.get_job(job_id)
     if not job:
         return jsonify({"success": False, "error": f"未找到任务 {job_id}"}), 404
-    # 任务收尾时把最终回复补进聊天历史，保证刷新页面后上下文还在
+    # P1-1：最终回复已在 agent 线程内即时落盘（agent_core._finish → _persist_agent_reply）；
+    # 这里仅作幂等兜底——线程内失败/尚未完成落盘时由 persist_job_reply 补写（共用同一份
+    # 认领/去重逻辑，保证回复只追加一次，不重复不丢失）。前端刷新/离开不再导致回复丢失。
     if job.get("status") in ("done", "failed", "killed", "timeout") and job.get("reply"):
-        if not job.get("_persisted"):
-            try:
-                history = ai_chat.load_history(AI_CHAT_HISTORY_PATH)
-                ai_chat.append_message(history, "assistant", job["reply"], job.get("project") or "")
-                ai_chat.save_history(AI_CHAT_HISTORY_PATH, history)
-                with agent_core._LOCK:
-                    if job_id in agent_core._JOBS:
-                        agent_core._JOBS[job_id]["_persisted"] = True
-            except Exception as e:  # noqa: BLE001
-                app.logger.warning(f"总控回复落历史失败：{e}")
+        agent_core.persist_job_reply(job_id)
     return jsonify({"success": True, **{k: v for k, v in job.items() if not k.startswith("_")}})
 
 
