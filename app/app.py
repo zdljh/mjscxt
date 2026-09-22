@@ -3946,7 +3946,11 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
             if os.path.abspath(src) != os.path.abspath(dst):
                 shutil.move(src, dst)
             qc_passed = not episode_failed
-            qc_unavailable = bool(_ep_qc_attempt.get("unavailable"))
+            # A-1 P1：整片 QC 调用异常（comfyui_client 已改「break + 追加 unavailable 条目」，
+            # 不再触碰 app.py 的 _ep_qc_attempt 闭包）时，仅看闭包会漏判 → 结果/UI 会误报
+            # 「QC 不通过」。这里同时看 qc_results 里是否存在 unavailable 条目，口径与闭包对齐。
+            qc_unavailable = bool(_ep_qc_attempt.get("unavailable")) or \
+                any(isinstance(r, dict) and r.get("unavailable") for r in qc_results)
             item = {"success": True, "mode": "episode",
                     "segment_count": len(segs),
                     "qc_passed": qc_passed,

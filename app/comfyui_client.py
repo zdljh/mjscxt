@@ -1865,10 +1865,17 @@ class ComfyUIClient:
                 try:
                     qc_result = qc_fn(best_file, shot_desc, qc_cfg, qc_style)
                 except Exception as qc_err:
-                    logger.warning(f"[H3-episode] 第 {attempt + 1} 次 QC 调用异常: {qc_err}")
+                    # A-1：QC 回调抛异常 = **不可判定**（接口/ffmpeg 不可用，与内容无关），
+                    # 不是"内容不达标"。旧实现 `continue` 会换种子重跑整集，且绕过 qc_stop_cb
+                    # 止损 —— 每次整片 20~44 段 H3、几十分钟 GPU，纯白烧。这里 break：
+                    # best_file 已就位，成片照常返回给调用方人工复核。
+                    logger.warning(
+                        f"[H3-episode] 第 {attempt + 1} 次 QC 调用异常"
+                        f"（不可判定，不重试）: {qc_err}")
                     qc_results.append({"attempt": attempt + 1, "passed": None,
+                                       "unavailable": True,
                                        "reason": f"QC 异常: {qc_err}"})
-                    continue
+                    break
                 qc_passed = qc_result.get("passed", False)
                 _v = qc_result.get("verdict") or {}
                 qc_results.append({
