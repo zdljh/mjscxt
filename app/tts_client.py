@@ -620,7 +620,7 @@ class QwenTTSClient:
                 logger.info("B-01 /free 守卫：本进程有其它 running GPU 任务，跳过 /free（避免卸他人模型）")
                 return
         except Exception as e:  # noqa: BLE001  守卫失败不阻断卸载主流程
-            logger.d("B-01 /free 互斥守卫检查失败（按「无其它任务」继续）：%s", e)
+            logger.debug("B-01 /free 互斥守卫检查失败（按「无其它任务」继续）：%s", e)
         try:
             req = urllib.request.Request(
                 f"{self.comfyui_url}/free",

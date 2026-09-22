@@ -1447,7 +1447,7 @@ def _dead_letter_snapshot_bak(path: str) -> None:
     try:
         shutil.copy2(path, _dead_letter_bak(path))
     except OSError as e:
-        logger.w("死信文件 .bak 快照写入失败（既有 .bak 仍保留为最后好版本）：%s", e)
+        logger.warning("死信文件 .bak 快照写入失败（既有 .bak 仍保留为最后好版本）：%s", e)
 
 
 def _dead_letter_try_restore_bak(path: str):

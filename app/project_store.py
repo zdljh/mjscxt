@@ -136,7 +136,7 @@ def _snapshot_bak(path: str) -> None:
     try:
         shutil.copy2(path, _last_good_bak(path))
     except OSError as e:
-        logger.w("项目索引 .bak 快照写入失败（既有 .bak 仍保留为最后好版本）：%s", e)
+        logger.warning("项目索引 .bak 快照写入失败（既有 .bak 仍保留为最后好版本）：%s", e)
 
 
 def _try_restore_bak(path: str):
