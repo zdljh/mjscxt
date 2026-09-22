@@ -388,15 +388,30 @@ export const memoryApi = {
   },
   record: (data: Partial<Memory>) =>
     request<Memory>('/memory/record', { method: 'POST', body: JSON.stringify(data) }),
-  recordLesson: (lesson: string, tags: string[]) =>
+  // 字段名对齐后端契约（app.py api_memory_record_lesson）：
+  // 后端读 project/prompt/issues/category，不再读 lesson/tags。
+  // 旧签名 (lesson, tags) 已废弃，改为传结构化对象。
+  recordLesson: (data: {
+    project: string;
+    prompt?: string;
+    issues: string[];
+    episode?: number;
+    category?: string;
+  }) =>
     request<Memory>('/memory/record-lesson', {
       method: 'POST',
-      body: JSON.stringify({ lesson, tags }),
+      body: JSON.stringify(data),
     }),
-  recordSuccess: (content: string, tags: string[]) =>
+  recordSuccess: (data: {
+    project: string;
+    prompt?: string;
+    highlights: string[];
+    episode?: number;
+    category?: string;
+  }) =>
     request<Memory>('/memory/record-success', {
       method: 'POST',
-      body: JSON.stringify({ content, tags }),
+      body: JSON.stringify(data),
     }),
   clearOld: (days: number = 90) =>
     request<void>('/memory/clear-old', {
@@ -624,10 +639,14 @@ export const qcApi = {
   clearConfig: () => request<{ success: boolean }>('/qc/config/clear', { method: 'POST' }),
   resetEndpoint: () => request<{ success: boolean }>('/qc/config/reset-endpoint', { method: 'POST' }),
   syncFromAI: () => request<{ success: boolean }>('/qc/config/sync-from-ai', { method: 'POST' }),
-  test: (data: { project: string; shot_id: string }) =>
+  // 后端 /api/qc/test 实际只读 base_url / api_key / model / image_path / video_path
+  // （见 api_qc_test）：project / shot_id 不是它认识的入参——传了也被忽略。
+  // 单镜重测靠的是后端从 STORYBOARDS_DIR 里**按项目自动挑一张分镜图当样张**，
+  // 因此这里的 shot_id 只用于前端本地展示，不参与请求。
+  test: (data: { project?: string; shot_id?: string }) =>
     request<{ success: boolean; verdict: string; score: number }>(
       '/qc/test',
-      { method: 'POST', body: JSON.stringify(data) }
+      { method: 'POST', body: JSON.stringify({}) }
     ),
   history: (project: string) =>
     request<QCResponse>(`/qc/project-summary?project=${encodeURIComponent(project)}`),
@@ -768,10 +787,12 @@ export const autopilotApi = {
 // --- Providers ---
 export const providersApi = {
   list: () => request<ProvidersResponse>('/providers'),
-  select: (providerId: string) =>
-    request<{ success: boolean }>('/providers/select', {
+  // 字段名对齐后端契约（app.py api_providers_select）：
+  // 后端读 kind（image/video/tts）+ name（引擎名），不读 provider_id。
+  select: (kind: 'image' | 'video' | 'tts', name: string) =>
+    request<{ success: boolean; kind: string }>('/providers/select', {
       method: 'POST',
-      body: JSON.stringify({ provider_id: providerId }),
+      body: JSON.stringify({ kind, name }),
     }),
 };
 
