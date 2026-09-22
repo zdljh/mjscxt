@@ -330,15 +330,28 @@ class TaskQueue:
 
     用法：
         q = TaskQueue(store)
-        q.submit(task_id, fn=lambda: do_work(), on_error=lambda e: ...)
+        ok = q.submit(task_id, fn=lambda: do_work(), on_error=lambda e: ...)
         q.start()          # 启动后台消费线程（幂等）
         q.join(timeout=...)  # 等待队列排空（可选）
+
+    D-07（P2）：① 加**背压** ``max_queue``（默认 64），队列满时拒绝提交而非无限堆积；
+    ② 加 ``task_id`` **去重**（``_pending_ids``）—— 同一 task_id 在队列中/执行中时
+    重复提交被忽略并告警，避免 ``concurrency > 1`` 时同一任务被并发执行两次
+    （两遍 GPU 生成、同一输出目录互写）。
     """
 
-    def __init__(self, store: TaskStore, concurrency: int = 1):
+    def __init__(self, store: TaskStore, concurrency: int = 1,
+                 max_queue: int = 64):
         self.store = store
         self.concurrency = max(1, int(concurrency))
+        # 背压上限：<=0 表示不限制（保留旧行为，但显式传 0 才生效）
+        try:
+            self._max_queue = int(max_queue)
+        except (TypeError, ValueError):
+            self._max_queue = 64
         self._q: list = []
+        # 队列中 + 执行中的 task_id 集合（去重判据；worker 的 finally 里 discard）
+        self._pending_ids: set = set()
         self._cv = threading.Condition()
         self._threads: list = []
         self._running = False
@@ -348,10 +361,23 @@ class TaskQueue:
     # ---------- 提交 ----------
 
     def submit(self, task_id: str, fn: Callable[[], object],
-               on_error: Callable[[Exception], None] = None) -> None:
+               on_error: Callable[[Exception], None] = None) -> bool:
+        """提交任务；返回是否被接受（False = 重复提交 或 队列已满）。
+
+        D-07：不发散 —— 两种拒绝都留 warning/error 日志，便于排障。
+        """
         with self._cv:
+            if task_id in self._pending_ids:
+                logger.warning("任务已在队列/执行中，忽略重复提交：%s", task_id)
+                return False
+            if self._max_queue > 0 and len(self._q) >= self._max_queue:
+                logger.error("任务队列已满（上限 %d），拒绝提交：%s",
+                             self._max_queue, task_id)
+                return False
+            self._pending_ids.add(task_id)
             self._q.append((task_id, fn, on_error))
             self._cv.notify()
+            return True
 
     # ---------- 生命周期 ----------
 
@@ -388,6 +414,9 @@ class TaskQueue:
                 "running": self._running,
                 "concurrency": self.concurrency,
                 "queued": len(self._q),
+                # D-07：暴露背压上限与去重占位数，修复「队列字段失真」的可观测性
+                "max_queue": self._max_queue,
+                "pending": len(self._pending_ids),
                 "current": self._current,
                 "current_elapsed_sec": round(time.time() - self._current_started, 1)
                 if self._current else 0,
@@ -428,6 +457,8 @@ class TaskQueue:
             finally:
                 with self._cv:
                     self._current = None
+                    # D-07：任务已结束（成功/失败/取消）→ 释放去重占位
+                    self._pending_ids.discard(task_id)
                     self._cv.notify_all()
 
 
