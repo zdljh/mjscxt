@@ -96,6 +96,36 @@ _KEYWORD_RATIO: Sequence[Tuple[str, Tuple[int, int]]] = (
 #: 不再静默回落工作流模板里写死的 16:9 尺寸。
 DEFAULT_RATIO: Tuple[int, int] = (9, 16)
 
+# --------------------------------------------------------------------------- #
+# 资产内置画幅（2026-09-22 需求：参考资产图的画幅**写死**，不跟随视频比例）
+#   单人角色立绘      3:4
+#   角色多视图(三视图) 1:1
+#   道具 / 物品资产    1:1
+#   场景原画（背景）   16:9
+# 只有「视频」与「分镜」的比例由用户输入控制（跟随 style 串解析出的 aspect_ratio），
+# 这里的参考资产图画幅与成片画幅解耦——即使用户拍 9:16 成片，角色立绘仍是 3:4。
+# --------------------------------------------------------------------------- #
+ASSET_BASE_RATIO: Dict[str, Tuple[int, int]] = {
+    "character": (3, 4),   # 单人角色立绘
+    "item": (1, 1),        # 道具 / 物品资产
+    "scene": (16, 9),      # 场景原画（背景）
+}
+#: 角色多视图（三视图：正面/侧面/背面横排）统一用方形，避免横排被裁切
+ASSET_MULTIVIEW_RATIO: Tuple[int, int] = (1, 1)
+
+
+def asset_aspect_ratio(asset_type: str, is_multiview: bool = False
+                       ) -> Optional[Tuple[int, int]]:
+    """资产内置画幅：按类型写死，不跟随视频比例。
+
+    ``is_multiview=True`` 时返回多视图（三视图）画幅（恒 1:1）；
+    否则按 ``asset_type``（character/item/scene）取内置基础图画幅，未知类型返回 None。
+    调用方应再经 :func:`aspect_size` 转成宽高元组喂给 ComfyUI 尺寸节点。
+    """
+    if is_multiview:
+        return ASSET_MULTIVIEW_RATIO
+    return ASSET_BASE_RATIO.get((asset_type or "").strip().lower())
+
 
 def aspect_ratio(style) -> Optional[Tuple[int, int]]:
     """从风格串解析目标画幅，解析不到返回 None。

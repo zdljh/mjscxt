@@ -1536,6 +1536,9 @@ def api_keyframes_generate():
     shots = script.get("shots") or []
     if not shots:
         return jsonify({"success": False, "error": "没有镜头数据"}), 400
+    _g = _style_aspect_guard(project)
+    if _g is not None:
+        return _g
     _kf_ep = _ep_of_script(script, data.get('episode_no'))
     kf_dir = _keyframes_dir(project, _kf_ep)
     sb_map = _keyframe_sb_map(project, script, data.get('storyboards'), episode_no=_kf_ep)
@@ -2461,14 +2464,19 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
             "scene": comfyui_client.generate_scene_base,
         }[asset_type]
 
-        # 风格 / 画幅：本任务内所有资产共用（解析一次即可）
-        # G19：风格串未含画幅关键词时以默认 9:16 为底，不再静默回落模板 16:9
+        # 风格（文字部分，如画风/色调）仍从总控敲定的 style 串解析；
+        # 画幅**按资产类型内置写死**（2026-09-22 需求，不跟随视频比例）：
+        #   立绘 character 3:4 / 道具 item 1:1 / 场景 scene 16:9，多视图(三视图)恒 1:1
+        # 与成片画幅解耦——即使用户拍 9:16 视频，角色立绘仍是 3:4。
         style_res = style_kit.resolve(style, default_ratio=style_kit.DEFAULT_RATIO)
         gen_style = style_res["style"]
-        gen_size = style_res["size"]
-        if style:
-            app.logger.info("[资产风格] %s 资产生成风格=%s；画幅=%s",
-                            asset_type, gen_style or style, style_res["label"] or "未指定")
+        _base_ratio = style_kit.asset_aspect_ratio(asset_type) or style_kit.DEFAULT_RATIO
+        _multi_ratio = style_kit.asset_aspect_ratio(asset_type, is_multiview=True) or style_kit.DEFAULT_RATIO
+        gen_size = style_kit.aspect_size(_base_ratio)
+        gen_multi_size = style_kit.aspect_size(_multi_ratio)
+        app.logger.info("[资产风格] %s 资产生成风格=%s；内置画幅 base=%s×%s / multi=%s×%s",
+                        asset_type, gen_style or style,
+                        _base_ratio[0], _base_ratio[1], _multi_ratio[0], _multi_ratio[1])
 
         # 质检配置：任务级读取一次，本任务内所有资产共用
         qc_cfg = _qc_load_cfg()
@@ -2687,7 +2695,7 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                                    "regenerating")
                     views = comfyui_client.generate_multiview(
                         base_image_path=base_dst, asset_type=asset_type, asset_name=name,
-                        base_prompt_zh=prompt_zh, seed=vseed, style=gen_style, size=gen_size,
+                        base_prompt_zh=prompt_zh, seed=vseed, style=gen_style, size=gen_multi_size,
                         filename_prefix=f"comic_drama/{project_name}/{asset_type}/{name}") or {}
                     view_src = {}
                     for vk, vp in views.items():
@@ -2856,6 +2864,9 @@ def api_generate_assets():
         return jsonify({"error": "asset_type 必须是 character/item/scene"}), 400
     if not assets:
         return jsonify({"error": "没有资产数据"}), 400
+    _g = _style_aspect_guard(project_name)
+    if _g is not None:
+        return _g
 
     # B-12 P1-15：资产任务 ID 改用 uuid（G5 只改了分镜/视频/配音/混音，资产漏改），
     # 同秒并发请求不再互撞。
@@ -3481,6 +3492,64 @@ def _project_style(project_name: str = "") -> str:
     return style_kit.normalize_style(brief)
 
 
+def _style_aspect_confirmed(project_name: str) -> dict:
+    """生成前置确认门判据：用户是否已与总控 AI 确认「风格」与「视频比例」。
+
+    单一事实源 = 已应用的总控设定（ai_chat/project_settings.json，按项目）。
+    - 风格确认：settings 的风格基调(style) 或 画风(art_style) 任一非空；
+    - 比例确认：settings 的画面比例(aspect_ratio，即视频画幅，如 9:16) 非空。
+    资产图的画幅已按类型内置写死（见 style_kit.asset_aspect_ratio），不依赖此比例；
+    这里确认比例只为「视频 / 分镜」画幅服务。
+    """
+    try:
+        view = ai_chat.settings_view(AI_SETTINGS_PATH, project_name or "") or {}
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning(f"确认门读取总控设定失败（按未确认处理）：{e}")
+        view = {}
+    s = view.get("settings") or {}
+    style_confirmed = bool((s.get("style") or s.get("art_style") or "").strip())
+    aspect_confirmed = bool((s.get("aspect_ratio") or "").strip())
+    missing = []
+    if not style_confirmed:
+        missing.append("风格")
+    if not aspect_confirmed:
+        missing.append("视频比例")
+    return {"confirmed": style_confirmed and aspect_confirmed,
+            "style_confirmed": style_confirmed, "aspect_confirmed": aspect_confirmed,
+            "missing": missing, "settings": s}
+
+
+def _style_aspect_guard(project_name: str, override_style: str = ""):
+    """生成入口前置校验门（2026-09-22 需求）。
+
+    用户未与总控 AI 确认「风格 / 视频比例」时拦截生成：返回 409 + 可读提醒响应；
+    已确认则返回 None（放行）。各生成端点在解析出 project_name 后调用它。
+    前端 client.ts readError 会自动弹出 error + guide 文案，提示去总控确认。
+
+    ``override_style``：个别入口（如托管 /api/autonomous/start）允许调用方**显式传风格**
+    （plan_overrides.style）——此时视「风格」为已确认，但「视频比例」仍须总控确认。
+    """
+    chk = _style_aspect_confirmed(project_name)
+    if override_style and not chk["style_confirmed"]:
+        chk["style_confirmed"] = True
+        chk["missing"] = [m for m in chk["missing"] if m != "风格"]
+        chk["confirmed"] = chk["style_confirmed"] and chk["aspect_confirmed"]
+    if chk["confirmed"]:
+        return None
+    _names = "、".join(chk["missing"])
+    return jsonify({
+        "success": False,
+        "requires_confirm": True,
+        "error": f"尚未与总控 AI 确认{_names}，暂不开展生成。",
+        "guide": ("请先在「AI 对话 · 创作总控」里与 AI 敲定" + _names
+                  + "（风格：画风/基调；视频比例：画面画幅，如 9:16 / 16:9 / 1:1），"
+                    "点击「应用设定」落盘后再开始生成。"),
+        "missing": chk["missing"],
+        "style_confirmed": chk["style_confirmed"],
+        "aspect_confirmed": chk["aspect_confirmed"],
+    }), 409
+
+
 @app.route('/api/storyboards/generate', methods=['POST'])
 def api_generate_storyboards():
     """为剧本的每个 shot 生成一张分镜图（参考角色/物品/场景资产图）"""
@@ -3495,6 +3564,9 @@ def api_generate_storyboards():
         return jsonify({"error": "没有镜头数据"}), 400
 
     limit = data.get('limit')
+    _g = _style_aspect_guard(project_name)
+    if _g is not None:
+        return _g
     if isinstance(limit, int) and limit > 0:
         shots = shots[:limit]
 
@@ -3644,6 +3716,9 @@ def api_generate_videos():
 
     if not shots:
         return jsonify({"error": "没有镜头数据"}), 400
+    _g = _style_aspect_guard(project_name)
+    if _g is not None:
+        return _g
 
     # ⑥ 视频链路自动引用剧本自动判定的镜头时长（缺 duration 时按项目配置兜底）
     episode_stats = _episode_schema_defaults(project_name, shots)
@@ -9887,6 +9962,10 @@ def api_autonomous_start():
     if not novel_id:
         return jsonify({"success": False, "error": "缺少 novel_id，请先上传小说"}), 400
 
+    _g = _style_aspect_guard(project_name, override_style=str(plan_overrides.get('style') or ''))
+    if _g is not None:
+        return _g
+
     result = autonomous.start_autonomous(project_name or novel_id, novel_id, plan_overrides)
     # D5：返回给前端的错误统一脱敏，避免把异常栈/模块名直接显示在错误框里
     if isinstance(result, dict) and result.get('error'):
@@ -11079,4 +11158,3 @@ def _maybe_reclaim_comfyui_output() -> None:
     except Exception as e:  # noqa: BLE001  回收是优化，绝不能阻断生产
         app.logger.warning("D-11a ComfyUI 输出回收失败（不影响生产）：%s: %s",
                            type(e).__name__, e)
-
