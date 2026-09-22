@@ -345,16 +345,27 @@ def _fallback_split(text: str, chunk_chars: int):
     return chapters
 
 
-def split_chapters(text: str, fallback_chars: int = FALLBACK_CHAPTER_CHARS):
+def split_chapters(text: str, fallback_chars: int = FALLBACK_CHAPTER_CHARS,
+                   extra_patterns: list = None):
     """切分章节，返回 [{'index','title','start','end','char_count'}]（不含正文，避免重复占用内存）
 
     找不到任何章节标题时不再返回空列表，而是走 _fallback_split 兜底切分，
     保证下游「分集生产」始终有集可产。
+
+    extra_patterns（可选）：额外正则字符串列表（由 chapter_llm.derive_patterns
+    从 LLM 返回），编译后并入 CHAPTER_PATTERNS 一起扫描；编译失败的条目静默跳过。
     """
     if not text:
         return []
     marks = []
-    for pat in CHAPTER_PATTERNS:
+    patterns = list(CHAPTER_PATTERNS)
+    if extra_patterns:
+        for ps in extra_patterns:
+            try:
+                patterns.append(re.compile(ps, re.M))
+            except (re.error, TypeError):
+                continue
+    for pat in patterns:
         for m in pat.finditer(text):
             line = m.group(0).strip()
             if not line or len(line) > 70:
@@ -442,15 +453,32 @@ def extract_text(path: str, display_name: str = None) -> dict:
     }
 
 
-def ingest_novel(raw_path: str, filename: str, novels_dir: str) -> dict:
-    """解析上传的小说原始文件 → 落盘标准化文本 + 元数据，返回元数据 dict"""
+def ingest_novel(raw_path: str, filename: str, novels_dir: str,
+                 llm_client=None) -> dict:
+    """解析上传的小说原始文件 → 落盘标准化文本 + 元数据，返回元数据 dict
+
+    llm_client（可选）：前端「文本分析模型」的 LLMClient。传入时会先用 LLM 归纳
+    这本书的章节标题正则（chapter_llm.derive_patterns），再并入 split_chapters 的正则
+    扫描——每本小说格式各异，纯正则容易漏检；LLM 失败/未配置时自动退回纯正则，
+    绝不阻断上传。
+    """
     os.makedirs(novels_dir, exist_ok=True)
     info = extract_text(raw_path, filename)
     text = normalize_text(info["text"])
     if len(text.strip()) < 20:
         raise NovelParseError("未能从文件中提取到有效文本（内容过短或为扫描件）")
 
-    chapters = split_chapters(text)
+    extra_patterns = []
+    if llm_client is not None:
+        try:
+            import chapter_llm
+            extra_patterns = chapter_llm.derive_patterns(llm_client, text) or []
+            if extra_patterns:
+                logger.info(f"LLM 归纳章节正则 {len(extra_patterns)} 条：{extra_patterns}")
+        except Exception as e:  # noqa: BLE001  LLM 环节失败不阻断上传，退回纯正则
+            logger.warning(f"LLM 章节识别失败（退回纯正则切分）：{e}")
+
+    chapters = split_chapters(text, extra_patterns=extra_patterns or None)
     novel_id = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
     text_name = f"{novel_id}.txt"
     text_path = os.path.join(novels_dir, text_name)
@@ -473,6 +501,7 @@ def ingest_novel(raw_path: str, filename: str, novels_dir: str) -> dict:
         "char_count": len(re.sub(r"\s", "", text)),
         "line_count": text.count("\n") + 1,
         "chapter_count": len(chapters),
+        "chapter_source": "llm" if extra_patterns else "regex",
         "chapters": chapters[:MAX_CHAPTERS_KEPT],
         "text_file": text_name,
         "uploaded_at": datetime.now().isoformat(timespec="seconds"),

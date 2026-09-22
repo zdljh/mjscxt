@@ -4961,6 +4961,17 @@ def _current_llm_client() -> LLMClient:
     return _ai_client_for_module("text")
 
 
+def _optional_llm_client():
+    """best-effort 取「文本分析模型」客户端：已配置返回 LLMClient，未配置/异常返回 None。
+
+    用于「LLM 锦上添花但不可阻断主流程」的场景（如上传时用 LLM 归纳章节标题正则，
+    失败则退回纯正则切分）。与 _current_llm_client 的区别是**不抛 LLMError**。"""
+    try:
+        return _current_llm_client()
+    except LLMError:
+        return None
+
+
 def _apply_project_settings(style: str, project_name: str = "") -> str:
     """把「AI 对话 → 应用设定」落盘的创作设定并入风格描述，供剧本 / 提示词 / 分镜链路引用。
 
@@ -6903,6 +6914,10 @@ def api_upload_novels():
     # 这样上传完成后即可直接进入「总控 AI 定风格 → 开启托管」，不需要用户手工建项目。
     auto_project = (request.form.get('auto_project') or request.args.get('auto_project')
                     or '1').strip() not in ('0', 'false', 'no')
+    # 上传时用 LLM 归纳章节标题正则（每本书格式不同，纯正则易漏检）。
+    # 取「文本分析模型」客户端是 best-effort：未配置/异常则传 None，退回纯正则切分，
+    # 绝不阻断上传。
+    novel_llm_client = _optional_llm_client()
     results, ok_count = [], 0
     for f in files:
         raw_name = _safe_upload_name(f.filename)
@@ -6916,7 +6931,8 @@ def api_upload_novels():
         )
         try:
             f.save(tmp_path)
-            meta = ingest_novel(tmp_path, raw_name, NOVELS_DIR)
+            meta = ingest_novel(tmp_path, raw_name, NOVELS_DIR,
+                                llm_client=novel_llm_client)
             ok_count += 1
             item_proj = proj
             if item_proj is None and auto_project:

@@ -416,6 +416,7 @@ SIBLINGS = [
     "verify_comfyui_reclaim.py",          # D-11a
     "verify_narration_deprecated.py",     # D-11b
     "verify_frontend_api_links.py",       # 前端→后端 API 链路核对（路径/方法/字段）
+    "verify_chapter_llm.py",              # 章节 LLM 识别（每本格式不同 → LLM 归纳章节正则）
 ]
 _env = dict(os.environ, MJSCXT_AUTOPILOT="0")
 for _sib in SIBLINGS:
@@ -432,6 +433,55 @@ for _sib in SIBLINGS:
     _tail = ((_r.stdout or "") + (_r.stderr or "")).strip().splitlines()
     _detail = _tail[-1][:120] if _tail else f"exit={_r.returncode}"
     check(f"7.x {_sib} 离线跑通（exit 0）", _r.returncode == 0, _detail)
+
+# ============================================================
+# G8 章节 LLM 识别接线（防「上传端点忘记把 LLM 客户端接进 ingest_novel」回潮）
+# 约定：一律用「内容锚点」（子串/正则），禁止绝对行号；判据必须带坏样本自检。
+# ============================================================
+print()
+print("=" * 72)
+print("G8　章节 LLM 识别接线（LLM 归纳章节正则 + 上传时启用 + 失败降级）")
+print("=" * 72)
+
+_app_src = _read(os.path.join(APP, "app.py"))
+_np_src = _read(os.path.join(APP, "novel_parser.py"))
+_cl_src = _read(os.path.join(APP, "chapter_llm.py"))
+
+# 锚点 1：app.py 存在 best-effort 客户端工厂，且上传处把它接进 ingest_novel
+# 坏样本自检：把「llm_client=」从锚点里去掉，判据必须翻成 False（否则守卫恒过 = 假守卫）
+_app_hook_anchor = "ingest_novel(" and "llm_client="
+check("8.1 app.py 上传端点存在 best-effort 取 LLM 客户端（_optional_llm_client）",
+      "_optional_llm_client" in _app_src and "def _optional_llm_client" in _app_src)
+check("8.2 app.py 把 LLM 客户端接进 ingest_novel（llm_client=…），且引用了该工厂",
+      "ingest_novel(" in _app_src
+      and "llm_client=" in _app_src
+      and "novel_llm_client" in _app_src
+      and "_optional_llm_client()" in _app_src)
+# 坏样本自检：一个「没接线」的假源码必须被 8.2 判成 False
+_bad_app = "results = []\nfor f in files:\n    meta = ingest_novel(tmp, name, D)\n"
+_check82 = ("ingest_novel(" in _bad_app
+            and "llm_client=" in _bad_app
+            and "novel_llm_client" in _bad_app
+            and "_optional_llm_client()" in _bad_app)
+check("8.2-self 坏样本自检（未接线源码必须不满足 8.2 判据）", _check82 is False,
+      "判据对坏样本也成立 → 守卫恒过，需收紧判据")
+
+# 锚点 2：novel_parser.ingest_novel 消费 llm_client 并透传给 split_chapters
+check("8.3 ingest_novel 签名含 llm_client 参数",
+      "def ingest_novel(" in _np_src and "llm_client" in _np_src)
+check("8.4 ingest_novel 把 extra_patterns 传给 split_chapters（LLM 结果真正落到切分）",
+      "extra_patterns" in _np_src
+      and "chapter_llm" in _np_src
+      and "split_chapters(text" in _np_src
+      and "extra_patterns=extra_patterns" in _np_src)
+# 锚点 3：chapter_llm 降级契约——derive_patterns 对异常一律返回 []，绝不抛
+check("8.5 chapter_llm.derive_patterns 有 try/except 降级（LLM 失败不阻断上传）",
+      "except Exception" in _cl_src and "return []" in _cl_src)
+# 坏样本自检：去掉 except 后 8.5 判据必须 False
+_cl_no_try = _cl_src.replace("except Exception", "###")
+check("8.5-self 坏样本自检（无 try/except 降级时 8.5 判据必须可翻 False）",
+      ("except Exception" in _cl_no_try and "return []" in _cl_no_try) is False,
+      "判据对移除降级的样本仍成立 → 守卫恒过，需收紧判据")
 
 # ============================================================
 print()
