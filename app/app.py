@@ -2763,7 +2763,10 @@ def api_generate_assets():
     """生成资产（角色/物品/场景，含多视角）"""
     data = _body()
     asset_type = data.get('asset_type', '')  # character / item / scene
-    project_name = _safe_project(data.get('project_name', 'project'))
+    # P2-T2：写盘路由统一走 _project_or_400（契约必填 project_name）
+    project_name, err = _project_or_400((data.get('project_name') or '').strip())
+    if err is not None:
+        return err
     assets = data.get('assets', [])
 
     if asset_type not in ("character", "item", "scene"):
@@ -3401,7 +3404,11 @@ def _project_style(project_name: str = "") -> str:
 def api_generate_storyboards():
     """为剧本的每个 shot 生成一张分镜图（参考角色/物品/场景资产图）"""
     data = request.json or {}
-    project_name = _safe_project(data.get('project_name', 'project'))
+    # P2-T2：写盘路由统一走 _project_or_400（缺省/越界 project_name → 400，
+    # 不再静默回落共享 'project' 命名空间造成串项目）。前端契约必填。
+    project_name, err = _project_or_400((data.get('project_name') or '').strip())
+    if err is not None:
+        return err
     shots = data.get('shots', [])
     if not shots:
         return jsonify({"error": "没有镜头数据"}), 400
@@ -3531,7 +3538,10 @@ def _collect_reference_images(character_refs: list, scene_refs: list) -> list:
 @app.route('/api/videos/generate', methods=['POST'])
 def api_generate_videos():
     data = _body()
-    project_name = _safe_project(data.get('project_name', 'project'))
+    # P2-T2：写盘路由统一走 _project_or_400（同 api_generate_storyboards 口径）
+    project_name, err = _project_or_400((data.get('project_name') or '').strip())
+    if err is not None:
+        return err
     shots = data.get('shots', [])
     character_refs = data.get('character_refs', [])
     scene_refs = data.get('scene_refs', [])
@@ -4233,7 +4243,10 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
 @app.route('/api/final/video', methods=['POST'])
 def api_generate_final():
     data = _body()
-    project_name = _safe_project(data.get('project_name', 'project'))
+    # P2-T2：写盘路由统一走 _project_or_400（成片合成需定位项目内剧本，缺省无合理语义）
+    project_name, err = _project_or_400((data.get('project_name') or '').strip())
+    if err is not None:
+        return err
     script_path = data.get('script_path', '')
 
     if not script_path or not os.path.exists(script_path):
@@ -4666,7 +4679,11 @@ def api_upscale_list():
 def api_upscale_video():
     """发起视频超分（异步任务）：body 支持 project_name / video_path|video_url / scale / mode 等"""
     data = request.json or {}
-    project_name = _safe_project(data.get('project_name') or 'project')
+    # P2-T2：写盘路由统一走 _project_or_400（前端契约必填 project_name，
+    # 缺省只会静默写进共享 'project' 命名空间造成串项目）
+    project_name, err = _project_or_400((data.get('project_name') or '').strip())
+    if err is not None:
+        return err
 
     try:
         video_path = _upscale_resolve_video(data)
@@ -8464,7 +8481,11 @@ def api_tts_env():
 def api_tts_plan():
     """生成配音计划预览（逐句说话人 + 音色 + 落盘文件名，不合成）"""
     data = request.json or {} if request.method == 'POST' else dict(request.args)
-    project_name = _safe_project(data.get('project_name') or 'project')
+    # P2-T2：写盘路由统一走 _project_or_400（缺省/越界 project_name → 400，
+    # 不再静默回落共享 'project' 命名空间造成串项目）。前端契约必填。
+    project_name, err = _project_or_400((data.get('project_name') or '').strip())
+    if err is not None:
+        return err
     try:
         resolved = _dub_resolve_script(dict(data, project_name=project_name))
     except TTSError as e:
@@ -8511,7 +8532,11 @@ def api_tts_plan():
 def api_tts_voice_map_save():
     """保存角色音色配置（所有角色固定 speaker/seed，保证全剧音色一致）"""
     data = request.json or {}
-    project_name = _safe_project(data.get('project_name') or 'project')
+    # P2-T2：写盘路由统一走 _project_or_400（缺省/越界 project_name → 400，
+    # 不再静默回落共享 'project' 命名空间造成串项目）。前端契约必填。
+    project_name, err = _project_or_400((data.get('project_name') or '').strip())
+    if err is not None:
+        return err
     voice_map = data.get('voice_map')
     if not isinstance(voice_map, dict):
         return jsonify({"success": False, "error": "缺少 voice_map"}), 400
@@ -8529,7 +8554,11 @@ def api_tts_voice_map_save():
 def api_tts_preview():
     """单句试听合成：指定 text + 音色（或角色），返回可播放音频与时长"""
     data = request.json or {}
-    project_name = _safe_project(data.get('project_name') or 'project')
+    # P2-T2：写盘路由统一走 _project_or_400（缺省/越界 project_name → 400，
+    # 不再静默回落共享 'project' 命名空间造成串项目）。前端契约必填。
+    project_name, err = _project_or_400((data.get('project_name') or '').strip())
+    if err is not None:
+        return err
     text = clean_line_text(data.get('text') or '', str(data.get('character') or ''))
     if not text:
         return jsonify({"success": False, "error": "缺少待合成文本 text"}), 400
@@ -8609,7 +8638,11 @@ def api_tts_preview():
 def api_tts_generate():
     """发起批量配音（异步任务）：逐句/逐角色合成 + 整集合并"""
     data = request.json or {}
-    project_name = _safe_project(data.get('project_name') or 'project')
+    # P2-T2：写盘路由统一走 _project_or_400（缺省/越界 project_name → 400，
+    # 不再静默回落共享 'project' 命名空间造成串项目）。前端契约必填。
+    project_name, err = _project_or_400((data.get('project_name') or '').strip())
+    if err is not None:
+        return err
 
     env = tts_env_check()
     if not env.get("available"):
@@ -8957,7 +8990,12 @@ def _isolate_shot_sfx(video_path: str, project: str, episode, shot_id) -> dict:
 
 def _mix_prepare(data: dict) -> dict:
     """公共准备：解析项目 / 视频 / 剧本 / 配音清单 / 时间轴 / 逐句条目（不合成）"""
-    project_name = _safe_project(data.get('project_name') or 'project')
+    # P2-T2：mix 的 project 解析唯一事实源在 _mix_prepare（被 /mix/plan 与 /mix/generate 共用）。
+    # 缺省/越界 project_name → 抛 DubMixError（两条路由均已 catch 并回 400），
+    # 不再静默回落共享 'project' 命名空间造成串项目。前端契约必填。
+    project_name, _mix_err = _project_or_400((data.get('project_name') or '').strip())
+    if _mix_err is not None:
+        raise DubMixError("缺少 project_name")
     video_path = _mix_resolve_video(data, project_name)
 
     resolved = _dub_resolve_script(dict(data, project_name=project_name))
