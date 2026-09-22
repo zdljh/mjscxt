@@ -219,7 +219,9 @@ def load_config(config_path: str) -> dict:
                         cfg["api_key"] = ""
                         logger.info("LLM 配置中的明文密钥已迁移至加密库")
                 except Exception as e:  # noqa: BLE001
-                    logger.warning(f"LLM 密钥迁移失败（暂不阻断）：{e}")
+                    # N3（2026-09-22 复验）：迁移失败意味着**明文密钥仍留在配置文件里**
+                    # （安全相关），故升为 error —— 不阻断流程，但生产 root=WARNING 必须可见。
+                    logger.error(f"LLM 密钥迁移失败（明文密钥仍留在配置文件，暂不阻断）：{e}")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"LLM 配置读取失败（按未配置处理）：{e}")
     # 密钥取值：环境变量 > 加密库 > json（迁移后应为空）
