@@ -843,7 +843,9 @@ def preflight(kind: str, prompt: str, ctx: dict = None, style: str = "",
     # 不绝对成立。6000 是**服务端硬上限**，属安全闸门而非自愈策略，故在**启用预检**的
     # 路径上无条件钳制（warn 模式的语义是「不因质检缺陷阻断」，不是「允许超出上限」）；
     # 预检关闭时上面已 early-return 原样透传，保持「关闭时不改写」契约不变。
-    _clamped = h3_prompt_kit.clamp_prompt(final)
+    # P-4（2026-09-22 QA 复验）：clamp_prompt 的日志标签按 kind 区分，避免 audio/
+    # storyboard 超长时也被打成 prompt_h3（该形参只影响日志，不影响截断行为）。
+    _clamped = h3_prompt_kit.clamp_prompt(final, label=f"prompt_qc.{kind}")
     _prompt_clamped = _clamped != final
     if _prompt_clamped:
         repairs.append(f"提示词超长已截断（{len(final)} > "

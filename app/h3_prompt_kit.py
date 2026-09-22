@@ -94,13 +94,17 @@ def _clamp(text: str, limit: int, label: str) -> str:
     return text[:limit - len(_CLAMP_MARK)] + _CLAMP_MARK
 
 
-def clamp_prompt(text: str) -> str:
-    """对外统一入口：把最终提示词截到 :data:`MAX_PROMPT_CHARS`（标签 ``prompt_h3``）
+def clamp_prompt(text: str, label: str = "prompt_h3") -> str:
+    """对外统一入口：把最终提示词截到 :data:`MAX_PROMPT_CHARS`
 
     任何产出最终 H3 提示词的路径都应过一道这里，避免绕过 :func:`resolve` 的裸返回
     （例如 ``comfyui_client.resolve_h3_prompt`` 里直接放行既有 ``prompt_h3`` 的分支）。
+
+    ``label`` **只用于日志标签**（默认 ``prompt_h3``），不影响截断行为与返回值；
+    所有 kind 共用本函数时传入各自标签（如 ``prompt_qc.audio``），避免超长日志里
+    统一被误标成 H3（P-4，2026-09-22）。
     """
-    return _clamp(str(text or ""), MAX_PROMPT_CHARS, "prompt_h3")
+    return _clamp(str(text or ""), MAX_PROMPT_CHARS, label or "prompt_h3")
 
 
 # --------------------------------------------------------------------------- #
