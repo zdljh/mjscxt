@@ -3101,20 +3101,25 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
     # 旧 manifest：断点续跑时给「被跳过的镜头」回填上一轮的质检/提示词信息，避免信息丢失
     _prev_by_key = {}
     _prev_manifest = os.path.join(out_dir, "storyboard_manifest.json")
-    if os.path.isfile(_prev_manifest):
-        try:
-            with open(_prev_manifest, "r", encoding="utf-8") as _f:
-                for _it in (json.load(_f).get("shots") or []):
-                    if not isinstance(_it, dict):
-                        continue
-                    _sid = _it.get("shot_id")
-                    if _sid is not None:
-                        _prev_by_key[str(_sid)] = _it
-                    _sq = _shot_seq(_sid, 0)
-                    if _sq:
-                        _prev_by_key[f"shot_{_sq:02d}"] = _it
-        except Exception as _e:  # noqa: BLE001
-            app.logger.warning(f"读取旧分镜清单失败（忽略，不影响本次生成）：{_e}")
+    # C4-1（2026-09-22 复验收口）：读取口径与 D-03/D-04 统一 —— 交给 read_json_strict
+    # 自己负责三态（缺失→{}；活文件缺失但有 .bak→自动恢复；损坏→.bak 或 fail-loud），
+    # 故不再用 os.path.isfile 预判。口径与 _update_storyboard_manifest_shot（本文件
+    # L1990-1998 的 B-2 收口）一致；差异在于**本处是只读视图**：只给被跳过的镜头回填
+    # 上一轮的质检/提示词信息、从不写回，所以损坏时**响亮降级**（error 日志 + 不回填），
+    # 而不是 fail-loud 把整批分镜打挂。
+    try:
+        for _it in (read_json_strict(_prev_manifest, {}).get("shots") or []):
+            if not isinstance(_it, dict):
+                continue
+            _sid = _it.get("shot_id")
+            if _sid is not None:
+                _prev_by_key[str(_sid)] = _it
+            _sq = _shot_seq(_sid, 0)
+            if _sq:
+                _prev_by_key[f"shot_{_sq:02d}"] = _it
+    except Exception as _e:  # noqa: BLE001
+        app.logger.error("旧分镜清单 %s 不可读（%s: %s）：本次不回填被跳过镜头的信息，不影响生成",
+                         _prev_manifest, type(_e).__name__, _e)
     app.logger.info("[分镜断点续跑] overwrite=%s；待处理 %d 镜（已存在者将跳过）",
                     overwrite, len(shots))
     # G13（P1）：质检配置 worker 级读一次，本批所有镜头共用（对齐资产 worker 2302）。
