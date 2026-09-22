@@ -20,6 +20,24 @@
   7. 打桩让 ``os.remove`` 抛 ``OSError``：单文件删除失败不中断整批清理，
      且不向调用方抛异常（``reclaim_comfyui_output`` 正常返回统计）。
 
+独立复核又发现两个真缺陷，本脚本据此补三组**回归用例**（对应实现已修，
+见 ``app/disk_reclaim.py`` 的 ``_norm`` / ``is_comfy_output_artifact``）：
+  A1. **真实残留命名必须能回收**（缺陷 2）：ComfyUI ``SaveImage`` 只在
+      ``filename_prefix`` 末段追加自动编号后缀，故真实残留是
+      ``proj_shot_01_00001_.png`` —— **不含 ``_retry``**。旧判定「stem 含
+      ``_retry/_try``」六个生产 prefix 只命中一个，真实残留一个都收不到
+      （实测 3 轮增量比 100%）。含独立的 3 轮模拟（**全程只用真实命名**，
+      不靠 ``_retry`` 自证），直接反映验收①。
+  A2. **路径大小写不一致不得击穿「不碰正式目录」防线**（缺陷 1）：
+      ``COMFYUI_OUTPUT_DIR=...\\assets`` 与正式目录 ``...\\Assets`` 是同一路径，
+      ``os.path.commonpath`` 不做 normcase 会把「在里面」判成「不在里面」，
+      于是正式目录内的文件被删。非 Windows（``normcase`` 不转换）时
+      **跳过并明确打印**，不伪装通过。
+  A3. **命名判定并集**（缺陷 2 根因）：六个生产 ``filename_prefix`` 的真实产物名
+      必须全部命中 ``is_comfy_output_artifact`` / ``is_reclaimable_candidate``，
+      交付件名（``base.png`` / ``shot_01.png`` / ``ep01_final.mp4``）必须全部不命中；
+      ``is_artifact_scope`` 只认 ``comic_drama*`` 目录、不认根上散文件与别的工具目录。
+
 运行（仅需标准库）：
     MJSCXT_AUTOPILOT=0 python verify_comfyui_reclaim.py
 退出码 0 = 全绿。
@@ -43,6 +61,27 @@ _FAILS = []
 _PASSES = [0]
 
 _DAY = 86400.0
+
+#: 测试用项目名（模拟生产 ``filename_prefix`` 里的项目段）。
+_PROJ = "proj"
+
+#: 当前平台路径是否大小写不敏感。``os.path.normcase`` 在 POSIX 上是恒等函数，
+#: 在 Windows 上做 lower + 反斜杠归一 —— 用它判定能否构造「同路径不同写法」场景。
+_CASE_INSENSITIVE = os.path.normcase("Assets") != "Assets"
+
+
+def _real_residue_names(counter: int):
+    """真实残留命名：``(comfy 子目录, 相对名)``，**不含 ``_retry``**。
+
+    ComfyUI ``SaveImage`` 把 ``filename_prefix`` 逐字当路径，再在末段追加
+    ``_{counter:05}_``，所以 ``filename_prefix="comic_drama_retry/proj_shot_01"``
+    产出的文件名是 ``proj_shot_01_00001_.png`` —— 目录名带 retry，**文件名不带**。
+    """
+    return [
+        ("comic_drama_sb", f"{_PROJ}_shot_01_{counter:05d}_.png"),
+        ("comic_drama", f"{_PROJ}/character/林川_{counter:05d}_.png"),
+        ("comic_drama_retry", f"{_PROJ}_shot_02_{counter:05d}_.png"),
+    ]
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -321,6 +360,164 @@ for bad_args, label in [((None, [official]), "comfy_root=None"),
         ok = False
         print(f"    {label} 抛异常：{e!r}")
     check(f"8.x 容错：{label} → 返回统计不抛异常", ok)
+
+
+# ============================================================
+print()
+print("=" * 72)
+print("D-11a §A1　真实残留命名（无 _retry）必须能回收 · 缺陷 2 回归")
+print("=" * 72)
+
+base, comfy, official = _mkroot("realnames")
+_TMPDIRS.append(base)
+_real_paths = []
+for _i, (_sub, _rel) in enumerate(_real_residue_names(1)):        # 00001：与生产形态一致
+    _content = f"real-naming-residue-{_i}-".encode("utf-8") * 400
+    _write(os.path.join(official, "characters", _PROJ, f"asset_real_{_i}.png"), _content)
+    _p = _write(os.path.join(comfy, _sub, *_rel.split("/")), _content)
+    _age(_p, 25 * 3600)                                            # 模拟 > 24h 的历史残留
+    _real_paths.append(_p)
+
+check("A1.0 前置条件：3 个真实残留文件名均不含 _retry/_try（测的不是自证）",
+      all(not disk_reclaim.is_retry_artifact(p) for p in _real_paths),
+      f"{[os.path.basename(p) for p in _real_paths]}")
+stats = disk_reclaim.reclaim_comfyui_output(comfy, [official], min_age_sec=86400)
+_deleted = set(stats["delete"])
+check("A1.1 三个真实命名残留全部进入 delete", all(p in _deleted for p in _real_paths),
+      f"delete={sorted(os.path.basename(p) for p in _deleted)}")
+check("A1.2 三个真实命名残留确实已从盘上消失",
+      all(not os.path.isfile(p) for p in _real_paths))
+check("A1.3 scanned 恰好 3（全部命中，且未误纳正式目录）", stats["scanned"] == 3,
+      f"scanned={stats['scanned']} delete={len(_deleted)}")
+check("A1.4 正式产物零删除（真实残留被回收不影响交付物）",
+      len(_snapshot(official)) == 3 and stats["skip"]["no_copy"] == 0,
+      f"official={len(_snapshot(official))} no_copy={stats['skip']['no_copy']}")
+
+# —— A1 独立的 3 轮模拟：三轮**只用真实命名**（递增自动编号，仍不含 _retry）——
+base3, comfy3, official3 = _mkroot("real3rounds")
+_TMPDIRS.append(base3)
+_per_round_added3 = 0
+_per_round_deleted3 = []
+for _r in range(3):
+    _round_bytes = 0
+    for _i, (_sub, _rel) in enumerate(_real_residue_names(_r + 1)):
+        _content = (f"real3-r{_r}-f{_i}-").encode("utf-8") * 600
+        _write(os.path.join(official3, "characters", _PROJ, f"asset3_r{_r}_{_i}.png"), _content)
+        _p = _write(os.path.join(comfy3, _sub, *_rel.split("/")), _content)
+        _age(_p, 25 * 3600)
+        _round_bytes += len(_content)
+    if _r == 0:
+        _per_round_added3 = _round_bytes
+    _st3 = disk_reclaim.reclaim_comfyui_output(comfy3, [official3], min_age_sec=86400)
+    _per_round_deleted3.append(len(_st3["delete"]))
+
+_net3 = _tree_size(comfy3)
+_ratio3 = (_net3 / _per_round_added3) if _per_round_added3 else 1.0
+check("A1.5 3 轮（全程真实命名）后 COMFYUI_OUTPUT_DIR 净增量 < 单轮新增量的 30%",
+      _net3 < _per_round_added3 * 0.3,
+      f"net={_net3}B 单轮新增={_per_round_added3}B 比值={_ratio3 * 100:.1f}%")
+check("A1.6 3 轮每轮都删满 3 个真实命名残留（无一轮落空）",
+      _per_round_deleted3 == [3, 3, 3], f"每轮删除={_per_round_deleted3}")
+check("A1.7 3 轮全程未出现 _retry/_try 命名（回收率非靠重试命名自证）",
+      all(not disk_reclaim.is_retry_artifact(_rel)
+          for _c in (1, 2, 3) for _s, _rel in _real_residue_names(_c)))
+
+
+# ============================================================
+print()
+print("=" * 72)
+print("D-11a §A2　路径大小写不一致不得击穿「不碰正式目录」防线 · 缺陷 1 回归")
+print("=" * 72)
+
+if not _CASE_INSENSITIVE:
+    print("    ⚠ 当前平台 os.path.normcase 不做大小写转换（非 Windows），"
+          "无法构造「同路径不同写法」场景")
+    print("    ⚠ 平台不支持大小写差异，已跳过 §A2 断言（不伪装通过）")
+else:
+    base = tempfile.mkdtemp(prefix="mjscxt-d11a-case-")
+    _TMPDIRS.append(base)
+    # 正式目录写成 Assets（大写），COMFYUI_OUTPUT_DIR 写成 assets（小写）——
+    # 大小写不敏感的 Windows 上两者指向**同一个目录**，misconfig 即可触发。
+    official_case = os.path.join(base, "Assets")
+    os.makedirs(official_case, exist_ok=True)
+    comfy_case = os.path.join(base, "assets")
+    _case_content = b"official-asset-content" * 300
+
+    # 样本①：正式目录**根上**的交付件 —— 命名带 _retry，但在 comfy 根上（不入作用域）
+    _victim_flat = _write(
+        os.path.join(official_case, "p_shot_01_retry_00001_.png"), _case_content)
+    _age(_victim_flat, 25 * 3600)
+    # 样本②（**关键，决定本用例真假**）：文件名带 _retry **且**落在 comic_drama*/ 内。
+    # 它同时满足「命名判定」与「作用域判定」，因此**唯一**能拦住它的就是条件 6
+    # （候选不得落在正式目录内）—— 正是缺陷 1 击穿的那道防线。
+    # 若改用 `proj_shot_01_00001_.png` 这类编号名，被退回的旧候选判定（只认 _retry）
+    # 会先把它过滤掉，用例将因「候选判定」而非「防线」通过 —— 假通过，测不到缺陷 1。
+    _victim_deep = _write(
+        os.path.join(official_case, "comic_drama", "p_shot_01_retry_00001_.png"), _case_content)
+    _age(_victim_deep, 25 * 3600)
+
+    check("A2.0 前置条件：<base>/assets 与 <base>/Assets 指向同一目录（大小写不敏感）",
+          os.path.isdir(comfy_case) and os.path.isdir(official_case)
+          and os.path.samefile(comfy_case, official_case))
+    _before_case = _snapshot(official_case)
+    _stats_case = disk_reclaim.reclaim_comfyui_output(
+        comfy_case, [official_case], min_age_sec=86400)
+    _after_case = _snapshot(official_case)
+    check("A2.1 大小写写法不一致时，正式目录内的候选仍在（防线未被击穿）",
+          os.path.isfile(_victim_flat) and os.path.isfile(_victim_deep))
+    check("A2.2 delete 为空 —— 一个正式目录内的文件都没被删",
+          _stats_case["delete"] == [], f"delete={_stats_case['delete']}")
+    check("A2.3 正式目录文件清单 + 内容 sha256 零变化（2 个文件原样）",
+          _before_case == _after_case == {
+              "p_shot_01_retry_00001_.png": hashlib.sha256(_case_content).hexdigest(),
+              os.path.join("comic_drama", "p_shot_01_retry_00001_.png"):
+                  hashlib.sha256(_case_content).hexdigest(),
+          },
+          f"after={sorted(_after_case)}")
+
+
+# ============================================================
+print()
+print("=" * 72)
+print("D-11a §A3　命名判定并集：ComfyUI 编号产物 ∪ 重试标记 · 缺陷 2 根因")
+print("=" * 72)
+
+# 六个生产 filename_prefix 的真实产物名（``filename_prefix`` 逐字当路径 +
+# 末段追加 ``_{counter:05}_``，故它们**大多不含 _retry**）。
+_PROD_NAMES = [
+    f"{_PROJ}_shot_01_00001_.png",              # 批量分镜
+    f"{_PROJ}_shot_01_retry_00001_.png",        # 单镜重跑（唯一含 _retry 的）
+    f"{_PROJ}/character/林川_00001_.png",        # 资产
+    f"{_PROJ}_ep01_00007_.png",                 # 整集视频
+    "ep01_00001_.png",                          # 整集
+    "shot_01_try2_00001_.png",                  # 旧式 _try 命名
+]
+_DELIVERABLE_NAMES = ["base.png", "shot_01.png", "ep01_final.mp4"]
+
+check("A3.1 六个生产 prefix 的真实产物名全部被 is_comfy_output_artifact 命中",
+      all(disk_reclaim.is_comfy_output_artifact(n) for n in _PROD_NAMES),
+      f"漏判={[n for n in _PROD_NAMES if not disk_reclaim.is_comfy_output_artifact(n)]}")
+check("A3.2 同一批真实产物名全部被 is_reclaimable_candidate 命中（并集生效）",
+      all(disk_reclaim.is_reclaimable_candidate(n) for n in _PROD_NAMES),
+      f"漏判={[n for n in _PROD_NAMES if not disk_reclaim.is_reclaimable_candidate(n)]}")
+check("A3.3 交付件名（base.png / shot_01.png / ep01_final.mp4）一律不命中",
+      not any(disk_reclaim.is_comfy_output_artifact(n) for n in _DELIVERABLE_NAMES)
+      and not any(disk_reclaim.is_reclaimable_candidate(n) for n in _DELIVERABLE_NAMES),
+      f"误判={[n for n in _DELIVERABLE_NAMES if disk_reclaim.is_reclaimable_candidate(n)]}")
+check("A3.4 判定只看 stem：目录名含 retry 不影响（comic_drama_retry/base.png 不命中）",
+      not disk_reclaim.is_retry_artifact("comic_drama_retry/base.png")
+      and not disk_reclaim.is_comfy_output_artifact("comic_drama_retry/base.png"))
+
+_croot = os.path.join(ROOT, "comfy_out_probe")
+check("A3.5 is_artifact_scope：comic_drama* 产物目录内为 True（前缀匹配而非硬编码目录名）",
+      all(disk_reclaim.is_artifact_scope(
+          os.path.join(_croot, _d, f"{_PROJ}_shot_01_00001_.png"), _croot)
+          for _d in ("comic_drama", "comic_drama_sb", "comic_drama_retry", "comic_drama_kf")))
+check("A3.6 is_artifact_scope：别的工具目录 / comfy 根上散文件为 False",
+      not disk_reclaim.is_artifact_scope(
+          os.path.join(_croot, "other_tool", "x_00001_.png"), _croot)
+      and not disk_reclaim.is_artifact_scope(
+          os.path.join(_croot, "根上的散文件_00001_.png"), _croot))
 
 
 # ============================================================

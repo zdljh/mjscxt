@@ -14,6 +14,17 @@
   ② ``llm_client`` 密钥库清理失败场景日志出现 ``error`` 级别，且配置落盘不被中断
   ③ 全量离线测试绿
 
+判定口径（**内容锚点，禁止行号**）
+----------------------------------
+「剩余的多行 ``except: pass`` 是否合规」不看行号，而看**上下文内容**：该站点
+**前 6 行内必须出现 ``logger``** —— 说明它是「日志自身失败的兜底」（再调 logger 会
+递归，只能 pass），而非「彻底静默地吞掉异常」。
+
+为什么不能用行号白名单：本项目已发生事故 —— 别人在 ``app.py`` 上方插入两行后，
+原来以 ``("app.py", 5691)`` 锚定的白名单静默失效（同一处兜底点顺移到 5693），
+守卫从「通过」变成「误报」或「漏报」全凭排版运气。行号只用于输出报错位置。
+（与 ``verify_project_audit.py`` 的 G5 同口径。）
+
 运行（仅需标准库；``requests`` 以桩替代）：
     MJSCXT_AUTOPILOT=0 python verify_silent_except.py
 退出码 0 = 全绿。
@@ -36,11 +47,10 @@ sys.path.insert(0, APP_DIR)
 
 _EXCEPT_PASS = re.compile(r"^\s*except([^:]*):\s*(#.*)?$")
 
-#: 有意保留为 `pass` 的点：**logger 自身失败的兜底** —— 再调 logger 会递归。
+#: 判定「日志兜底」时向前回看的行数。多行 ``except: pass`` 若在前 6 行内出现过
+#: ``logger``，即认定它是「logger 自身失败的兜底」（再调 logger 会递归，只能 pass），
 #: 这是「已经记录过、不再重复记录」的正确写法，不属于静默吞异常。
-#: ⚠️ 该白名单以**绝对行号**锚定：D-11a 在 app.py 上方新增了 2 行回收调用后，
-#: 该站点由 5691 顺移到 5693（仍是同一个 `except: pass` 兜底点，未新增静默吞）。
-KEEP_PASS_WHITELIST = {("app.py", 5693)}
+_LOGGER_LOOKBACK = 6
 MAX_REMAINING = 10
 
 _FAILS = []
@@ -65,12 +75,18 @@ def _read_abs(p: str) -> str:
 
 
 def _find_except_pass():
+    """找出全部多行 ``except: pass`` 站点，返回 ``[(文件, 行号, 是否日志兜底), ...]``。
+
+    「是否日志兜底」用**内容锚点**判定（前 :data:`_LOGGER_LOOKBACK` 行内是否出现
+    ``logger``），不用行号 —— 行号会随上下文的任何插入/删除而漂移，让守卫静默失效。
+    """
     sites = []
     for fn in sorted(f for f in os.listdir(APP_DIR) if f.endswith(".py")):
         lines = _read(fn).splitlines()
         for i, ln in enumerate(lines):
             if _EXCEPT_PASS.match(ln) and i + 1 < len(lines) and lines[i + 1].strip() == "pass":
-                sites.append((fn, i + 1))
+                ctx = "\n".join(lines[max(0, i - _LOGGER_LOOKBACK):i])
+                sites.append((fn, i + 1, "logger" in ctx))
     return sites
 
 
@@ -93,14 +109,15 @@ print("=" * 72)
 
 sites = _find_except_pass()
 print(f"  剩余 except: pass 共 {len(sites)} 处：")
-for fn, ln in sites:
-    tag = "（白名单：logger 自身失败兜底）" if (fn, ln) in KEEP_PASS_WHITELIST else "（**未处理**）"
+for fn, ln, logged in sites:
+    tag = "（日志兜底，合规）" if logged else "（**彻底静默，违规**）"
     print(f"    {fn}:{ln} {tag}")
 
 check(f"1.1 计数 ≤ {MAX_REMAINING}（修复前 72 处）", len(sites) <= MAX_REMAINING,
       f"实际 {len(sites)}")
-unexpected = [s for s in sites if s not in KEEP_PASS_WHITELIST]
-check("1.2 剩余全部在白名单内（无遗漏的静默吞）", not unexpected, f"未处理：{unexpected}")
+_unlogged = [(fn, ln) for fn, ln, logged in sites if not logged]
+check("1.2 剩余站点全部是「日志自身失败兜底」（前 6 行内出现过 logger）",
+      not _unlogged, f"彻底静默：{_unlogged}")
 
 SEC_ERROR = [
     ("llm_client.py", "清理加密库中的 LLM 密钥失败", 2),
