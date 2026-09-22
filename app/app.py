@@ -4970,6 +4970,31 @@ def _apply_project_settings(style: str, project_name: str = "") -> str:
     return f"{base}；{brief}" if base else brief
 
 
+def _sync_project_config_style(project_name: str, brief: str) -> bool:
+    """把 AI 总控敲定的风格纲要同步到项目 config.json 的 style 字段（2026-09-22 P-2）。
+
+    总控 apply 设定原本只写 ai_chat/project_settings.json，项目 config.json 的 style
+    停在「建项目时的默认值（3D动漫渲染）」，用户看到「配置要求国漫2D 实际却还是 3D」
+    即由此。这里把生效的 style_brief 回写进 config.json，让两份配置口径一致。
+
+    - 仅当项目在 project_store 里真实存在、且 brief 非空时才写；
+    - 失败只降级告警、不阻断 apply（config.json 同步属后置簿记，主链路必须成功）。
+    返回是否真正落盘。
+    """
+    brief = (brief or "").strip()
+    if not brief:
+        return False
+    rec = project_store.get_project(project_name or "")
+    if not rec:
+        return False
+    try:
+        project_store.update_config(rec["dir_key"], {"style": brief})
+        return True
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning("AI 总控风格同步到项目 config.json 失败（不影响设定应用）：%s", e)
+        return False
+
+
 def _ai_config_view() -> dict:
     cfg = ai_config.load_config(AI_CONFIG_PATH, LLM_CONFIG_PATH)
     view = ai_config.public_view(cfg)
@@ -5420,7 +5445,10 @@ def api_ai_chat_apply():
     history["active_project"] = project
     ai_chat.save_history(AI_CHAT_HISTORY_PATH, history)
 
+    # 同步风格到项目 config.json：否则 config.json 的 style 停在建项目时的默认值
+    # （如 3D动漫渲染），与总控刚敲定的设定不一致，用户会以为「设定没生效」。
     state = _chat_state(project)
+    _sync_project_config_style(project, ai_chat.style_brief(state.get("settings") or {}))
     # ⚠️ normalize_settings 只保留白名单字段，其余**静默丢弃**。
     # 模型自造键名（实测出现过 color_tone / camera_language）时，
     # 用户以为「冷色调、克制镜头」已经写进去了，落盘却只剩 style —— 白沟通一场。
