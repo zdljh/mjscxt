@@ -356,6 +356,90 @@ def clear_draft(history: dict, project: str) -> dict:
     return history
 
 
+def purge_project(
+    history_path: str,
+    settings_path: str,
+    names: list,
+    archive_root: str = "",
+) -> dict:
+    """项目被删除时，摘除它散落在 AI 总控三处的按项目键组织的数据（关联清理）。
+
+    软删项目（project_store.delete_project）会把 22 类产物目录移入回收站，但
+    output/ai_chat/ 里这三处是「全局单文件、内部按项目键分桶」或「按项目键分子目录」，
+    不在产物目录覆盖内，必须单独摘除，否则会残留：
+      1. chat_history.json 的 projects[键] / drafts[键] 桶，及 active_project 指向该键时清空；
+      2. project_settings.json 的 settings[键]，及 active_project 指向该键时清空；
+      3. archive/<候选键>/*.jsonl 全量归档子目录（整目录移入 .trash_purged，可还原）。
+
+    ``names`` 是该项目的全部别名（dir_key + 显示名），键匹配对每个名字取
+    :func:`project_key_candidates`（新规则 → 旧规则 → 原样名）再并集，与读写一致，
+    既清掉按规范键落盘的新数据，也清掉按旧规则/原样名落盘的历史数据。
+    归档子目录采用「移动而非删除」，与软删项目的可还原模型自洽。
+    返回摘除统计 {history_projects, history_drafts, settings, archived_dirs, active_cleared}。
+    """
+    cands = []
+    for n in (names or []):
+        for k in project_key_candidates(n):
+            if k and k not in cands:
+                cands.append(k)
+    cset = set(cands)
+    if not cset:
+        return {"history_projects": 0, "history_drafts": 0, "settings": 0,
+                "archived_dirs": 0, "active_cleared": False, "candidates": []}
+    report = {"history_projects": 0, "history_drafts": 0, "settings": 0,
+              "archived_dirs": 0, "active_cleared": False, "candidates": cands}
+
+    # 1) 会话历史 + 草稿桶
+    history = load_history(history_path)
+    for k in list((history.get("projects") or {}).keys()):
+        if k in cset:
+            history["projects"].pop(k, None)
+            report["history_projects"] += 1
+    for k in list((history.get("drafts") or {}).keys()):
+        if k in cset:
+            history["drafts"].pop(k, None)
+            report["history_drafts"] += 1
+    act = str(history.get("active_project") or "")
+    if act in cset:
+        history["active_project"] = ""
+        report["active_cleared"] = True
+    save_history(history_path, history)
+
+    # 2) 创作设定
+    sdata = load_settings_file(settings_path)
+    sitems = sdata.get("settings") or {}
+    for k in list(sitems.keys()):
+        if k in cset:
+            sitems.pop(k, None)
+            report["settings"] += 1
+    sact = str(sdata.get("active_project") or "")
+    if sact in cset:
+        sdata["active_project"] = ""
+        sdata["updated_at"] = _now()
+        report["active_cleared"] = True
+    _write_json(settings_path, sdata)
+
+    # 3) 全量归档子目录（移动而非删除，保持可还原）
+    # 归档布局是 <archive_root>/archive/<候选键>/，复用现成 archive_dir 工具（含 archive/ 层）
+    if archive_root:
+        import shutil
+        for k in cands:
+            adir = archive_dir(archive_root, k)
+            if os.path.isdir(adir):
+                try:
+                    target = adir + ".trash_purged"
+                    # 避免同名冲突：若目标已存在则加时间戳
+                    if os.path.exists(target):
+                        target = adir + ".trash_purged." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                    shutil.move(adir, target)
+                    report["archived_dirs"] += 1
+                    logger.info("AI 总控归档已随项目删除摘除：%s → %s", adir, target)
+                except OSError as e:
+                    logger.error("摘除 AI 总控归档子目录失败（%s）：%s", adir, e)
+
+    return report
+
+
 # ===================== 会话归档（只增不减的全量真相源） =====================
 #
 # 分层（设计 §2.2.1）：
