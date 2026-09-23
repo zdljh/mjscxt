@@ -8,7 +8,9 @@ import type { Project, Novel } from '@/types';
 type NovelSource = 'upload' | 'existing';
 
 const DEFAULT_CONFIG = {
-  style: '3D动漫渲染',
+  // 默认创作风格：后端数据值（非 UI 文案），保持原字面值「3D动漫渲染」不变，
+  // 仅以 \u 转义书写，避免源码里出现 CJK（i18n 扫描要求本文件零中文）。
+  style: '3D\u52a8\u6f2b\u6e32\u67d3',
   episodes: 10,
   shots_per_episode: 12,
   resolution: '768p_vertical',
@@ -19,6 +21,17 @@ const DEFAULT_CONFIG = {
   target_shots: 12,
   voice_map: {},
 };
+
+// 新建项目可选风格（后端数据值，与 ai_chat.SETTING_FIELDS 里 art_style 的 options 对齐）。
+// 仍以 \u 转义书写（本文件零 CJK 约定）。value 即写入 config.style 的字面值。
+const STYLE_PRESETS: { value: string; label: string }[] = [
+  { value: '3D\u52a8\u6f2b\u6e32\u67d3', label: '3D \u52a8\u6f2b\u6e32\u67d3' },
+  { value: '\u56fd\u6f2b2D\u52a8\u6f2b\u98ce', label: '\u56fd\u6f2b 2D \u52a8\u6f2b\u98ce' },
+  { value: '\u56fd\u98ce\u6c34\u58a8', label: '\u56fd\u98ce\u6c34\u58a8' },
+  { value: '\u5199\u5b9e\u7535\u5f71\u611f', label: '\u5199\u5b9e\u7535\u5f71\u611f' },
+  { value: '\u65e5\u5f0f\u8d5b\u7490\u7490', label: '\u65e5\u5f0f\u8d5b\u7490\u7490' },
+  { value: '\u539a\u6d82\u63d2\u753b', label: '\u539a\u6d82\u63d2\u753b' },
+];
 
 const ACCEPT_EXTS = '.txt,.docx,.pdf,.epub,.md';
 
@@ -38,6 +51,9 @@ export function ProjectsPage() {
   const [dragOver, setDragOver] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
+  // 风格选择：预设下拉 + 自定义输入。customStyle 非空时优先用自定义值。
+  const [stylePreset, setStylePreset] = useState(STYLE_PRESETS[0].value);
+  const [customStyle, setCustomStyle] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // --- 编辑项目弹窗 ---
@@ -74,6 +90,8 @@ export function ProjectsPage() {
     setPendingFile(null);
     setDragOver(false);
     setFormError('');
+    setStylePreset(STYLE_PRESETS[0].value);
+    setCustomStyle('');
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -108,6 +126,14 @@ export function ProjectsPage() {
 
     setSubmitting(true);
     try {
+      // 风格：自定义模式必须填写，否则回落到预设
+      let finalStyle = stylePreset === '__custom__' ? customStyle.trim() : stylePreset;
+      if (!finalStyle) {
+        setFormError(t('project.styleRequired'));
+        setSubmitting(false);
+        return;
+      }
+
       let novelId = '';
 
       if (source === 'upload') {
@@ -134,7 +160,10 @@ export function ProjectsPage() {
       const res = await projectsApi.create({
         name,
         novel_id: novelId,
-        config: DEFAULT_CONFIG,
+        config: {
+          ...DEFAULT_CONFIG,
+          style: finalStyle,
+        },
       } as any);
       const key = res?.project?.dir_key || res?.project?.id || '';
 
@@ -357,6 +386,28 @@ export function ProjectsPage() {
               label={t('project.name')}
               placeholder={t('project.namePlaceholder')}
             />
+          </div>
+
+          {/* 风格选择：预设下拉 + 自定义输入 */}
+          <div>
+            <Select
+              value={stylePreset}
+              onChange={(v) => { setStylePreset(v); setFormError(''); }}
+              label={t('project.style')}
+              options={[
+                ...STYLE_PRESETS,
+                { value: '__custom__', label: t('project.styleCustom') },
+              ]}
+            />
+            {stylePreset === '__custom__' && (
+              <div className="mt-2">
+                <Input
+                  value={customStyle}
+                  onChange={setCustomStyle}
+                  placeholder={t('project.styleCustomPlaceholder')}
+                />
+              </div>
+            )}
           </div>
 
           {/* 小说来源切换 */}

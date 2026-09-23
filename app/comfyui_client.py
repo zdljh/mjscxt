@@ -1268,9 +1268,11 @@ class ComfyUIClient:
         """给角色参考图提示词确定性地补「全身三视图」版式约束（幂等）
 
         2026-09-23 补强：除「三人同比例」外，再显式要求**间距均匀互不遮挡**、
-        **脚底落在同一条水平线**、**简洁纯色背景**。前两项直接对应实测里最容易
+        **脚底落在同一条水平线**、**纯白背景**。前两项直接对应实测里最容易
         跑偏的两个量（三人横向粘连 / 脚底不共线），后一项避免把设定图渲染成
         「三人合影」的写实场景（带透视景深 → 三人远近大小不一）。
+        2026-09-23（白底需求）：角色/物品参考图**不需要背景**，从「简洁纯色背景」
+        收紧为明确的「纯白背景」，避免模型自由发挥出渐变/场景/贴图。
         画幅已同步改为 1:1（见 style_kit.ASSET_BASE_RATIO 的角色项），
         「三人横排」版式与「竖幅画幅」的冲突已解除。
         """
@@ -1284,8 +1286,25 @@ class ComfyUIClient:
                   "间距均匀互不遮挡，同一角色同一比例，人物身高占比一致，"
                   "三人脚底落在同一条水平线上，"
                   "画面完整呈现从头到脚的全身，头顶上方与脚部下方留少量边距，"
-                  "简洁纯色背景，不要场景、道具与投影")
+                  "纯白背景，不要场景、道具、投影与任何背景纹理")
         # 剧本层提示词常以「三视图。」收尾，直接拼会得到「三视图。，全身三视图…」的脏标点
+        base = base.rstrip("。，,.;； ")
+        return (base + suffix) if base else suffix.lstrip("，")
+
+    @staticmethod
+    def _ensure_item_white_bg(prompt_zh: str, style: str = "") -> str:
+        """给物品参考图提示词确定性地补「纯白背景」约束（幂等）。
+
+        物品/道具参考图与角色设定图同理：后续要拿来做参考图编辑（多视角/分镜），
+        背景越干净越利于一致性；带场景/贴图的物品图会把背景一起带进分镜。
+        """
+        text = str(prompt_zh or "").strip()
+        marker = "纯白背景"
+        base = text if marker in text else style_kit.with_style(text, style) if style else text
+        if marker in base:
+            return base
+        suffix = ("，纯白背景，无任何场景、地面、桌面、阴影与背景纹理，"
+                  "物品完整居中、边缘清晰")
         base = base.rstrip("。，,.;； ")
         return (base + suffix) if base else suffix.lstrip("，")
 
@@ -1293,6 +1312,7 @@ class ComfyUIClient:
                            style: str = "", size=None,
                            filename_prefix: str = None) -> List[str]:
         logger.info(f"生成物品基础图: {prompt_zh[:50]}...")
+        prompt_zh = self._ensure_item_white_bg(prompt_zh, style)
         return self._generate_base_image(WORKFLOW_TEMPLATE["item_gen"], prompt_zh,
                                          asset_type="item", seed=seed, style=style, size=size,
                                          filename_prefix=filename_prefix)

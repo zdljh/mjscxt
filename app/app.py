@@ -2597,32 +2597,43 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                 for attempt in range(max_retries + 1):
                     if attempt > 0:
                         seed = random.randint(1, 2 ** 31 - 1)
-                        # 从教训库召回「上一轮质检哪里不对」，据此改写提示词再生成
+                        # ① 优先：针对**上一轮这张图**的质检缺陷，用 LLM 即时改写提示词（精准）
+                        # ② 回落：召回历史教训库改写；再回落：仅换种子。
                         # ⚠️ 基准用 orig_asset_prompt，避免建议块一轮轮累积
-                        try:
-                            suggestions = prompt_memory.suggest(
-                                kind="asset",
-                                prompt=orig_asset_prompt,
-                                project=project_name,
-                                root_dir=PROJECT_OUTPUT_DIR
-                            )
-                            learned = prompt_memory.learned_prompt(
-                                kind="asset",
-                                prompt=orig_asset_prompt,
-                                project=project_name,
-                                root_dir=PROJECT_OUTPUT_DIR,
-                                style=_qc_style_of(project_name),
-                            )
-                            if learned and learned != orig_asset_prompt:
-                                prompt_zh = learned
-                                app.logger.info("资产 %s 第 %d 次重试，按质检教训改写提示词：%s",
-                                                name, attempt + 1, suggestions[:2])
-                            else:
-                                prompt_zh = orig_asset_prompt
-                                app.logger.info("资产 %s 第 %d 次重试，暂无可用教训，仅换种子",
-                                                name, attempt + 1)
-                        except Exception as mem_err:
-                            app.logger.warning(f"读取记忆模块失败: {mem_err}")
+                        prompt_zh = orig_asset_prompt
+                        optimized = None
+                        if base_attempts:
+                            optimized = _optimize_prompt_from_qc(
+                                "asset", orig_asset_prompt, base_attempts[-1],
+                                style=gen_style or _qc_style_of(project_name))
+                        if optimized:
+                            prompt_zh = optimized
+                            app.logger.info("资产 %s 第 %d 次重试，针对本次缺陷即时优化提示词",
+                                            name, attempt + 1)
+                        else:
+                            try:
+                                suggestions = prompt_memory.suggest(
+                                    kind="asset",
+                                    prompt=orig_asset_prompt,
+                                    project=project_name,
+                                    root_dir=PROJECT_OUTPUT_DIR
+                                )
+                                learned = prompt_memory.learned_prompt(
+                                    kind="asset",
+                                    prompt=orig_asset_prompt,
+                                    project=project_name,
+                                    root_dir=PROJECT_OUTPUT_DIR,
+                                    style=_qc_style_of(project_name),
+                                )
+                                if learned and learned != orig_asset_prompt:
+                                    prompt_zh = learned
+                                    app.logger.info("资产 %s 第 %d 次重试，按历史质检教训改写提示词：%s",
+                                                    name, attempt + 1, suggestions[:2])
+                                else:
+                                    app.logger.info("资产 %s 第 %d 次重试，暂无可用教训，仅换种子",
+                                                    name, attempt + 1)
+                            except Exception as mem_err:
+                                app.logger.warning(f"读取记忆模块失败: {mem_err}")
                     
                         _set_phase(f"{name} 基础图质检不达标，修改提示词后重新生成（第 {attempt}/{max_retries} 次）",
                                    "regenerating")
@@ -3308,33 +3319,47 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                             # 教训库召回也改用 self_healed_prompt 作键：
                             # 自愈改变了提示词 → 指纹也变了，用旧指纹的教训与自愈后提示词不匹配。
                             _retry_base = self_healed_prompt
-                            try:
-                                hints = prompt_memory.suggest(
-                                    kind="storyboard",
-                                    prompt=_retry_base,
-                                    project=project_name,
-                                    root_dir=PROJECT_OUTPUT_DIR
-                                )
-                                learned = prompt_memory.learned_prompt(
-                                    kind="storyboard",
-                                    prompt=_retry_base,
-                                    project=project_name,
-                                    root_dir=PROJECT_OUTPUT_DIR,
-                                    style=_qc_style_of(project_name),
-                                )
-                                if learned and learned != _retry_base:
-                                    prompt = learned
-                                    item["prompt"] = prompt
-                                    item["prompt_hints"] = hints[:3]
-                                    app.logger.info("镜头 %s 第 %d 次重试，按质检教训改写提示词：%s",
-                                                    shot_id, attempt + 1, hints[:2])
-                                else:
-                                    prompt = _retry_base
-                                    item["prompt"] = prompt
-                                    app.logger.info("镜头 %s 第 %d 次重试，暂无可用教训，仅换种子",
-                                                    shot_id, attempt + 1)
-                            except Exception as mem_err:
-                                app.logger.warning(f"读取记忆模块失败: {mem_err}")
+                            # ① 优先：针对上一轮这张图的缺陷，LLM 即时改写（精准）
+                            # ② 回落：历史教训库召回；再回落：仅换种子
+                            prompt = _retry_base
+                            _opt_prompt = None
+                            if attempts:
+                                _opt_prompt = _optimize_prompt_from_qc(
+                                    "storyboard", _retry_base, attempts[-1],
+                                    style=_qc_style_of(project_name))
+                            if _opt_prompt:
+                                prompt = _opt_prompt
+                                item["prompt"] = prompt
+                                app.logger.info("镜头 %s 第 %d 次重试，针对本次缺陷即时优化提示词",
+                                                shot_id, attempt + 1)
+                            else:
+                                try:
+                                    hints = prompt_memory.suggest(
+                                        kind="storyboard",
+                                        prompt=_retry_base,
+                                        project=project_name,
+                                        root_dir=PROJECT_OUTPUT_DIR
+                                    )
+                                    learned = prompt_memory.learned_prompt(
+                                        kind="storyboard",
+                                        prompt=_retry_base,
+                                        project=project_name,
+                                        root_dir=PROJECT_OUTPUT_DIR,
+                                        style=_qc_style_of(project_name),
+                                    )
+                                    if learned and learned != _retry_base:
+                                        prompt = learned
+                                        item["prompt"] = prompt
+                                        item["prompt_hints"] = hints[:3]
+                                        app.logger.info("镜头 %s 第 %d 次重试，按质检教训改写提示词：%s",
+                                                        shot_id, attempt + 1, hints[:2])
+                                    else:
+                                        prompt = _retry_base
+                                        item["prompt"] = prompt
+                                        app.logger.info("镜头 %s 第 %d 次重试，暂无可用教训，仅换种子",
+                                                        shot_id, attempt + 1)
+                                except Exception as mem_err:
+                                    app.logger.warning(f"读取记忆模块失败: {mem_err}")
 
                             with lock:
                                 generation_state[task_id]["phase"] = \
@@ -3515,11 +3540,16 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
 
 
 def _project_style(project_name: str = "") -> str:
-    """取项目的生效风格：优先 plan.json 的 style（总控 AI 敲定），其次 AI 设定面板。
+    """取项目的生效风格：plan.json 的 style（总控 AI 敲定）> AI 设定面板 > config.json 的 style。
 
     前端手工触发的生成路由（分镜 / 视频 / 资产）此前**完全不传风格**，
     导致「界面按钮点出来的图」和「托管跑出来的图」风格行为不一致。
     统一从这里取，保证两条链路同源。
+
+    2026-09-23（建项目选风格）：新增第三级兜底 config.json 的 style —— 用户「新建项目」时
+    下拉/自定义的风格写进 config.style，但此前这里完全不读它，选了什么都不会生效
+    （总控没敲定风格时 style 恒为空 → 生成被 409 拦截或回落默认）。现在总控没敲定时
+    退回 config.style，让「建项目时选风格」这条路径真正闭环。
     """
     proj = _safe_project(project_name or "")
     try:
@@ -3531,6 +3561,15 @@ def _project_style(project_name: str = "") -> str:
         try:
             brief = _apply_project_settings("", proj)
         except Exception:  # noqa: BLE001
+            brief = ""
+    if not brief:
+        # 建项目时选的风格（config.json 的 style 字段）作为最后兜底
+        try:
+            rec = project_store.get_project(proj)
+            if rec:
+                brief = str(project_store.read_config(rec["dir_key"]).get("style") or "").strip()
+        except Exception as e:  # noqa: BLE001
+            app.logger.warning(f"读取项目 config.style 失败（忽略）：{e}")
             brief = ""
     return style_kit.normalize_style(brief)
 
@@ -3551,6 +3590,17 @@ def _style_aspect_confirmed(project_name: str) -> dict:
         view = {}
     s = view.get("settings") or {}
     style_confirmed = bool((s.get("style") or s.get("art_style") or "").strip())
+    # 2026-09-23（建项目选风格）：用户「新建项目」时下拉/自定义的风格写进 config.json 的
+    # style，也算「风格已确认」——否则用户明明选了风格，生成仍被 409 拦在「尚未确认风格」，
+    # 与「建项目时就能选风格」的体验自相矛盾。总控 AI 敲定（project_settings）仍是第一优先级。
+    if not style_confirmed:
+        try:
+            rec = project_store.get_project(_safe_project(project_name or ""))
+            if rec:
+                cfg_style = str(project_store.read_config(rec["dir_key"]).get("style") or "").strip()
+                style_confirmed = bool(cfg_style)
+        except Exception as e:  # noqa: BLE001
+            app.logger.warning(f"确认门读取 config.style 失败（忽略）：{e}")
     aspect_confirmed = bool((s.get("aspect_ratio") or "").strip())
     missing = []
     if not style_confirmed:
@@ -6240,6 +6290,65 @@ def _record_qc_lesson(project_name: str, kind: str, prompt: str, rec: dict) -> d
     except Exception as mem_err:  # noqa: BLE001
         app.logger.warning("记录质检教训失败：%s", mem_err)
         return {}
+
+
+def _optimize_prompt_from_qc(kind: str, prompt: str, rec: dict, style: str = "") -> str:
+    """质检不达标后，用「文本分析模型」针对**本次这张图**的缺陷即时改写提示词。
+
+    与 ``prompt_memory.learned_prompt``（召回**历史泛化**教训）的区别：
+    这里把本次 verdict 的具体 issues 直接喂给 LLM，让它针对「这张图为什么没过」给出
+    一条精准的提示词修正——而不是拼一条可能跨项目、可能过时的历史建议。
+
+    返回优化后的提示词；任何失败（模型未配置 / 调用异常 / 返回空）都返回 None，
+    由调用方回落原逻辑（换 seed / 召回历史教训），**绝不让优化环节阻断重生成**。
+    """
+    try:
+        lesson = _qc_lesson_from_record(rec)
+        issues = [str(x).strip() for x in (lesson.get("issues") or []) if str(x).strip()]
+        reason = str(lesson.get("reason") or "").strip()
+        if not issues and not reason:
+            return None
+        if not (prompt or "").strip():
+            return None
+        client = _optional_llm_client()
+        if client is None:
+            app.logger.info("[提示词优化] 文本分析模型未配置，跳过即时优化（回落历史召回/换种子）")
+            return None
+        kind_label = {"asset": "参考图", "storyboard": "分镜图",
+                      "keyframe": "尾帧", "h3": "视频"}.get(kind, kind)
+        issues_text = "\n".join(f"  - {i}" for i in issues[:6])
+        style_text = (f"\n目标风格：{style}" if style else "")
+        system = (
+            "你是漫剧生成系统的提示词优化器。用户给出一段「生成图片用的提示词」和「质检判定它"
+            "不达标的具体问题」，你要输出一段**修正后的提示词**，让重新生成能通过质检。\n"
+            "要求：\n"
+            "1. 只输出修正后的提示词正文，不要任何解释、前言、标号或 Markdown；\n"
+            "2. 保留原提示词里仍然有效的描述（主体、外貌、材质、风格等），只针对列出的问题做精准修补；\n"
+            "3. 用中文输出；\n"
+            "4. 不要新增与问题无关的内容，不要改变原有画面主体；\n"
+            "5. 修正要具体可执行（例如「去掉文字」就写「画面中不得出现任何文字/字幕/水印」）。"
+        )
+        user = (
+            f"原提示词：\n{prompt.strip()}\n\n"
+            f"质检判定不达标的问题：\n{issues_text}"
+            f"{'（结论：' + reason + '）' if reason else ''}{style_text}\n\n"
+            f"请输出修正后的提示词："
+        )
+        reply = client.chat(
+            [{"role": "system", "content": system},
+             {"role": "user", "content": user}],
+            temperature=0.4, max_tokens=1024,
+        )
+        optimized = (reply or "").strip()
+        if not optimized or optimized == prompt.strip():
+            app.logger.info("[提示词优化] %s 本次优化无变化或为空，回落原逻辑", kind_label)
+            return None
+        app.logger.info("[提示词优化] %s 针对本次缺陷改写提示词（%d 条问题）：%s → %s",
+                        kind_label, len(issues), prompt[:24], optimized[:40])
+        return optimized
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning("质检后即时优化提示词失败（回落原逻辑）：%s", e)
+        return None
 
 
 def _record_preflight_lesson(project_name: str, prompt_original: str, pf: dict,
