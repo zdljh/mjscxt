@@ -77,6 +77,13 @@ SYSTEM_BIBLE = ("你是资深漫剧编剧与 AI 绘画提示词工程师，精�
 
 CHARS_PER_SHOT = 120          # 每个镜头承载的原文字数基准（镜头数随内容体量自动扩展，收紧以承载细节）
 SHOTS_PER_CHUNK_MIN = 6       # 单块分镜数下限（再短的块也至少这么多镜）
+# ---- 分镜阶段的 token 预算（必须给「思考」留预留量）----
+# ⚠️ always-on reasoning 模型（agnes-3.0-flash / GLM 系）在写分镜前会先输出一大段思考，
+# 实测该任务的思考量 ≈16K token。若 max_tokens 低于思考量，模型会「只吐思考、正文为空」，
+# 表现为整集卡死（2026-09-23 端到端复测的核心阻塞）。此前按 shots_target*300+1200 给
+# （12 镜 → 4800）远低于水位，故改为「固定思考预留 + 每镜正文额度」。
+SHOTS_THINKING_RESERVE = 16384   # 思考预留（与 llm_client.REASONING_ONLY_TOKEN_FLOOR 对齐）
+SHOTS_TOKENS_PER_SHOT = 300      # 单镜正文额度（description+visual_detail+dialogue+audio_cues 实测够用）
 COVERAGE_THRESHOLD = 0.95     # 原文覆盖率阈值：低于该值自动补生成缺失片段
 REWRITE_RULES = (
     "【改写规则（这是改编，不是缩写：严禁删减原文内容）】\n"
@@ -563,11 +570,16 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
 【逐句归属自检（细节零删减）】逐句回看原文，确保每一句（含背景补叙、过渡句、环境句）都落在某条镜头的 description / visual_detail / dialogue / audio_cues 里；短句可合并到相邻镜头，但不得整句丢弃。记住：本系统没有旁白，背景补叙与环境描写靠画面承载，心理活动靠神态动作或角色自语承载。"""
     label = f"shots#{chunk.get('index')}"
     try:
+        # ⚠️ 起始额度必须已包含「思考水位」：agnes-3.0-flash 这类 always-on reasoning 模型
+        # 在本任务的思考量实测 ≈16K token（见 llm_client.REASONING_ONLY_TOKEN_FLOOR 注释）。
+        # 此前按 shots_target*300+1200 给（12 镜 → 4800），低于思考水位 → 正文恒为空，
+        # 表现为「模型只吐思考内容」并把整集卡死。这里按「思考预留 + 每镜正文」给足。
+        _budget = SHOTS_THINKING_RESERVE + int(shots_target) * SHOTS_TOKENS_PER_SHOT
         data = _robust_json(client, prompt, system=SYSTEM_BIBLE, temperature=0.6,
-                            max_tokens=max(4096, min(16000, int(shots_target) * 300 + 1200)),
+                            max_tokens=max(8192, min(24000, _budget)),
                             events=events, label=label,
                             max_attempts=4,
-                            token_ladder=(8192, 12288, 16384, 24576, 32768))
+                            token_ladder=(16384, 24576, 32768))
     except LLMTruncatedError:
         subs = _split_chunk_in_half(chunk) if depth < CHAPTER_SPLIT_MAX_DEPTH else []
         if not subs or int(shots_target) <= 1:

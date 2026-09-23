@@ -94,6 +94,16 @@ REASONING_EFFORT_LEVELS = ("low", "high", "max")
 # （不注入 reasoning_effort，走 disable_thinking 分支）。故单独作为档位暴露给前端。
 REASONING_EFFORT_OFF = "off"
 MIN_TOKENS_WHEN_REASONING_EFFORT = 2048
+# ⚠️ 「只吐思考」场景的额度下限：思考本身就要吃掉几千甚至上万 token，下限太小等于必空正文。
+# 实测（2026-09-23 端到端复测，agnes-3.0-flash / low 档 / 5614 字符分镜 prompt）：
+#   max_tokens  4800 → 只有思考，正文为空
+#   max_tokens  8192 → 只有思考，正文为空
+#   max_tokens 16384 → 只有思考，正文为空
+#   max_tokens 24576 → ✅ finish=stop，思考 15793 字符、正文 14291 字符
+#   max_tokens 32768 → ✅ finish=stop，正文 7917 字符（思考未复现，走缓存）
+# 即该任务思考水位 ≈16K token。故「只吐思考」自救必须**一步跨到 ≥16K**，
+# 而不是按 2K 阶梯小步试探（每步要耗 2-7 分钟，等于把用户时间烧光）。
+REASONING_ONLY_TOKEN_FLOOR = 16384
 # "chat_template_kwargs"（默认，zai/vLLM 风格）| "top_level"（部分网关）
 REASONING_EFFORT_STYLE = "chat_template_kwargs"
 # 思考档位降级顺序（max → high → low）。
@@ -781,6 +791,20 @@ class LLMClient:
                     return min(t, MAX_TOKENS_CEILING)
             return min(value * 2, MAX_TOKENS_CEILING)
 
+        def _raise_over_thinking_floor(value: int) -> int:
+            """把额度抬到「思考水位」之上，返回提升后的值（已在上方则不降）。
+
+            为什么单独有这一档：`_next_tokens` 走的是调用方传入的 ladder，而剧本/分镜这类
+            长输出任务的起始额度可能只有 4800，阶梯第一级却是 8192 —— 一旦 `cur` 已 ≥ 阶梯
+            首项，`_next_tokens` 就只会「×2」，遇到 MAX_TOKENS_CEILING 更是原地返回。
+            实测就是在这里卡死：low 档 + 4800 额度 → 思考恒超额度 → 正文永远为空。
+            所以「只吐思考」时**先无条件越过思考水位**，再谈降档。
+            """
+            floor = max(REASONING_ONLY_TOKEN_FLOOR, _thinking_floor())
+            if value >= floor:
+                return value
+            return min(floor, MAX_TOKENS_CEILING)
+
         def _downgrade_reasoning_effort() -> bool:
             """把 reasoning_effort 降到下一档，返回是否还有可降空间。
 
@@ -799,22 +823,6 @@ class LLMClient:
                            f"降级为 {nxt or '(不注入)'}，以压缩思考长度")
             return True
 
-        def _reasoning_exhausted() -> bool:
-            """是否已「降档降无可降」——即当前已配置 reasoning_effort 且已到最低档。
-
-            此时若模型仍只吐思考，说明问题不在思考档位，而在模型/服务端本身在持续产出
-            超长思考（或参数异常）。继续提 max_tokens 是无意义的空转（实测：low 档下仍
-            只吐思考，一路提额到 32768 仍挂死 19 分钟），必须快速失败上浮。
-
-            ⚠️ 只对「配置了档位」的 always-on 模型判耗尽；**空档位（未配置）不算耗尽**——
-            普通「允许思考」模型只吐思考往往只是额度不够，仍应按原逻辑提额重试。
-            """
-            cur_re = str(getattr(self, "reasoning_effort", "") or "").strip().lower()
-            order = REASONING_EFFORT_DOWNGRADE_ORDER
-            if not order or cur_re not in order:
-                return False  # 未配置档位 → 不判耗尽，走原提额重试
-            return order.index(cur_re) >= len(order) - 1
-
         repaired_fallback = None
         for _ in range(max(1, int(max_attempts))):
             # 提额重试是最外层循环（每次都会重新发一次完整请求），收益最大：
@@ -824,30 +832,42 @@ class LLMClient:
             try:
                 r = self.chat_ex(messages, temperature=temperature, max_tokens=cur)
             except LLMReasoningOnlyError as e:
-                # 思考吃光额度：优先降思考档位（high/max → low），再配合提额。
-                # 只提 max_tokens 对「思考本身无限长」的 always-on 模型无效（实测 40 分钟空转）。
+                # 思考吃光额度。⚠️ 救助顺序是「先提额、再降档」，不能反过来：
+                # 空正文的根因是「思考量 > max_tokens」，而低档位并不保证思考就短到装得下
+                # （实测 low 档 + 4800 额度仍 100% 空正文）。先前只降档不提额，
+                # 在 ladder 首项已被越过时 `_next_tokens` 会原地返回同值 → 每次重试都空转，
+                # 最后被误判成「模型/服务端故障」。
                 last_err = e
-                downgraded = _downgrade_reasoning_effort()
-                # ⚠️ 降档已耗尽（当前就是最低档）且模型仍只吐思考 → 不是档位问题，
-                # 继续提额只会空转（复测实测：low 档下仍只吐思考，提额到 32768 挂死 19 分钟）。
-                # 这里直接 break 抛错上浮，让上层把「模型持续只吐思考」如实报给用户。
-                if not downgraded and _reasoning_exhausted():
+                # ① 无条件越过思考水位（这是唯一能真正把正文挤出来的手段）。
+                raised = _raise_over_thinking_floor(cur)
+                # ② 越过水位后仍无正文，才说明思考确实过长 → 再压思考档位。
+                downgraded = False
+                if raised <= cur and _next_tokens(cur) <= cur and self.reasoning_effort:
+                    downgraded = _downgrade_reasoning_effort()
+                nxt = max(raised, _next_tokens(max(cur, _thinking_floor())) if downgraded or raised > cur
+                          else cur)
+                nxt = min(nxt, MAX_TOKENS_CEILING)
+                # ③ 额度已顶到上限、档位也降无可降 → 才是真的模型/服务端异常，快速失败上浮。
+                if nxt <= cur and not downgraded:
                     logger.error(
                         f"模型在最低思考档（{getattr(self, 'reasoning_effort', '') or '未注入'}）下"
-                        f"仍只吐思考内容（第 {attempts} 次，max_tokens={cur}），"
+                        f"仍只吐思考内容（第 {attempts} 次，max_tokens={cur} 已达上限），"
                         "判定为模型/服务端异常，停止无意义提额，快速失败上浮。")
                     history.append({"attempt": attempts, "max_tokens": cur,
                                     "finish_reason": "reasoning_only", "truncated": True,
                                     "content_len": 0, "latency_ms": None})
                     break
-                nxt = _next_tokens(max(cur, _thinking_floor()))
                 logger.warning(f"模型只吐思考内容（第 {attempts} 次，max_tokens={cur}），"
-                               f"提高到 {nxt} 重试")
+                               f"提高到 {nxt} 重试"
+                               + (f"（并把思考档位降为 {self.reasoning_effort}）" if downgraded else ""))
                 history.append({"attempt": attempts, "max_tokens": cur,
                                 "finish_reason": "reasoning_only", "truncated": True,
                                 "content_len": 0, "latency_ms": None})
-                if nxt <= cur and not downgraded:
-                    break
+                if on_event:
+                    try:
+                        on_event(history[-1])
+                    except Exception as e2:  # noqa: BLE001
+                        logger.debug("流式事件回调异常（忽略）：%s", e2)
                 cur = nxt
                 continue
             truncated = r["truncated"]
