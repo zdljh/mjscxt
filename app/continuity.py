@@ -27,6 +27,7 @@ from datetime import datetime
 
 from fs_atomic import atomic_write_json, read_json_strict
 from llm_client import LLMError, LLMTruncatedError
+from llm_client import thinking_token_floor as _thinking_token_floor
 from novel_to_script import (
     CHAPTER_CHUNK_CHARS,
     CHAPTER_MAX_SUBCHUNKS,
@@ -93,6 +94,17 @@ def _path(continuity_dir: str, project_key: str, filename: str) -> str:
     return os.path.join(continuity_root(continuity_dir, project_key), filename)
 
 
+def shots_cache_dir(continuity_dir: str, project_key: str, episode_no) -> str:
+    """提炼 / 分镜「断点缓存」目录（按集隔离，便于单集清理）。
+
+    缓存由 novel_to_script 以**内容寻址**方式写入（文件名 = sha1(该次 prompt)），
+    存在意义：网关偶发挂起会让 pipeline 的 script 步骤整体重试，没有缓存时每次
+    都要把 提炼 + 设定 + 全部分镜 从头再烧 20+ 分钟 —— 于是「一抖就永远跑不完」。
+    """
+    return os.path.join(continuity_root(continuity_dir, project_key),
+                        "shots_cache", f"ep{int(episode_no):02d}")
+
+
 def load_json(path: str, default=None):
     """严格读 JSON（A-4）：缺失→default；损坏→从 .bak 恢复；无 .bak→抛错。
 
@@ -137,11 +149,19 @@ def _as_dict(data) -> dict:
 def _json_call(client, prompt: str, label: str, system: str = None,
                temperature: float = 0.3, max_tokens: int = 3000,
                events: list = None) -> dict:
-    """统一 JSON 调用：走 chat_json_robust（截断自动提额重试），记录重试事件"""
+    """统一 JSON 调用：走 chat_json_robust（截断自动提额重试），记录重试事件
+
+    ⚠️ max_tokens 会被抬到「思考水位」之上（llm_client.thinking_token_floor）：
+    agnes/GLM 这类 always-on reasoning 模型在本业务的思考量可达上万 token，
+    额度低于水位时模型会「只吐思考、正文为空」，整步卡死。各调用点传的 1600~7000
+    都是按「正文长度」估的，没算思考开销 —— 这里统一兜住，避免逐个调用点漏改。
+    """
     system = system or SYSTEM_CONTINUITY
     robust = getattr(client, "chat_json_robust", None)
     if robust is None:
         return client.chat_json(prompt, system=system, temperature=temperature, max_tokens=max_tokens)
+
+    max_tokens = _thinking_token_floor(max_tokens, getattr(client, "reasoning_effort", ""))
 
     def _on_event(h):
         if events is not None and int(h.get("attempt") or 1) > 1:
@@ -1661,6 +1681,8 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
     script = convert_chapter_to_script(
         client, novel_meta, novel_text, chapter, style=style, target_shots=target_shots,
         episode_no=episode_no, progress_cb=progress_cb, continuity_ctx=ctx,
+        # 断点缓存：pipeline 整步重试时跳过已完成的块（网关偶发挂起的主要止血点）
+        cache_dir=shots_cache_dir(continuity_dir, project_key, episode_no),
     )
 
     # ---- 3) 服装状态 × 镜头对齐（A① 补齐：并入设定库前先消解本集服装漂移 / 登记合法换装）

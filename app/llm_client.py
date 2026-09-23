@@ -335,6 +335,29 @@ def public_view(cfg: dict) -> dict:
 
 # ===================== URL 规范化 =====================
 
+def thinking_token_floor(max_tokens: int, reasoning_effort: str = "") -> int:
+    """把 max_tokens 抬到「思考水位」之上（只抬不降）。
+
+    各调用点按「正文长度」估额度（1600~7500），但 always-on reasoning 模型
+    （agnes-3.0-flash / GLM 系）还要额外消耗上万 token 的思考。额度低于思考量时
+    正文恒为空（表现为「模型只吐思考内容」并把整步卡死）。
+    统一在这里兜住，避免逐调用点漏改。
+
+    只在「配置了思考档位」时抬 —— 未配置档位的普通模型不需要这个水位，
+    抬高只会浪费配额（它们的空正文另有原因，走原重试语义）。
+    """
+    try:
+        mt = int(max_tokens or 0)
+    except (TypeError, ValueError):
+        return max_tokens
+    re_ = str(reasoning_effort or "").strip().lower()
+    if not re_ or re_ not in REASONING_EFFORT_DOWNGRADE_ORDER:
+        return mt
+    if mt >= REASONING_ONLY_TOKEN_FLOOR:
+        return mt
+    return min(REASONING_ONLY_TOKEN_FLOOR, MAX_TOKENS_CEILING)
+
+
 def build_chat_url(base_url: str) -> str:
     """把用户填写的 base_url 规范化为 chat/completions 完整地址
 
@@ -770,6 +793,9 @@ class LLMClient:
         诊断信息写入 self.last_json_meta。
         """
         ladder = tuple(token_ladder or DEFAULT_TOKEN_LADDER)
+        # 统一抬到思考水位：各调用点按正文长度估的额度（1600~7500）没算思考开销，
+        # 低于水位时正文恒为空（「模型只吐思考内容」）。集中兜住，避免逐点漏改。
+        max_tokens = thinking_token_floor(max_tokens, self.reasoning_effort)
         cur = int(max_tokens or 4096)
         attempts = 0
         truncated = False

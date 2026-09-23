@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -23,6 +24,7 @@ from datetime import datetime
 
 from llm_client import LLMError, LLMTruncatedError, LLMGatewayUnavailable
 from dialogue_utils import dialogue_text as _dlg_text, normalize_lines as _dlg_lines
+import fs_atomic
 import style_kit
 import h3_prompt_kit
 
@@ -85,6 +87,77 @@ SHOTS_PER_CHUNK_MIN = 6       # 单块分镜数下限（再短的块也至少这
 SHOTS_THINKING_RESERVE = 16384   # 思考预留（与 llm_client.REASONING_ONLY_TOKEN_FLOOR 对齐）
 SHOTS_TOKENS_PER_SHOT = 300      # 单镜正文额度（description+visual_detail+dialogue+audio_cues 实测够用）
 COVERAGE_THRESHOLD = 0.95     # 原文覆盖率阈值：低于该值自动补生成缺失片段
+
+# ===================== 提炼 / 分镜阶段的断点缓存（对抗网关偶发挂起） =====================
+# 背景（2026-09-24 实测）：网关上游偶发挂起 —— 连 max_tokens=3600 的小请求也会挂满
+# 1200s read timeout（而同一时刻 16384 额度的大请求 258s 就返回了），说明**与请求体量无关**。
+# 而本阶段单个请求体量本来就大（思考预留 16384 + 每镜 300），一集完整生成要 20+ 分钟；
+# pipeline 的重试又是**整个 script 步骤重来**（`_run_step_with_retry`）——没有缓存时
+# 每次重试都要把 提炼 + 设定 + 全部分镜 重新跑一遍，网关一抖就永远跑不完。
+#
+# 这里按「prompt 内容指纹」做**内容寻址**落盘，重跑时命中即跳过模型调用：
+#   - 任意输入（原文 / 镜头额度 / 风格 / 提示词模板本身）变化 → 指纹随之变化 → 自动失效，
+#     绝不会用旧结果冒充新结果（把 prompt 整体入指纹，是防止「改了提示词却命中旧缓存」的关键）；
+#   - 网关抖动的净效果从「永远跑不完」变成「多跑几次总能跑完」。
+# 缓存只写不读回主链路语义 —— 未命中时行为与加缓存前**完全一致**。
+# 用 MJSCXT_SHOTS_CACHE=0 可关闭（离线测试 / 需要强制重新生成时）。
+SHOTS_CACHE_ENV = "MJSCXT_SHOTS_CACHE"
+
+
+def _shots_cache_enabled() -> bool:
+    """缓存开关：默认开启，环境变量置 0/false/no/off 时关闭。"""
+    return str(os.environ.get(SHOTS_CACHE_ENV, "1")).strip().lower() not in (
+        "0", "false", "no", "off")
+
+
+def _cache_file(cache_dir: str, kind: str, prompt: str) -> str:
+    """内容寻址缓存路径：文件名 = sha1(kind + prompt) 前 20 位。"""
+    digest = hashlib.sha1(f"{kind}\x00{prompt}".encode("utf-8")).hexdigest()[:20]
+    return os.path.join(cache_dir, f"{kind}_{digest}.json")
+
+
+def _cache_read(path: str):
+    """读缓存：不存在 / 损坏 / 非 dict 一律当作**未命中**。
+
+    缓存是「只读加速视图」，不是主链路状态 —— 因此损坏时按未命中重新生成，
+    而不是 fail-loud 中断整集（与 `fs_atomic` 对主链路文件的 fail-loud 口径区分开）。
+    """
+    try:
+        data = fs_atomic.read_json_strict(path, None)
+    except Exception as e:  # noqa: BLE001 —— 缓存损坏仅降级为未命中
+        logger.warning(f"提炼/分镜缓存不可用，按未命中重新生成：{os.path.basename(path)}：{e}")
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _cache_write(path: str, payload: dict) -> None:
+    """写缓存：失败只告警，绝不影响本次产出（缓存是加速手段，不是必需产物）。"""
+    try:
+        fs_atomic.atomic_write_json(path, payload)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"写提炼/分镜缓存失败（忽略，不影响本次产出）：{e}")
+
+
+def _cache_get(cache_dir: str, kind: str, prompt: str, events: list, label: str):
+    """命中则返回缓存 dict，否则 None（未命中不产生任何副作用）。"""
+    if not cache_dir or not _shots_cache_enabled():
+        return None
+    path = _cache_file(cache_dir, kind, prompt)
+    hit = _cache_read(path)
+    if hit is None:
+        return None
+    logger.info(f"{label} 命中断点缓存，跳过模型调用：{os.path.basename(path)}")
+    if events is not None:
+        events.append({"label": label, "event": "cache_hit", "kind": kind})
+    return hit
+
+
+def _cache_put(cache_dir: str, kind: str, prompt: str, payload: dict) -> None:
+    if not cache_dir or not _shots_cache_enabled():
+        return
+    _cache_write(_cache_file(cache_dir, kind, prompt), payload)
+
+
 REWRITE_RULES = (
     "【改写规则（这是改编，不是缩写：严禁删减原文内容）】\n"
     "1) 原文的叙述、心理描写、场景描写、对话、人物动作必须全部落到镜头里，"
@@ -367,8 +440,12 @@ def _merge_outlines(outlines: list, chunk: dict) -> dict:
 
 
 def extract_chunk_outline(client, chunk: dict, novel_title: str,
-                          events: list = None, depth: int = 0) -> dict:
-    """① 单块提炼（截断时自动提高 max_tokens；仍截断则把该块再二分后合并）"""
+                          events: list = None, depth: int = 0,
+                          cache_dir: str = "") -> dict:
+    """① 单块提炼（截断时自动提高 max_tokens；仍截断则把该块再二分后合并）
+
+    cache_dir 非空时启用断点缓存：命中即跳过模型调用（见文件上方缓存说明）。
+    """
     body = chunk["text"][:MAX_CHARS_PER_CHUNK_PROMPT]
     prompt = f"""【任务】下面是长篇小说《{novel_title}》的第 {chunk['index']}/{chunk['total']} 段原文（{chunk.get('title')}，约 {len(body)} 字），请提炼改编漫剧所需的辅助信息（人物 / 物品 / 场景 / 剧情摘要 / 关键情节节点）。本提炼只作分镜阶段的辅助索引：分镜阶段会拿到本段完整原文，因此这里**不需要逐句复述原文**，但也不得删改原意。
 【原文开始】
@@ -383,6 +460,9 @@ def extract_chunk_outline(client, chunk: dict, novel_title: str,
   "key_beats": ["按原文顺序列出本段关键情节节点，每条 30 字以内，最多 12 条（分镜阶段会读取完整原文，这里只做索引，不要逐句复述、不要写成英文）"]
 }}"""
     label = f"outline#{chunk.get('index')}"
+    hit = _cache_get(cache_dir, "outline", prompt, events, label)
+    if hit is not None and hit.get("_chunk"):
+        return hit
     try:
         data = _as_dict(_robust_json(client, prompt, system=SYSTEM_BIBLE, temperature=0.35,
                                      max_tokens=3000, events=events, label=label,
@@ -398,12 +478,14 @@ def extract_chunk_outline(client, chunk: dict, novel_title: str,
             events.append({"label": label, "event": "sub_split", "depth": depth,
                            "parts": [len(s.get("text") or "") for s in subs]})
         return _merge_outlines(
-            [extract_chunk_outline(client, s, novel_title, events, depth + 1) for s in subs], chunk)
+            [extract_chunk_outline(client, s, novel_title, events, depth + 1, cache_dir)
+             for s in subs], chunk)
     data["_chunk"] = {
         "index": chunk["index"],
         "title": chunk.get("title"),
         "char_count": len(body),
     }
+    _cache_put(cache_dir, "outline", prompt, data)
     return data
 
 
@@ -421,7 +503,8 @@ def _ctx_line(ctx, key: str) -> str:
 
 
 def build_bible(client, outlines: list, novel_title: str, style: str, episodes: int,
-                target_shots: int, events: list = None, continuity_ctx: dict = None) -> dict:
+                target_shots: int, events: list = None, continuity_ctx: dict = None,
+                cache_dir: str = "") -> dict:
     """② 汇总全剧设定，产出 A 版 characters/items/scenes
 
     continuity_ctx 非空时（跨集连贯性方案 A①②③）：注入项目级设定库（角色外观锁定）、
@@ -460,6 +543,11 @@ def build_bible(client, outlines: list, novel_title: str, style: str, episodes: 
 【硬性约束】characters 最多 6 个（只保留主要角色，按戏份排序）；items 最多 5 个；scenes 最多 6 个；不要输出示例里的占位文字。若上方提供了「项目级设定库」，则已登记角色的 name / appearance / personality 必须与该库完全一致（禁止改名、禁止改外观），只允许更新 outfit（当前服装状态）。
 【风格红线·重要变更】风格词由**程序在生成前统一追加**（幂等，不会重复），不再由你写。因此 characters / items / scenes 三个数组里每一条 reference_prompt_zh 与 reference_prompt_en **都不得自行写风格词、画风词或质量词**——自己写了会导致风格在提示词里出现两遍（实测就是「中国古风玄幻漫剧风格。风格：中国古风玄幻漫剧，画面精致…」这种重复），属于不合格输出。你只需专注描述画面里看得见的具体特征，把风格判断交给程序。
 【格式红线】直接以 {{ 作为输出的第一个字符；严禁输出任何推理过程、思考草稿、英文说明、markdown 代码块标记或前后缀解释文字；整个 JSON 输出控制在 1200 字以内（字段描述能短则短）。"""
+    # 断点缓存：命中则跳过模型汇总（未命中时行为与加缓存前完全一致）。
+    # 只缓存**模型成功产出**的结果；下面的确定性兜底不缓存，好让下次仍有机会走模型。
+    hit = _cache_get(cache_dir, "bible", prompt, events, "bible")
+    if hit is not None and hit.get("characters"):
+        return hit
     bible_retry_kw = {"max_attempts": 4, "token_ladder": (6000, 8192, 16384, 24576)}
     data = {}
     for tag, p in (("bible", prompt),
@@ -478,6 +566,7 @@ def build_bible(client, outlines: list, novel_title: str, style: str, episodes: 
             continue
         data = _normalize_bible(raw)
         if data.get("characters"):
+            _cache_put(cache_dir, "bible", prompt, data)
             return data
         logger.warning(f"bible {tag} 返回缺少 characters（原类型 {type(raw).__name__}）：{str(raw)[:200]}")
 
@@ -534,11 +623,12 @@ def _fallback_bible(outlines: list, novel_title: str, style: str) -> dict:
 
 def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots_target: int,
                           events: list = None, depth: int = 0,
-                          continuity_ctx: dict = None) -> list:
+                          continuity_ctx: dict = None, cache_dir: str = "") -> list:
     """③ 单块写分镜（截断时自动提高 max_tokens；仍截断则把该块再二分后合并）
 
     continuity_ctx 非空时（跨集连贯性方案 A②③ / C⑦⑧）：注入上集摘要卡、衔接契约、
     项目级风格指南、人物口吻词典、金句保留清单与运镜术语表。
+    cache_dir 非空时启用断点缓存：命中即跳过模型调用（见文件上方缓存说明）。
     """
     char_brief = [
         {"name": c.get("name"), "appearance": (c.get("appearance") or "")[:40]}
@@ -569,6 +659,9 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
 【硬性约束】shots 数组元素个数必须在 {shots_target} ~ {shots_cap} 之间：上方原文的全部情节都要落到镜头里，不得删减情节、不得跳过段落、不得合并概括（内容多时用更多镜头承载，而不是少写镜头）；name 字段必须与上面「可用角色/物品/场景」中的名字完全一致，不要新造名字。若上方给出「本集必须出现的原文金句」，必须把每句**原样**写进对应角色的 dialogue.text（不得改写、不得拆分、不得省略）。上一集已发生的事件禁止在本集重演。
 【逐句归属自检（细节零删减）】逐句回看原文，确保每一句（含背景补叙、过渡句、环境句）都落在某条镜头的 description / visual_detail / dialogue / audio_cues 里；短句可合并到相邻镜头，但不得整句丢弃。记住：本系统没有旁白，背景补叙与环境描写靠画面承载，心理活动靠神态动作或角色自语承载。"""
     label = f"shots#{chunk.get('index')}"
+    hit = _cache_get(cache_dir, "shots", prompt, events, label)
+    if hit is not None and isinstance(hit.get("shots"), list) and hit["shots"]:
+        return [s for s in hit["shots"] if isinstance(s, dict)]
     try:
         # ⚠️ 起始额度必须已包含「思考水位」：agnes-3.0-flash 这类 always-on reasoning 模型
         # 在本任务的思考量实测 ≈16K token（见 llm_client.REASONING_ONLY_TOKEN_FLOOR 注释）。
@@ -602,7 +695,8 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
                 sub_outline["key_beats"] = beats[a:b]
             merged.extend(build_shots_for_chunk(client, bible, sub_outline, s, per,
                                                 events=events, depth=depth + 1,
-                                                continuity_ctx=continuity_ctx))
+                                                continuity_ctx=continuity_ctx,
+                                                cache_dir=cache_dir))
         return merged
     if isinstance(data, dict):
         shots = data.get("shots")
@@ -614,7 +708,10 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
         shots = None
     if not isinstance(shots, list):
         return []
-    return [s for s in shots if isinstance(s, dict)]
+    out = [s for s in shots if isinstance(s, dict)]
+    if out:
+        _cache_put(cache_dir, "shots", prompt, {"shots": out})
+    return out
 
 
 def _fallback_shots_for_chunk(chunk: dict, shots_target: int = 1, bible: dict = None) -> list:
@@ -1433,12 +1530,16 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
                               style: str = "3D动漫渲染", target_shots: int = 12,
                               episode_no: int = 1, chunk_chars: int = CHAPTER_CHUNK_CHARS,
                               max_subchunks: int = CHAPTER_MAX_SUBCHUNKS,
-                              progress_cb=None, continuity_ctx: dict = None) -> dict:
+                              progress_cb=None, continuity_ctx: dict = None,
+                              cache_dir: str = "") -> dict:
     """把「一章」转成一集 A 版剧本（每章一集，独立落盘）
 
     continuity_ctx（跨集连贯性方案 A/B/C）：由 continuity.build_continuity_context 组装，
     包含项目级设定库、上集摘要卡、衔接契约、项目级风格指南、金句清单、口吻词典与运镜术语表；
     传入后本集生成将带着跨集上下文，且 style_guide 改用项目级唯一配置。
+
+    cache_dir 非空时，提炼 / 分镜两步启用断点缓存：重跑时命中已完成的块即跳过模型调用，
+    使「网关偶发挂起 → pipeline 整步重试」不再每次都从头烧 20+ 分钟（见文件上方缓存说明）。
     """
     def report(phase, current, total, message, percent):
         if progress_cb:
@@ -1480,7 +1581,8 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
                f"第{episode_no}集 提炼子块 {chunk['index']}/{chunk['total']}…",
                int(5 + (i + 1) / total_steps * 55))
         try:
-            ol = extract_chunk_outline(client, chunk, novel_title, events=trunc_events)
+            ol = extract_chunk_outline(client, chunk, novel_title, events=trunc_events,
+                                       cache_dir=cache_dir)
         except LLMTruncatedError as e:
             warnings.append(f"第 {chunk['index']} 子块提炼被截断失败（已自动提额并尝试二次切分）：{e}")
             logger.warning(f"第 {chunk['index']} 子块提炼被截断失败：{e}")
@@ -1498,7 +1600,8 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
     # ② 汇总本集设定
     report("bible", len(sampled) + 1, total_steps, f"第{episode_no}集 汇总人物 / 物品 / 场景设定…", 65)
     bible = _as_dict(build_bible(client, outlines, f"{novel_title}·{chapter_title}", style, 1,
-                                 target_shots, events=trunc_events, continuity_ctx=continuity_ctx))
+                                 target_shots, events=trunc_events,
+                                 continuity_ctx=continuity_ctx, cache_dir=cache_dir))
 
     characters = _norm_list(bible.get("characters"), 8,
                             ["name", "age", "identity", "appearance", "outfit", "personality",
@@ -1544,7 +1647,8 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
         try:
             all_shots.extend(build_shots_for_chunk(client, bible, ol, chunk, per_chunk,
                                                    events=trunc_events,
-                                                   continuity_ctx=continuity_ctx))
+                                                   continuity_ctx=continuity_ctx,
+                                                   cache_dir=cache_dir))
         except LLMTruncatedError as e:
             fb = _fallback_shots_for_chunk(chunk, per_chunk, bible)
             all_shots.extend(fb)
