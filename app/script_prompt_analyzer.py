@@ -17,6 +17,7 @@ from datetime import datetime
 
 from llm_client import LLMError
 from dialogue_utils import format_line as _dlg_line
+from fs_atomic import atomic_write_json
 import h3_prompt_kit
 import style_kit
 
@@ -313,10 +314,16 @@ def analyze_script(client, script: dict, mode: str = "all", shot_ids=None,
 
 
 def save_script_inplace(script: dict, script_path: str) -> str:
-    """把更新后的剧本写回原文件（不存在时另存）"""
+    """把更新后的剧本写回原文件（不存在时另存）。
+
+    A4（2026-09-23 收口）：原为裸 ``open(...,"w") + json.dump``（**非原子写**）。
+    这是 `/api/scripts/analyze-prompts` 的写盘面，覆盖式重写 caller 传入的 `script_path`：
+    崩溃 / 断电 / 并发写会在原地留半截 JSON（剧本直接不可用，且原内容已被截断）。
+    改走 :func:`fs_atomic.atomic_write_json`（唯一临时名 + fsync + `.bak` 快照 + replace 退避），
+    与全库其它落盘口径一致。
+    """
     if not script_path or not os.path.isfile(script_path):
         raise LLMError(f"剧本文件不存在：{script_path}")
-    with open(script_path, "w", encoding="utf-8") as f:
-        json.dump(script, f, ensure_ascii=False, indent=2)
-    logger.info(f"剧本提示词已写回：{script_path}")
+    atomic_write_json(script_path, script)
+    logger.info("剧本提示词已写回：%s", script_path)
     return script_path

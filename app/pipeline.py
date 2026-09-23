@@ -461,16 +461,28 @@ def final_path(ctx) -> str:
 
 
 def _deliverable_review(ctx) -> dict:
-    """读取该集成片在 deliverables.json 里登记的 review 状态（找不到返回 {}）"""
+    """读取该集成片在 deliverables.json 里登记的 review 状态（找不到返回 {}）。
+
+    A3（2026-09-23 收口）：原实现是裸 ``open + json.load`` + ``except: return {}``
+    （fail-open）。deliverables.json 一旦损坏就被判成「没有 review 记录」→ 下面
+    :func:`probe_final` 的 ``review == "rejected"`` 判定失效 → **被打回的成片会被当成
+    已完成、不再重做**（同函数族的 `_reset_deliverable_review` 早已迁 `read_json_strict`，
+    只有这个只读口漏了）。
+
+    现改走 :func:`read_json_strict`（缺失→{}；损坏→`.bak` 或抛错）；抛错时**响亮降级**
+    （记 error 后返回 {}）—— 本函数是只读视图、从不写回，不能把整集生产打挂；
+    这里刻意不 fail-loud 上抛：调用点在断点续跑判定链上，抛错会中断整集生产，
+    而「不知道 review」的后果仅是「可能少重做一集」，两害相权取其轻。
+    """
     A = _A()
     idx_path = os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot",
                             ctx["project_name"], "deliverables.json")
-    if not _nonempty(idx_path):
-        return {}
     try:
-        with open(idx_path, "r", encoding="utf-8") as f:
-            data = json.load(f) or {}
-    except Exception:  # noqa: BLE001
+        data = read_json_strict(idx_path, {}) or {}
+    except (ValueError, OSError) as e:
+        logger.error("读取成片验收记录失败（deliverables.json 损坏且无可用 .bak，项目 %s）：%s"
+                     "—— 本次按「无 review 记录」处理，被打回的成片可能被跳过重做",
+                     ctx["project_name"], e)
         return {}
     return (data.get("items") or {}).get(str(int(ctx["episode_no"]))) or {}
 
