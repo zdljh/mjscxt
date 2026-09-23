@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { aiConfigApi, watermarkApi } from '@/api/client';
-import { Badge, Button, Card, ConfirmDialog, Input, Loading, Select } from '@/components/ui';
+import { Badge, Button, Card, ConfirmDialog, Input, Select, Skeleton } from '@/components/ui';
 import { AlertTriangle, Brain, CheckCircle2, Network, Search, X } from '@/components/ui/icons';
 import type { IconProps } from '@/components/ui/icons';
 import type { AIConfigModule, AIConfigResponse, AITestResult } from '@/types';
@@ -308,9 +308,20 @@ export function AIVaultPage() {
   };
 
   if (loading) {
+    // 骨架沿用真实内容的外层（max-w-5xl 居中 + space-y-6）：
+    // 标题行 → 系统设置卡 → 三张 AI 模块配置卡，避免「转圈 → 长页面」的跳变
     return (
-      <div className="flex items-center justify-center py-20">
-        <Loading label="加载配置中..." />
+      <div className="space-y-6 max-w-5xl mx-auto" role="status" aria-live="polite" aria-label="加载配置中...">
+        <div className="space-y-2">
+          <Skeleton className="h-7 w-40" />
+          <Skeleton className="h-4 w-64" />
+        </div>
+        <Skeleton className="h-44 rounded-lg" />
+        <div className="grid grid-cols-1 gap-6">
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-72 rounded-lg" />
+          ))}
+        </div>
       </div>
     );
   }

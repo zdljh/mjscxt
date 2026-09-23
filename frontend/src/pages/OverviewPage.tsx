@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useApp } from '@/context/AppContext';
 import { projectsApi, novelsApi, tasksApi } from '@/api/client';
-import { Card, Loading, EmptyState, Badge } from '@/components/ui';
+import { Card, EmptyState, Badge, Skeleton } from '@/components/ui';
 import { BarChart3, ClipboardList, Clapperboard, FolderOpen, Play, ZoomIn } from '@/components/ui/icons';
 import type { IconProps } from '@/components/ui/icons';
 import type { Project, Task } from '@/types';
@@ -47,7 +47,21 @@ export function OverviewPage() {
 
   const recentTasks = tasks.slice(-5).reverse();
 
-  if (loading) return <Loading />;
+  // 加载态：沿用统计卡 3 列 + 两个内容卡片的形态
+  if (loading) {
+    return (
+      <div className="space-y-6 fade-in" role="status" aria-live="polite" aria-label={t('common.loading')}>
+        <Skeleton className="h-8 w-32" />
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <Skeleton key={i} className="h-[88px] rounded-lg" />
+          ))}
+        </div>
+        <Skeleton className="h-44 rounded-lg" />
+        <Skeleton className="h-44 rounded-lg" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6 fade-in">

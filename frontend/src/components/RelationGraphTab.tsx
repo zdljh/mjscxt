@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useApp } from '@/context/AppContext';
 import { relationsApi } from '@/api/client';
+import { EmptyState, ErrorState, Skeleton } from '@/components/ui';
 import { Lightbulb, Link2, X } from '@/components/ui/icons';
 import type { Relation } from '@/types';
 
@@ -53,10 +55,13 @@ interface RelationGraphTabProps {
 }
 
 export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
+  const { t } = useApp();
   const [nodes, setNodes] = useState<GraphNode[]>([]);
   const [edges, setEdges] = useState<GraphEdge[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  /** 错误态「重试」用：自增即重新触发下面的拉取 effect */
+  const [reloadTick, setReloadTick] = useState(0);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
   
@@ -72,6 +77,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
     if (!projectKey) return;
     
     setLoading(true);
+    setError('');
     relationsApi.graph(projectKey)
       .then(data => {
         const graphData = data as { nodes: GraphNode[]; edges: GraphEdge[] };
@@ -84,7 +90,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
       .finally(() => {
         setLoading(false);
       });
-  }, [projectKey]);
+  }, [projectKey, reloadTick]);
 
   // 简单的力导向布局模拟
   const simulateLayout = useCallback(() => {
@@ -229,31 +235,38 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
     draggedNode.current = null;
   };
 
+  // 加载态：沿用「标题行 + 画布高度 + 底部统计」的形态，避免画布区空白跳变
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="text-ink-2">加载中...</div>
+      <div className="space-y-4 min-w-0" role="status" aria-live="polite" aria-label={t('common.loading')}>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <Skeleton className="h-6 w-32" />
+          <Skeleton className="h-4 w-48" />
+        </div>
+        <Skeleton className="h-[360px] rounded-lg sm:h-[500px]" />
+        <Skeleton className="h-4 w-56" />
       </div>
     );
   }
 
+  // 硬失败：整块关系图没有任何数据可展示 → 错误态 + 重试
   if (error) {
     return (
-      <div className="p-4 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong">
-        {error}
-      </div>
+      <ErrorState
+        title={t('relation.loadFailed')}
+        description={error}
+        onRetry={() => setReloadTick((x) => x + 1)}
+      />
     );
   }
 
   if (nodes.length === 0) {
     return (
-      <div className="text-center py-12">
-        <div className="mb-4 flex justify-center text-ink-3">
-          <Link2 className="h-12 w-12" />
-        </div>
-        <h4 className="text-lg font-medium text-ink-1 mb-1">暂无关系数据</h4>
-        <p className="text-sm text-ink-2">请先在角色管理中创建角色关系</p>
-      </div>
+      <EmptyState
+        icon={<Link2 className="h-10 w-10" />}
+        title={t('relation.noRelations')}
+        description={t('relation.noChars')}
+      />
     );
   }
 

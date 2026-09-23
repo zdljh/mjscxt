@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useApp } from '@/context/AppContext';
 import { storyboardApi, projectsApi } from '@/api/client';
-import { Button, Select, Textarea } from '@/components/ui';
+import { Button, Select, Textarea, Skeleton, EmptyState } from '@/components/ui';
 import { Check, Palette } from '@/components/ui/icons';
 import type { Project } from '@/types';
 
@@ -146,7 +146,25 @@ export function GridPage({ projectKey }: { projectKey?: string } = {}) {
       </div>
 
       {/* Nine Grid */}
-      {nineGrid ? (
+      {generating ? (
+        /* 生成中：九宫格区域此前是「空白」，这里用同形态骨架占位 */
+        <div
+          className="bg-surface rounded-xl border border-line p-6"
+          role="status"
+          aria-live="polite"
+          aria-label={t('common.loading')}
+        >
+          <div className="mb-4 flex items-center justify-between">
+            <Skeleton className="h-5 w-32" />
+            <Skeleton className="h-4 w-24" />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {Array.from({ length: 9 }).map((_, i) => (
+              <Skeleton key={i} className="h-24 rounded-lg" />
+            ))}
+          </div>
+        </div>
+      ) : nineGrid ? (
         <div className="bg-surface rounded-xl border border-line p-6">
           <div className="flex items-center justify-between mb-4">
             <h4 className="text-sm font-medium text-ink-1">
@@ -213,14 +231,11 @@ export function GridPage({ projectKey }: { projectKey?: string } = {}) {
           )}
         </div>
       ) : (
-        !generating && (
-          <div className="bg-surface rounded-xl border border-dashed border-line-strong p-8 text-center">
-            <div className="mb-3 flex justify-center text-ink-3">
-              <Palette className="h-9 w-9" />
-            </div>
-            <p className="text-ink-2 text-sm">{t('nineGrid.info')}</p>
-          </div>
-        )
+        <EmptyState
+          icon={<Palette className="h-10 w-10" />}
+          title="暂无九宫格分镜"
+          description={t('nineGrid.info')}
+        />
       )}
     </div>
   );

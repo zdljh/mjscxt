@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '@/context/AppContext';
 import { projectsApi, keyframesApi, storyboardApi, videoApi, ttsApi, mixApi, qcApi, exportApi, autopilotApi, upscaleApi, chatApi, agentApi, episodesApi } from '@/api/client';
-import { Button, Input, Loading, EmptyState, Modal } from '@/components/ui';
+import { Button, Input, EmptyState, ErrorState, Skeleton, Modal } from '@/components/ui';
 // tab 图标統一走线性 SVG（方案 P2-10）：此前是 emoji，字号受系统字体影响且观感与全站割裂
 import {
-  AlertTriangle, BarChart3, Box, Check, CheckCircle2, Clapperboard, FileText, FolderOpen,
-  ImageIcon, MessageSquare, Mountain, Music, Network, Share2, Target, User, X, ZoomIn,
+  AlertTriangle, BarChart3, Box, Check, CheckCircle2, Clapperboard, ClipboardCheck, ClipboardList, FileText,
+  FolderOpen, ImageIcon, MessageSquare, Mountain, Music, Network, Share2, Target, User, X, ZoomIn,
 } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 import { GridPage } from '@/pages/GridPage';
@@ -96,7 +96,34 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
     // AI总控 不再是标签页 —— 已改为右侧常驻面板（默认展开，见下方 ChatPanel）
   ];
 
-  if (loading) return <Loading />;
+  if (loading) return (
+    // 骨架沿用真实内容的外层布局（左列 + 右侧常驻面板），避免「白屏 → 内容」的高度跳变
+    <div className="fade-in" role="status" aria-live="polite" aria-label={t('common.loading')}>
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
+        <div className="flex-1 min-w-0 space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="min-w-0 space-y-2">
+              <Skeleton className="h-7 w-48" />
+              <Skeleton className="h-4 w-64" />
+            </div>
+            <Skeleton className="h-9 w-32" />
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            {[0, 1, 2, 3].map((i) => (
+              <Skeleton key={i} className="h-20 rounded-lg" />
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-2 border-b border-line pb-4">
+            {[0, 1, 2, 3, 4, 5, 6].map((i) => (
+              <Skeleton key={i} className="h-9 w-24 rounded-lg" />
+            ))}
+          </div>
+          <Skeleton className="h-64 rounded-lg" />
+        </div>
+        <Skeleton className="min-h-[420px] w-full rounded-xl lg:h-[calc(100vh-7rem)] lg:w-[340px] lg:shrink-0" />
+      </div>
+    </div>
+  );
   if (!project) return (
     <EmptyState
       icon={<AlertTriangle className="h-10 w-10" />}
@@ -252,6 +279,7 @@ function OverviewTab({
   novelId?: string;
   onRefreshAssets: () => Promise<void> | void;
 }) {
+  const { t } = useApp();
   const [preview, setPreview] = useState<{ item: AssetItem; type: 'character' | 'item' | 'scene' } | null>(null);
 
   // 剧本相关状态
@@ -263,11 +291,16 @@ function OverviewTab({
   const [episodeDetail, setEpisodeDetail] = useState<any>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState('');
+  /** 记下最近一次请求的集号：详情加载失败后 ErrorState 的「重试」要能定位回同一集 */
+  const lastDetailEpRef = React.useRef<number | null>(null);
 
   // 加载剧集列表
-  useEffect(() => {
+  // 抽成具名函数：错误态需要「重试」入口，而 useEffect 无法被手动重新触发。
+  // 取数逻辑与原实现逐字一致，仅补一次错误清理，避免重试成功后旧的失败文案残留。
+  const fetchEpisodes = React.useCallback(() => {
     if (!novelId) return;
     setScriptLoading(true);
+    setScriptError('');
     episodesApi.list(novelId)
       .then(data => {
         setEpisodes(data.episodes || []);
@@ -281,12 +314,15 @@ function OverviewTab({
       });
   }, [novelId]);
 
+  useEffect(() => { fetchEpisodes(); }, [fetchEpisodes]);
+
   // 加载单集详情
   // ⚠️ 后端 /api/episodes/<novel>/<ep> 的剧本正文嵌在 `script` 对象下（shots/characters/items/scenes），
   // 且列表行才带 status/completed_shots（_episode_progress 推导），详情接口本身不返回这两个字段。
   // 这里摊平成视图直接可读的结构，并从已加载的剧集列表补进度字段，避免详情恒显「暂无剧本内容」。
   const loadEpisodeDetail = async (episodeNo: number) => {
     if (!novelId) return;
+    lastDetailEpRef.current = episodeNo;
     setDetailLoading(true);
     setDetailError('');
     try {
@@ -440,11 +476,17 @@ function OverviewTab({
   }
 
   if (detailError) {
+    // 硬失败：单集详情整块取不到数据，用 ErrorState 顶掉内容区（不是把已渲染内容盖掉）
     return (
       <div className="space-y-4">
-        <div className="p-4 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong text-sm">
-          {detailError}
-        </div>
+        <ErrorState
+          title={t('project.loadingFailed')}
+          description={detailError}
+          onRetry={() => {
+            const n = lastDetailEpRef.current;
+            if (n != null) loadEpisodeDetail(n);
+          }}
+        />
         <Button variant="link" className="text-sm" onClick={goBack}>
           返回列表
         </Button>
@@ -454,26 +496,26 @@ function OverviewTab({
 
   if (detailLoading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="text-ink-2">加载中...</div>
+      <div className="space-y-4" role="status" aria-live="polite" aria-label={t('common.loading')}>
+        <Skeleton className="h-9 w-28" />
+        <Skeleton className="h-40 rounded-lg" />
+        <Skeleton className="h-64 rounded-lg" />
       </div>
     );
   }
 
   if (total === 0 && episodes.length === 0) {
     return (
-      <div className="py-12">
-        <div className="text-center text-ink-2">
-          <div className="mb-3 flex justify-center text-ink-3">
-            <FolderOpen className="h-9 w-9" />
-          </div>
-          <p className="font-medium">暂无资产</p>
-          <p className="text-sm mt-2">角色 / 物品 / 场景 会在生产流程中自动生成</p>
-          <p className="text-sm mt-3 text-brand">
+      <EmptyState
+        icon={<FolderOpen className="h-10 w-10" />}
+        title="暂无资产"
+        description="角色 / 物品 / 场景 会在生产流程中自动生成"
+        action={
+          <p className="text-sm text-brand">
             请通过右侧「AI总控」下达生产指令，AI会先与您沟通生产风格再启动
           </p>
-        </div>
-      </div>
+        }
+      />
     );
   }
 
@@ -514,17 +556,28 @@ function OverviewTab({
         </h3>
 
         {scriptLoading ? (
-          <div className="flex items-center justify-center h-32">
-            <div className="text-ink-2">加载中...</div>
+          // 骨架对齐真实区块：4 张统计卡 → 进度条 → 剧集列表卡
+          <div role="status" aria-live="polite" aria-label={t('common.loading')}>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              {[0, 1, 2, 3].map((i) => (
+                <Skeleton key={i} className="h-20 rounded-lg" />
+              ))}
+            </div>
+            <Skeleton className="mt-4 h-16 rounded-lg" />
+            <Skeleton className="mt-4 h-48 rounded-lg" />
           </div>
         ) : scriptError ? (
-          <div className="p-4 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong">
-            {scriptError}
-          </div>
+          <ErrorState
+            title={t('project.loadingFailed')}
+            description={scriptError}
+            onRetry={fetchEpisodes}
+          />
         ) : episodes.length === 0 ? (
-          <div className="bg-surface rounded-lg border border-line p-8 text-center text-ink-2">
-            暂无剧集数据，请先启动自动生产
-          </div>
+          <EmptyState
+            icon={<ClipboardList className="h-10 w-10" />}
+            title="暂无剧集数据"
+            description="请先启动自动生产"
+          />
         ) : (
           <>
             {/* 统计卡片 */}
@@ -768,7 +821,7 @@ function AssetPreviewModal({
               className="w-full rounded-md bg-surface-2"
             />
           ) : (
-            <div className="py-16 text-center text-ink-2">图片不可用</div>
+            <EmptyState icon={<ImageIcon className="h-10 w-10" />} title="图片不可用" />
           )}
 
           {gallery.length > 1 && (
@@ -802,6 +855,7 @@ function AssetPreviewModal({
 // 后端 /api/qc/project-summary 早已返回「引擎状态 + 统计 + 逐镜质检明细」，
 // 但前端此前只有标签没有渲染 —— 点进去是空白。这里补齐只读总览 + 单镜重测。
 function QcTab({ projectKey }: { projectKey: string }) {
+  const { t } = useApp();
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -845,7 +899,33 @@ function QcTab({ projectKey }: { projectKey: string }) {
     return 'bg-surface-2 text-ink-1';
   };
 
-  if (loading) return <Loading />;
+  if (loading) return (
+    // 骨架对齐真实区块：标题行 → 质检引擎卡 → 4 张统计卡 → 逐镜明细卡
+    <div className="space-y-6" role="status" aria-live="polite" aria-label={t('common.loading')}>
+      <div className="flex justify-between items-center">
+        <Skeleton className="h-5 w-24" />
+        <Skeleton className="h-8 w-16" />
+      </div>
+      <Skeleton className="h-40 rounded-lg" />
+      <div className="grid grid-cols-4 gap-4">
+        {[0, 1, 2, 3].map((i) => (
+          <Skeleton key={i} className="h-20 rounded-lg" />
+        ))}
+      </div>
+      <Skeleton className="h-48 rounded-lg" />
+    </div>
+  );
+
+  // 硬失败：质检数据整体没取到（data 仍为空），下面的引擎状态与统计只会渲染成空壳
+  if (error && !data) {
+    return (
+      <ErrorState
+        title={t('project.loadingFailed')}
+        description={error}
+        onRetry={load}
+      />
+    );
+  }
 
   const cfg = data?.config || {};
   const stats = data?.stats || { total: 0, passed: 0, failed: 0, retry_count: 0 };
@@ -865,12 +945,12 @@ function QcTab({ projectKey }: { projectKey: string }) {
       </div>
 
       {notice && (
-        <div className="p-3 bg-success/10 border border-success/30 rounded-lg text-success-strong text-sm">
+        <div className="p-3 bg-success-subtle border border-success/30 rounded-lg text-success-strong text-sm">
           {notice}
         </div>
       )}
       {error && (
-        <div className="p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong text-sm">{error}</div>
+        <div className="p-3 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong text-sm">{error}</div>
       )}
 
       {/* 质检引擎状态 */}
@@ -942,9 +1022,11 @@ function QcTab({ projectKey }: { projectKey: string }) {
 
       {/* 逐镜明细 */}
       {records.length === 0 ? (
-        <div className="bg-surface rounded-lg border border-line p-8 text-center text-ink-2">
-          暂无质检记录。镜头在流水线跑到「质检」环节后会在此出现。
-        </div>
+        <EmptyState
+          icon={<ClipboardCheck className="h-10 w-10" />}
+          title="暂无质检记录"
+          description="镜头在流水线跑到「质检」环节后会在此出现。"
+        />
       ) : (
         <div className="bg-surface rounded-lg border border-line divide-y divide-line">
           {records.map((r, i) => (
@@ -1076,7 +1158,29 @@ function KeyframesTab({ projectKey }: { projectKey: string }) {
         <Button size="sm" onClick={fetchPlan} disabled={loading}>刷新</Button>
       </div>
 
-      {error && <div className="p-4 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong">{error}</div>}
+      {/* 加载态（此前首屏只剩标题栏，无任何反馈）：对齐真实区块的 4 张统计卡 */}
+      {loading && !plan && (
+        <div role="status" aria-live="polite" aria-label={t('common.loading')}>
+          <div className="grid grid-cols-4 gap-4">
+            {[0, 1, 2, 3].map((i) => (
+              <Skeleton key={i} className="h-24 rounded-lg" />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 硬失败：整块拿不到 plan（无数据可展示）→ ErrorState；
+          已有 plan 时仅是刷新/生成失败 → 降级为下面那条紧凑行内提示，不吃掉已展示内容 */}
+      {error && !plan && (
+        <ErrorState
+          title={t('project.loadingFailed')}
+          description={error}
+          onRetry={fetchPlan}
+        />
+      )}
+      {error && plan && (
+        <div className="p-4 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong">{error}</div>
+      )}
 
       {plan && (
         <div className="grid grid-cols-4 gap-4">
@@ -1116,8 +1220,8 @@ function KeyframesTab({ projectKey }: { projectKey: string }) {
             <div
               key={shot.seq}
               className={`flex items-center gap-4 p-3 rounded-lg ${
-                shot.need_gen ? 'bg-warning/10 border border-warning/30' :
-                shot.has_end ? 'bg-success/10 border border-success/30' :
+                shot.need_gen ? 'bg-warning-subtle border border-warning/30' :
+                shot.has_end ? 'bg-success-subtle border border-success/30' :
                 'bg-surface-2'
               }`}
             >
@@ -1229,6 +1333,17 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
         <Button size="sm" onClick={fetchCanvas} disabled={loading}>刷新</Button>
       </div>
 
+      {/* 加载态（此前首屏只剩标题栏，无任何反馈）：对齐真实区块的三列分镜卡 */}
+      {loading && cards.length === 0 && (
+        <div role="status" aria-live="polite" aria-label={t('common.loading')}>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {[0, 1, 2].map((i) => (
+              <Skeleton key={i} className="h-56 rounded-lg" />
+            ))}
+          </div>
+        </div>
+      )}
+
       {summary && (
         <div className="flex flex-wrap gap-4 text-sm text-ink-2">
           <span>共 {summary.shot_count} 镜</span>
@@ -1242,27 +1357,36 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
       )}
 
       {notice && (
-        <div className="p-3 bg-success/10 border border-success/30 rounded-lg text-success-strong text-sm">
+        <div className="p-3 bg-success-subtle border border-success/30 rounded-lg text-success-strong text-sm">
           {notice}
         </div>
       )}
+      {/* 软失败：重做单镜失败时卡片仍在展示，只能用紧凑行内条，不能顶掉内容 */}
       {shotError && (
-        <div className="p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong text-sm">
+        <div className="p-3 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong text-sm">
           {shotError}
         </div>
       )}
 
       {error === 'no-data' && (
-        <div className="py-12 text-center text-ink-2">
-          <div className="mb-3 flex justify-center text-ink-3">
-            <Clapperboard className="h-9 w-9" />
-          </div>
-          <p>暂无分镜数据，请先进行剧本生成</p>
-        </div>
+        <EmptyState
+          icon={<Clapperboard className="h-10 w-10" />}
+          title="暂无分镜数据"
+          description="请先进行剧本生成"
+        />
       )}
 
-      {error && error !== 'no-data' && (
-        <div className="p-4 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong">{error}</div>
+      {/* 硬失败：分镜数据整体没取到且无卡片可展示 → ErrorState；
+          已有卡片时的刷新失败 → 行内条（软失败） */}
+      {error && error !== 'no-data' && cards.length === 0 && (
+        <ErrorState
+          title={t('project.loadingFailed')}
+          description={error}
+          onRetry={fetchCanvas}
+        />
+      )}
+      {error && error !== 'no-data' && cards.length > 0 && (
+        <div className="p-4 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong">{error}</div>
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -1501,7 +1625,21 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
     }
   };
 
-  if (loading) return <Loading />;
+  if (loading) return (
+    // 骨架对齐真实区块：标题行 → 链路自检卡 → 计划卡 → 源选择卡
+    <div className="space-y-4" role="status" aria-live="polite" aria-label={t('common.loading')}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0 space-y-2">
+          <Skeleton className="h-5 w-28" />
+          <Skeleton className="h-4 w-56" />
+        </div>
+        <Skeleton className="h-8 w-20" />
+      </div>
+      <Skeleton className="h-32 rounded-lg" />
+      <Skeleton className="h-32 rounded-lg" />
+      <Skeleton className="h-44 rounded-lg" />
+    </div>
+  );
 
   const ready = !!env?.available;
   const busy = task?.status === 'pending' || task?.status === 'running';
@@ -1647,13 +1785,11 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
       {/* 选择源 + 倍率 + 发起 */}
       <div className="bg-surface rounded-lg border border-line p-4 space-y-4">
         {sources.length === 0 ? (
-          <div className="text-center py-8">
-            <div className="mb-3 flex justify-center text-ink-3">
-              <ZoomIn className="h-9 w-9" />
-            </div>
-            <h4 className="text-base font-medium text-ink-1 mb-1">{t('upscale.sourceEmpty')}</h4>
-            <p className="text-sm text-ink-2">{t('upscale.sourceEmptyTip')}</p>
-          </div>
+          <EmptyState
+            icon={<ZoomIn className="h-10 w-10" />}
+            title={t('upscale.sourceEmpty')}
+            description={t('upscale.sourceEmptyTip')}
+          />
         ) : (
           <>
             <div className="grid md:grid-cols-2 gap-4">
@@ -2036,7 +2172,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
       </div>
 
       {error && (
-        <div className="mx-3 mt-3 p-2 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong text-xs shrink-0">
+        <div className="mx-3 mt-3 p-2 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong text-xs shrink-0">
           {error}
         </div>
       )}
@@ -2047,15 +2183,11 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
       <div className="flex-1 min-h-0 overflow-y-auto bg-surface-2">
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center px-4">
-            <div className="w-11 h-11 rounded-xl bg-surface border border-line flex items-center justify-center mb-3">
-              <MessageSquare className="h-5 w-5 text-ink-3" />
-            </div>
-            <p className="text-sm text-ink-2">
-              {autoMode ? '说一句话，总控自己决定并执行' : '和总控聊聊创作想法'}
-            </p>
-            <p className="text-xs text-ink-2 mt-1 mb-4">
-              {autoMode ? '无需确认，它会直接动手；点右上角方块可随时急停' : '当前只聊天，不会改动任何产物'}
-            </p>
+            <EmptyState
+              icon={<MessageSquare className="h-10 w-10" />}
+              title={autoMode ? '说一句话，总控自己决定并执行' : '和总控聊聊创作想法'}
+              description={autoMode ? '无需确认，它会直接动手；点右上角方块可随时急停' : '当前只聊天，不会改动任何产物'}
+            />
             <div className="w-full space-y-1.5">
               {(autoMode
                 ? ['看看现在生产到哪了', '把第 3 镜重新生成一次', '把最新成片做 2 倍超分', '这一集节奏太慢，重新调整分镜']

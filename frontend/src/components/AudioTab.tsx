@@ -266,8 +266,8 @@ export function AudioTab({ projectKey }: AudioTabProps) {
             {ttsEnv && (
               <div className={`p-3 rounded-lg mb-4 ${
                 ttsEnv.available
-                  ? 'bg-success/10 border border-success/30 text-success-strong'
-                  : 'bg-danger/10 border border-danger/30 text-danger-strong'
+                  ? 'bg-success-subtle border border-success/30 text-success-strong'
+                  : 'bg-danger-subtle border border-danger/30 text-danger-strong'
               }`}>
                 <span className="font-medium inline-flex items-center gap-1.5">
                   {ttsEnv.available ? (
@@ -315,7 +315,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                 {/* 剧本体检：兜底镜头（无台词、无 prompt_h3）在配音环节会变成
                     「一句也合不出来」，必须在这里就说清楚，而不是等用户白跑一轮 */}
                 {Array.isArray(ttsPlan.warnings) && ttsPlan.warnings.length > 0 && (
-                  <div className="mb-4 p-3 rounded-lg bg-warning/10 border border-warning/30 text-warning-strong text-xs space-y-1">
+                  <div className="mb-4 p-3 rounded-lg bg-warning-subtle border border-warning/30 text-warning-strong text-xs space-y-1">
                     <div className="font-medium">剧本体检提醒</div>
                     {ttsPlan.warnings.map((w: string, i: number) => (
                       <div key={i}>· {w}</div>
@@ -339,7 +339,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                 )}
 
                 {ttsPlan.lines && ttsPlan.lines.length === 0 && (
-                  <div className="mb-4 p-3 rounded-lg bg-danger/10 border border-danger/30 text-danger-strong text-xs">
+                  <div className="mb-4 p-3 rounded-lg bg-danger-subtle border border-danger/30 text-danger-strong text-xs">
                     该集没有可朗读台词，无法生成配音。请先补台词或重新生成剧本。
                   </div>
                 )}
@@ -355,7 +355,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
             )}
 
             {ttsError && (
-              <div className="p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong text-sm">
+              <div className="p-3 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong text-sm">
                 {ttsError}
               </div>
             )}
@@ -429,7 +429,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
             )}
 
             {mixError && (
-              <div className="p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong text-sm">
+              <div className="p-3 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong text-sm">
                 {mixError}
               </div>
             )}
@@ -438,8 +438,8 @@ export function AudioTab({ projectKey }: AudioTabProps) {
               <div
                 className={`p-3 rounded-lg text-sm border ${
                   mixDeliverable.registered
-                    ? 'bg-success/10 border-success/30 text-success-strong'
-                    : 'bg-warning/10 border-warning/30 text-warning-strong'
+                    ? 'bg-success-subtle border-success/30 text-success-strong'
+                    : 'bg-warning-subtle border-warning/30 text-warning-strong'
                 }`}
               >
                 {mixDeliverable.registered
@@ -453,8 +453,8 @@ export function AudioTab({ projectKey }: AudioTabProps) {
               <div
                 className={`p-3 rounded-lg text-sm border ${
                   mixQc.passed
-                    ? 'bg-success/10 border-success/30 text-success-strong'
-                    : 'bg-warning/10 border-warning/30 text-warning-strong'
+                    ? 'bg-success-subtle border-success/30 text-success-strong'
+                    : 'bg-warning-subtle border-warning/30 text-warning-strong'
                 }`}
               >
                 成片音频质检：{mixQc.passed ? '通过' : '未通过'}
@@ -590,7 +590,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
             </Button>
 
             {qcError && (
-              <div className="mt-3 p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong text-sm">
+              <div className="mt-3 p-3 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong text-sm">
                 {qcError}
               </div>
             )}
@@ -623,7 +623,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
               <div className="text-sm text-ink-1 mb-3">{qcResult.reason}</div>
 
               {qcResult.ai_skip_reason && (
-                <div className="mb-3 p-2 rounded bg-warning/10 text-warning-strong text-xs">
+                <div className="mb-3 p-2 rounded bg-warning-subtle text-warning-strong text-xs">
                   AI 层未参与：{qcResult.ai_skip_reason}
                 </div>
               )}

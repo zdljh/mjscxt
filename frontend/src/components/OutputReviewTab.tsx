@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useApp } from '@/context/AppContext';
 import { exportApi, autopilotApi } from '@/api/client';
-import { Button, Loading, Textarea } from '@/components/ui';
+import { Button, Textarea, Skeleton, EmptyState, ErrorState } from '@/components/ui';
 import { ClipboardCheck, FileText, Film, FolderOpen } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 import type { Deliverable } from '@/types';
@@ -121,8 +121,25 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
   };
 
   const finals = assets?.final || [];
+  /** 是否还有任何数据可展示：决定 error 走「硬失败 ErrorState」还是「软失败行内提示条」 */
+  const hasContent = finals.length > 0 || exportFiles.some((f) => f.exists) || deliverables.length > 0;
 
-  if (loading) return <Loading />;
+  // 加载态：沿用标题 + 两个区块卡片的形态
+  if (loading) {
+    return (
+      <div className="space-y-6" role="status" aria-live="polite" aria-label={t('common.loading')}>
+        <div className="flex items-center justify-between">
+          <div className="space-y-2">
+            <Skeleton className="h-6 w-28" />
+            <Skeleton className="h-4 w-40" />
+          </div>
+          <Skeleton className="h-8 w-16" />
+        </div>
+        <Skeleton className="h-56 rounded-lg" />
+        <Skeleton className="h-56 rounded-lg" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -139,7 +156,8 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
         </Button>
       </div>
 
-      {error && (
+      {/* 软失败：页面仍有数据在展示（刷新/生成/验收动作失败），保留紧凑行内提示条，不吃掉已展示内容 */}
+      {error && hasContent && (
         <div className="p-3 bg-danger-subtle border border-danger/30 rounded-lg text-sm text-danger-strong">
           {error}
         </div>
@@ -230,15 +248,20 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
         </h4>
 
         {deliverables.length === 0 ? (
-          <div className="text-center py-8">
-            <div className="mb-3 flex justify-center text-ink-3">
-              <ClipboardCheck className="h-10 w-10" />
-            </div>
-            <p className="text-sm text-ink-2">暂无成片，请先运行自动生产</p>
-            <p className="text-xs text-brand mt-2">
-              请通过右侧「AI总控」下达生产指令，AI会先与您沟通生产风格
-            </p>
-          </div>
+          error ? (
+            /* 硬失败：该区块没有任何数据可展示，且加载出错 → 整块错误态 + 重试 */
+            <ErrorState
+              title={t('project.loadingFailed')}
+              description={error}
+              onRetry={loadAll}
+            />
+          ) : (
+            <EmptyState
+              icon={<ClipboardCheck className="h-10 w-10" />}
+              title="暂无成片，请先运行自动生产"
+              description="请通过右侧「AI总控」下达生产指令，AI会先与您沟通生产风格"
+            />
+          )
         ) : (
           <div className="space-y-3">
             {deliverables.map((d) => {

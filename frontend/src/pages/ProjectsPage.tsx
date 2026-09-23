@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '@/context/AppContext';
 import { projectsApi, novelsApi } from '@/api/client';
-import { Button, Input, Loading, Modal, Badge, ConfirmDialog, Select } from '@/components/ui';
+import { Button, Input, Modal, Badge, ConfirmDialog, Select, Skeleton, EmptyState, ErrorState } from '@/components/ui';
 import { AlertTriangle, Clapperboard, FileText, FolderOpen, Pencil, Plus, Trash2 } from '@/components/ui/icons';
 import type { Project, Novel } from '@/types';
 
@@ -217,7 +217,30 @@ export function ProjectsPage() {
     }
   };
 
-  if (loading) return <Loading />;
+  // 加载态：沿用真实内容的外层与卡片网格列数，避免骨架 → 内容的布局跳变
+  if (loading) {
+    return (
+      <div
+        className="space-y-6 fade-in"
+        role="status"
+        aria-live="polite"
+        aria-label={t('common.loading')}
+      >
+        <div className="flex items-center justify-between">
+          <div className="space-y-2">
+            <Skeleton className="h-7 w-32" />
+            <Skeleton className="h-4 w-56" />
+          </div>
+          <Skeleton className="h-9 w-28" />
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-32 rounded-xl" />
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6 fade-in">
@@ -233,23 +256,35 @@ export function ProjectsPage() {
         </Button>
       </div>
 
-      {loadError && (
-        <div className="p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong text-sm">
+      {/* 软失败：项目列表非空 → 只是这一次刷新失败，保留紧凑行内提示条，绝不吃掉已展示的列表 */}
+      {loadError && projects.length > 0 && (
+        <div className="p-3 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong text-sm">
           {t('project.loadingFailed')}: {loadError}
         </div>
       )}
 
       {projects.length === 0 ? (
-        <div className="text-center py-12">
-          <div className="mb-4 flex justify-center text-ink-3">
-            <FolderOpen className="h-9 w-9" />
-          </div>
-          <h3 className="text-lg font-medium text-ink-1 mb-2">{t('project.noProjects')}</h3>
-          <p className="text-sm text-ink-2 mb-4">{t('project.noProjectsHint')}</p>
-          <Button onClick={openModal} className="mt-2">
-            {t('project.createNew')}
-          </Button>
-        </div>
+        loadError ? (
+          /* 硬失败：项目列表为空且加载出错，没有任何数据可展示 → 整块错误态 + 重试 */
+          <ErrorState
+            title={t('project.loadingFailed')}
+            description={loadError}
+            onRetry={() => {
+              setLoadError('');
+              setLoading(true);
+              reload()
+                .catch((e) => setLoadError(e instanceof Error ? e.message : String(e)))
+                .finally(() => setLoading(false));
+            }}
+          />
+        ) : (
+          <EmptyState
+            icon={<FolderOpen className="h-10 w-10" />}
+            title={t('project.noProjects')}
+            description={t('project.noProjectsHint')}
+            action={<Button onClick={openModal}>{t('project.createNew')}</Button>}
+          />
+        )
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {projects.map((proj) => (
@@ -412,7 +447,7 @@ export function ProjectsPage() {
           )}
 
           {formError && (
-            <div className="p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong text-sm break-words">
+            <div className="p-3 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong text-sm break-words">
               {formError}
             </div>
           )}
@@ -437,7 +472,7 @@ export function ProjectsPage() {
               <Input value={editName} onChange={setEditName} label="项目名称" />
             </div>
             {editError && (
-              <div className="p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong text-sm">
+              <div className="p-3 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong text-sm">
                 {editError}
               </div>
             )}
@@ -472,7 +507,7 @@ export function ProjectsPage() {
               此操作会将项目及其所有产物移入回收站，可从磁盘还原。
             </p>
             {deleteError && (
-              <p className="mt-3 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger-strong">
+              <p className="mt-3 rounded-lg border border-danger/30 bg-danger-subtle p-3 text-sm text-danger-strong">
                 {deleteError}
               </p>
             )}

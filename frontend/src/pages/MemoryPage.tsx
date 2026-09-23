@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useApp } from '@/context/AppContext';
 import { memoryApi, projectsApi } from '@/api/client';
-import { Card, Button, Loading, EmptyState, Badge, ConfirmDialog, Input, Select } from '@/components/ui';
+import { Card, Button, Loading, EmptyState, Badge, ConfirmDialog, Input, Select, Skeleton } from '@/components/ui';
 import { BookOpen, Brain } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 import type { Memory, MemoryType, MemoryStats, PromptLesson, LessonPage, Project } from '@/types';
@@ -234,7 +234,27 @@ export function MemoryPage() {
     return label === key ? memTypeOf(mem) : label;
   };
 
-  if (loading) return <Loading />;
+  // 加载态：沿用统计卡 5 列 + 卡片区块的形态，避免整页转圈造成布局跳变
+  if (loading) {
+    return (
+      <div className="space-y-6 fade-in" role="status" aria-live="polite" aria-label={t('common.loading')}>
+        <div className="flex items-center justify-between">
+          <Skeleton className="h-8 w-40" />
+          <div className="flex gap-2">
+            <Skeleton className="h-9 w-20" />
+            <Skeleton className="h-9 w-24" />
+          </div>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <Skeleton key={i} className="h-20 rounded-lg" />
+          ))}
+        </div>
+        <Skeleton className="h-64 rounded-lg" />
+        <Skeleton className="h-48 rounded-lg" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6 fade-in">
