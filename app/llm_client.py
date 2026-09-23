@@ -91,6 +91,12 @@ REASONING_EFFORT_LEVELS = ("low", "high", "max")
 MIN_TOKENS_WHEN_REASONING_EFFORT = 2048
 # "chat_template_kwargs"（默认，zai/vLLM 风格）| "top_level"（部分网关）
 REASONING_EFFORT_STYLE = "chat_template_kwargs"
+# 思考档位降级顺序（max → high → low）。
+# 用于「模型只吐思考内容」时的自救：档位越高思考越烧 token，先把档位往下压，
+# 配合提高 max_tokens 才能突破「思考吃光额度 → 正文永远为空」的死循环。
+# ⚠️ 只降到 low 就停，不要降到「不注入」：对 always-on reasoning 模型（GLM/agnes 系）
+# 不注入档位会被网关按默认（通常是最高档）解析，反而更烧 token；low 才是最短思考档。
+REASONING_EFFORT_DOWNGRADE_ORDER = ("max", "high", "low")
 
 
 class LLMError(Exception):
@@ -764,6 +770,24 @@ class LLMClient:
                     return min(t, MAX_TOKENS_CEILING)
             return min(value * 2, MAX_TOKENS_CEILING)
 
+        def _downgrade_reasoning_effort() -> bool:
+            """把 reasoning_effort 降到下一档，返回是否还有可降空间。
+
+            目标：always-on reasoning 模型（GLM-5.3 / agnes-3.0 等）在 high/max 档下
+            思考内容可能极长（远超 max_tokens 上限），此时**只提 max_tokens 救不回来**，
+            必须先降思考档位、压缩思考长度，正文才有机会露出来。
+            """
+            cur_re = str(getattr(self, "reasoning_effort", "") or "").strip().lower()
+            order = REASONING_EFFORT_DOWNGRADE_ORDER
+            idx = order.index(cur_re) if cur_re in order else -1
+            nxt = order[idx + 1] if 0 <= idx < len(order) - 1 else None
+            if nxt is None:
+                return False
+            self.reasoning_effort = nxt
+            logger.warning(f"模型只吐思考内容：reasoning_effort 由 {cur_re or '(未注入)'} "
+                           f"降级为 {nxt or '(不注入)'}，以压缩思考长度")
+            return True
+
         repaired_fallback = None
         for _ in range(max(1, int(max_attempts))):
             # 提额重试是最外层循环（每次都会重新发一次完整请求），收益最大：
@@ -773,15 +797,17 @@ class LLMClient:
             try:
                 r = self.chat_ex(messages, temperature=temperature, max_tokens=cur)
             except LLMReasoningOnlyError as e:
-                # 思考吃光额度：加码再来一次，别让「允许思考」变成「调用失败」
+                # 思考吃光额度：优先降思考档位（high/max → low → 不注入），再配合提额。
+                # 只提 max_tokens 对「思考本身无限长」的 always-on 模型无效（实测 40 分钟空转）。
                 last_err = e
+                downgraded = _downgrade_reasoning_effort()
                 nxt = _next_tokens(max(cur, _thinking_floor()))
                 logger.warning(f"模型只吐思考内容（第 {attempts} 次，max_tokens={cur}），"
                                f"提高到 {nxt} 重试")
                 history.append({"attempt": attempts, "max_tokens": cur,
                                 "finish_reason": "reasoning_only", "truncated": True,
                                 "content_len": 0, "latency_ms": None})
-                if nxt <= cur:
+                if nxt <= cur and not downgraded:
                     break
                 cur = nxt
                 continue

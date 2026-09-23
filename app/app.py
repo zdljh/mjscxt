@@ -10363,7 +10363,35 @@ def api_autopilot_run_once():
                         "error": f"小说里没有第{ep}章（共 {len(chapters)} 章）"}), 400
     cfg = pipeline.normalize_config({**plan, 'novel_id': meta.get('novel_id')},
                                     default_project_key=project)
-    result = pipeline.run_episode(cfg, project, ep, meta, chapter)
+    # P1-5：run-once 是同步阻塞执行，此前不接 progress_cb → 前端 `current` 状态全程不更新，
+    # UI 只能看到「执行中」而看不到「当前在哪一步 / 百分之几 / 卡在重试」，用户干等 40 分钟无反馈。
+    # 这里把进度实时写进 autopilot 的 current 状态，`/api/autopilot/status` 轮询即可拿到实时进度。
+    _seen: list = []
+
+    def _cb(message, percent, phase=None):
+        try:
+            import pipeline as _pl
+            base = str(phase or "").split(":")[0]
+            if base in _pl.STEP_SEQUENCE and base not in _seen:
+                idx = _pl.STEP_SEQUENCE.index(base)
+                _seen.extend(_pl.STEP_SEQUENCE[:idx])
+                _seen.append(base)
+            autopilot._set_current(project=project, episode=ep,
+                                   title=chapter.get('title') or f"第{ep}章",
+                                   step=base or "running", message=message,
+                                   percent=int(percent or 0),
+                                   steps_done=list(dict.fromkeys(_seen)),
+                                   phase=phase or "start", started_at=autopilot._now())
+        except Exception as e:  # noqa: BLE001  进度上报失败不得阻断生产
+            app.logger.warning("run-once 进度上报失败：%s", e)
+
+    try:
+        result = pipeline.run_episode(cfg, project, ep, meta, chapter, progress_cb=_cb)
+    finally:
+        try:
+            autopilot._clear_current()
+        except Exception as e:  # noqa: BLE001
+            app.logger.warning("run-once 清理 current 失败：%s", e)
     if result.get('status') == 'busy':
         # B-02 P0-5：该集正被另一执行体（托管轮转）生产，集级锁拒绝双跑
         return jsonify({"success": False,
