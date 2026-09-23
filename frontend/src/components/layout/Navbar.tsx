@@ -1,33 +1,29 @@
 import React, { useState } from 'react';
 import { useApp } from '@/context/AppContext';
 
+/** 键盘焦点环：与 ui/index.tsx 的 FOCUS_RING 保持一致 */
+const FOCUS_RING =
+'focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas';
+
 export function Navbar() {
   const { t, lang, setLang } = useApp();
   const [showLangMenu, setShowLangMenu] = useState(false);
 
   return (
-    <nav className="relative px-6 py-3 flex items-center justify-between sticky top-0 z-40"
-      style={{
-        background: 'rgba(255,255,255,0.8)',
-        backdropFilter: 'blur(20px)',
-        borderBottom: '1px solid rgba(99,102,241,0.15)',
-      }}
-    >
+    <nav className="sticky top-0 z-sticky flex items-center justify-between border-b border-line bg-surface/80 px-6 py-3 backdrop-blur-xl">
       <div className="flex items-center gap-3">
-        <div className="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold text-sm"
-          style={{ background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', boxShadow: '0 4px 12px rgba(102,126,234,0.4)' }}>
+        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand text-sm font-bold text-white shadow-sm">
           漫
         </div>
-        <h1 className="text-lg font-bold" style={{ background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+        <h1 className="text-lg font-bold text-ink-1">
           {t('app.title')}
         </h1>
       </div>
 
       <div className="flex items-center gap-4">
         {/* Status indicator */}
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs"
-          style={{ background: 'rgba(16,185,129,0.1)', color: '#10b981', border: '1px solid rgba(16,185,129,0.2)' }}>
-          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+        <div className="flex items-center gap-2 rounded-full border border-success/20 bg-success-subtle px-3 py-1.5 text-xs text-success-strong">
+          <span className="h-2 w-2 animate-pulse rounded-full bg-success" />
           Online
         </div>
 
@@ -35,29 +31,25 @@ export function Navbar() {
         <div className="relative">
           <button
             onClick={() => setShowLangMenu(!showLangMenu)}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all duration-200 hover:shadow-md"
-            style={{ background: 'rgba(99,102,241,0.1)', border: '1px solid rgba(99,102,241,0.2)', color: '#6366f1' }}
+            className={`flex items-center gap-2 rounded-md border border-brand/20 bg-brand-subtle px-3 py-1.5 text-brand transition-all duration-200 hover:bg-brand/10 hover:shadow-md ${FOCUS_RING}`}
           >
             <span>{lang === 'zh-CN' ? '🇨🇳' : '🇺🇸'}</span>
             <span className="text-sm font-medium">{lang === 'zh-CN' ? '中文' : 'English'}</span>
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
             </svg>
           </button>
           {showLangMenu && (
-            <div className="absolute right-0 top-full mt-2 w-32 rounded-xl shadow-xl overflow-hidden z-50"
-              style={{ background: 'rgba(255,255,255,0.95)', backdropFilter: 'blur(20px)', border: '1px solid rgba(99,102,241,0.2)' }}>
+            <div className="absolute right-0 top-full z-dropdown mt-2 w-32 overflow-hidden rounded-xl border border-line bg-surface/95 shadow-md backdrop-blur-xl">
               <button
                 onClick={() => { setLang('zh-CN'); setShowLangMenu(false); }}
-                className="w-full text-left px-4 py-2.5 text-sm hover:bg-indigo-50 transition-colors"
-                style={{ color: '#374151' }}
+                className={`w-full px-4 py-2.5 text-left text-sm text-ink-1 transition-colors hover:bg-brand-subtle ${FOCUS_RING}`}
               >
                 🇨🇳 简体中文
               </button>
               <button
                 onClick={() => { setLang('en-US'); setShowLangMenu(false); }}
-                className="w-full text-left px-4 py-2.5 text-sm hover:bg-indigo-50 transition-colors"
-                style={{ color: '#374151' }}
+                className={`w-full px-4 py-2.5 text-left text-sm text-ink-1 transition-colors hover:bg-brand-subtle ${FOCUS_RING}`}
               >
                 🇺🇸 English
               </button>
@@ -66,8 +58,7 @@ export function Navbar() {
         </div>
 
         {/* User avatar */}
-        <div className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-medium cursor-pointer transition-all hover:shadow-lg hover:scale-105"
-          style={{ background: 'linear-gradient(135deg, #10b981 0%, #3b82f6 100%)' }}>
+        <div className={`flex h-8 w-8 cursor-pointer items-center justify-center rounded-full bg-brand text-sm font-medium text-white transition-transform hover:scale-105 hover:shadow-lg ${FOCUS_RING}`}>
           A
         </div>
       </div>

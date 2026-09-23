@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { createPortal } from 'react-dom';
 import { useApp } from '@/context/AppContext';
 import { projectsApi, keyframesApi, storyboardApi, videoApi, ttsApi, mixApi, qcApi, exportApi, autopilotApi, upscaleApi, chatApi, agentApi, episodesApi } from '@/api/client';
-import { Button, Loading, EmptyState } from '@/components/ui';
+import { Button, Loading, EmptyState, Modal } from '@/components/ui';
+// tab 图标統一走线性 SVG（方案 P2-10）：此前是 emoji，字号受系统字体影响且观感与全站割裂
+import { BarChart3, CheckCircle2, Clapperboard, Music, Network, Share2, ZoomIn } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
-import { useModalBehavior } from '@/hooks/useModalBehavior';
 import { GridPage } from '@/pages/GridPage';
 import { RelationGraphTab } from '@/components/RelationGraphTab';
 import { OutputReviewTab } from '@/components/OutputReviewTab';
@@ -69,21 +69,21 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
     ]).finally(() => setLoading(false));
   }, [projectKey, reloadAssets]);
 
-  const tabs: { id: WorkbenchTab; icon: string; label: string }[] = [
-    { id: 'overview', icon: '📊', label: t('wb.overview') },
+  const tabs: { id: WorkbenchTab; icon: React.ReactNode; label: string }[] = [
+    { id: 'overview', icon: <BarChart3 className="h-4 w-4" />, label: t('wb.overview') },
     // 自动生产已移除独立标签页 —— 改为 AI总控 内的子功能，启动前AI会先与用户沟通风格
     // 分镜管理：合并 九宫格构图 + 关键帧生成 + 分镜序列 三个子标签（见 StoryboardHubTab）
-    { id: 'storyboard', icon: '🎬', label: t('wb.storyboardHub') },
-    { id: 'qc', icon: '✅', label: t('wb.qc') },
+    { id: 'storyboard', icon: <Clapperboard className="h-4 w-4" />, label: t('wb.storyboardHub') },
+    { id: 'qc', icon: <CheckCircle2 className="h-4 w-4" />, label: t('wb.qc') },
     // 超分：后端 upscale_client 与其 8 个端点早已可用，但前端此前零引用 ——
     // 与已删除的孤儿页面同属「建好没入口」的能力，这里补上手工入口。
-    { id: 'upscale', icon: '🔍', label: t('wb.upscale') },
+    { id: 'upscale', icon: <ZoomIn className="h-4 w-4" />, label: t('wb.upscale') },
     // 角色关系图：后端 API 早已完整实现，前端此前缺失可视化组件
-    { id: 'relation', icon: '🔗', label: t('wb.relation') },
+    { id: 'relation', icon: <Network className="h-4 w-4" />, label: t('wb.relation') },
     // 声音处理：合并 TTS 配音 + 音画混音 + 音频质检
-    { id: 'audio', icon: '🎵', label: t('wb.audio') },
+    { id: 'audio', icon: <Music className="h-4 w-4" />, label: t('wb.audio') },
     // 输出与验收：合并导出 + 成品验收
-    { id: 'output', icon: '📤', label: t('wb.output') },
+    { id: 'output', icon: <Share2 className="h-4 w-4" />, label: t('wb.output') },
     // AI总控 不再是标签页 —— 已改为右侧常驻面板（默认展开，见下方 ChatPanel）
   ];
 
@@ -105,8 +105,8 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
           {/* Header */}
           <div className="flex items-center justify-between">
             <div>
-              <h2 className="text-2xl font-bold text-gray-900 dark:text-white">{project.name}</h2>
-              <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+              <h2 className="text-2xl font-bold text-gray-900">{project.name}</h2>
+              <p className="text-sm text-gray-500 mt-1">
                 风格: {project.config?.style} • {project.episode_count} {t('ep.suffix')}
               </p>
             </div>
@@ -118,15 +118,15 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
             </Button>
           </div>
 
-          {/* Stats Bar */}
-          <div className="grid grid-cols-4 gap-4">
+          {/* Stats Bar —— 窄屏折成两行，避免 4 列挤压成一竖条（方案 P1-8） */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             {[
               { label: '角色', count: assets?.counts?.characters || 0, color: 'text-indigo-400' },
               { label: '物品', count: assets?.counts?.items || 0, color: 'text-green-400' },
               { label: '场景', count: assets?.counts?.scenes || 0, color: 'text-yellow-400' },
               { label: '分镜', count: assets?.counts?.storyboards || 0, color: 'text-blue-400' },
             ].map((stat) => (
-              <div key={stat.label} className="bg-white dark:bg-gray-800 rounded-lg p-4 border border-gray-200 dark:border-gray-700">
+              <div key={stat.label} className="bg-white rounded-lg p-4 border border-gray-200">
                 <div className={`text-2xl font-bold ${stat.color}`}>{stat.count}</div>
                 <div className="text-sm text-gray-500">{stat.label}</div>
               </div>
@@ -134,18 +134,18 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
           </div>
 
           {/* Tab Navigation */}
-          <div className="flex flex-wrap gap-2 border-b border-gray-200 dark:border-gray-700 pb-4">
+          <div className="flex flex-wrap gap-2 border-b border-gray-200 pb-4">
             {tabs.map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
                   activeTab === tab.id
-                    ? 'bg-indigo-600 text-white shadow-lg'
-                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200 hover:text-gray-900 dark:bg-white/5 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-white'
+                    ? 'bg-brand-subtle text-brand'
+                    : 'text-ink-2 hover:bg-surface-2 hover:text-ink-1'
                 }`}
               >
-                <span className="text-lg">{tab.icon}</span>
+                <span className="flex shrink-0">{tab.icon}</span>
                 <span>{tab.label}</span>
               </button>
             ))}
@@ -189,9 +189,9 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
           <button
             onClick={() => setChatOpen(true)}
             title="展开 AI总控"
-            className="sticky top-0 shrink-0 w-11 h-[calc(100vh-7rem)] min-h-[420px] flex flex-col items-center gap-3 py-4 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:text-indigo-600 hover:border-indigo-400 transition-colors"
+            className="sticky top-0 shrink-0 w-11 h-[calc(100vh-7rem)] min-h-[420px] flex flex-col items-center gap-3 py-4 rounded-xl border border-gray-200 bg-white text-gray-500 hover:text-indigo-600 hover:border-indigo-400 transition-colors"
           >
-            <span className="w-7 h-7 rounded-lg bg-indigo-50 dark:bg-indigo-500/15 flex items-center justify-center text-sm">💬</span>
+            <span className="w-7 h-7 rounded-lg bg-indigo-50 flex items-center justify-center text-sm">💬</span>
             <span className="text-xs tracking-wide" style={{ writingMode: 'vertical-rl' }}>AI总控</span>
           </button>
         )}
@@ -272,8 +272,8 @@ function OverviewTab({
 
   // 加载单集详情
   // ⚠️ 后端 /api/episodes/<novel>/<ep> 的剧本正文嵌在 `script` 对象下（shots/characters/items/scenes），
-  //    且列表行才带 status/completed_shots（_episode_progress 推导），详情接口本身不返回这两个字段。
-  //    这里摊平成视图直接可读的结构，并从已加载的剧集列表补进度字段，避免详情恒显「暂无剧本内容」。
+  // 且列表行才带 status/completed_shots（_episode_progress 推导），详情接口本身不返回这两个字段。
+  // 这里摊平成视图直接可读的结构，并从已加载的剧集列表补进度字段，避免详情恒显「暂无剧本内容」。
   const loadEpisodeDetail = async (episodeNo: number) => {
     if (!novelId) return;
     setDetailLoading(true);
@@ -326,7 +326,7 @@ function OverviewTab({
       <div className="space-y-4">
         <button
           onClick={goBack}
-          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors"
+          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 transition-colors"
         >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
@@ -334,22 +334,22 @@ function OverviewTab({
           返回列表
         </button>
 
-        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+        <div className="bg-white rounded-lg border border-gray-200 p-6">
           <div className="flex items-start justify-between">
             <div>
-              <h3 className="text-xl font-bold text-gray-900 dark:text-white">
+              <h3 className="text-xl font-bold text-gray-900">
                 第 {episodeDetail.episode_no} 集
                 {episodeDetail.title && <span className="ml-2 text-lg font-normal text-gray-500">{episodeDetail.title}</span>}
               </h3>
               {episodeDetail.chapter_title && (
-                <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">章节：{episodeDetail.chapter_title}</p>
+                <p className="text-sm text-gray-500 mt-1">章节：{episodeDetail.chapter_title}</p>
               )}
             </div>
             <span className={`px-3 py-1 rounded-full text-xs font-medium ${
-              episodeDetail.status === 'done' ? 'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400' :
-              episodeDetail.status === 'producing' ? 'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-400' :
-              episodeDetail.status === 'failed' ? 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400' :
-              'bg-gray-100 text-gray-700 dark:bg-gray-500/20 dark:text-gray-400'
+              episodeDetail.status === 'done' ? 'bg-green-100 text-green-700' :
+              episodeDetail.status === 'producing' ? 'bg-blue-100 text-blue-700' :
+              episodeDetail.status === 'failed' ? 'bg-red-100 text-red-700' :
+              'bg-gray-100 text-gray-700'
             }`}>
               {episodeDetail.status === 'done' ? '✓ 完成' :
                episodeDetail.status === 'producing' ? '▶ 生产中' :
@@ -358,7 +358,7 @@ function OverviewTab({
             </span>
           </div>
 
-          <div className="mt-4 flex items-center gap-4 text-sm text-gray-500 dark:text-gray-400">
+          <div className="mt-4 flex items-center gap-4 text-sm text-gray-500">
             <span>镜头进度：{episodeDetail.completed_shots} / {episodeDetail.shot_count}</span>
             {episodeDetail.created_at && (
               <span>创建时间：{episodeDetail.created_at.split('T')[0]}</span>
@@ -366,7 +366,7 @@ function OverviewTab({
           </div>
 
           {episodeDetail.shot_count > 0 && (
-            <div className="mt-3 w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+            <div className="mt-3 w-full bg-gray-200 rounded-full h-2">
               <div
                 className={`h-2 rounded-full transition-all ${
                   episodeDetail.status === 'done' ? 'bg-green-500' :
@@ -379,42 +379,42 @@ function OverviewTab({
           )}
         </div>
 
-        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
-          <h4 className="font-semibold text-gray-900 dark:text-white mb-4">剧本内容</h4>
+        <div className="bg-white rounded-lg border border-gray-200 p-6">
+          <h4 className="font-semibold text-gray-900 mb-4">剧本内容</h4>
 
           {(episodeDetail.shots && episodeDetail.shots.length > 0) ? (
             <div className="space-y-4">
               {episodeDetail.shots.map((shot: any, idx: number) => (
                 <div key={idx} className="border-l-4 border-indigo-500 pl-4 py-2">
                   <div className="flex items-center gap-2 mb-1 flex-wrap">
-                    <span className="px-2 py-0.5 bg-indigo-100 dark:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 text-xs font-medium rounded">
+                    <span className="px-2 py-0.5 bg-indigo-100 text-indigo-600 text-xs font-medium rounded">
                       镜头 {shot.shot_id ?? idx + 1}
                     </span>
                     {shot.camera && (
-                      <span className="text-xs text-gray-500 dark:text-gray-400">{shot.camera}</span>
+                      <span className="text-xs text-gray-500">{shot.camera}</span>
                     )}
                     {shot.location && (
-                      <span className="text-xs text-gray-500 dark:text-gray-400">· {shot.location}</span>
+                      <span className="text-xs text-gray-500">· {shot.location}</span>
                     )}
                     {shot.duration != null && (
-                      <span className="text-xs text-gray-400 dark:text-gray-500">· {shot.duration}s</span>
+                      <span className="text-xs text-gray-400">· {shot.duration}s</span>
                     )}
                   </div>
                   {shot.description && (
-                    <p className="text-sm text-gray-700 dark:text-gray-300">{shot.description}</p>
+                    <p className="text-sm text-gray-700">{shot.description}</p>
                   )}
                   {shot.dialogue_text && (
-                    <p className="text-sm text-gray-800 dark:text-gray-200 mt-1 pl-2 border-l-2 border-gray-300 dark:border-gray-600">
+                    <p className="text-sm text-gray-800 mt-1 pl-2 border-l-2 border-gray-300">
                       {shot.dialogue_text}
                     </p>
                   )}
                   {shot.visual_detail && (
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    <p className="text-xs text-gray-500 mt-1">
                       视觉描述：{shot.visual_detail}
                     </p>
                   )}
                   {shot.audio_cues && (
-                    <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                    <p className="text-xs text-gray-400 mt-1">
                       音效：{shot.audio_cues}
                     </p>
                   )}
@@ -422,7 +422,7 @@ function OverviewTab({
               ))}
             </div>
           ) : (
-            <p className="text-gray-500 dark:text-gray-400 text-sm">
+            <p className="text-gray-500 text-sm">
               本集剧本暂无镜头数据（可能尚未生成，或该集还在生产中）。
             </p>
           )}
@@ -437,7 +437,7 @@ function OverviewTab({
         <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
           {detailError}
         </div>
-        <button onClick={goBack} className="text-sm text-indigo-600 dark:text-indigo-400 hover:underline">
+        <button onClick={goBack} className="text-sm text-indigo-600 hover:underline">
           返回列表
         </button>
       </div>
@@ -455,11 +455,11 @@ function OverviewTab({
   if (total === 0 && episodes.length === 0) {
     return (
       <div className="py-12">
-        <div className="text-center text-gray-500 dark:text-gray-400">
+        <div className="text-center text-gray-500">
           <div className="text-4xl mb-3">📁</div>
           <p className="font-medium">暂无资产</p>
           <p className="text-sm mt-2">角色 / 物品 / 场景 会在生产流程中自动生成</p>
-          <p className="text-sm mt-3 text-indigo-500 dark:text-indigo-400">
+          <p className="text-sm mt-3 text-indigo-500">
             请通过右侧「AI总控」下达生产指令，AI会先与您沟通生产风格再启动
           </p>
         </div>
@@ -477,7 +477,7 @@ function OverviewTab({
             if (list.length === 0) return null;
             return (
               <div key={g.key}>
-                <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-400 mb-3">
+                <h3 className="text-sm font-semibold text-gray-500 mb-3">
                   {g.icon} {g.label} · {list.length}
                 </h3>
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
@@ -498,8 +498,8 @@ function OverviewTab({
       )}
 
       {/* 剧本概览 */}
-      <div className="border-t border-gray-200 dark:border-gray-700 pt-8">
-        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
+      <div className="border-t border-gray-200 pt-8">
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">
           📝 剧本概览
         </h3>
 
@@ -512,16 +512,16 @@ function OverviewTab({
             {scriptError}
           </div>
         ) : episodes.length === 0 ? (
-          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-8 text-center text-gray-500 dark:text-gray-400">
+          <div className="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500">
             暂无剧集数据，请先启动自动生产
           </div>
         ) : (
           <>
             {/* 统计卡片 */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-              <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-                <div className="text-2xl font-bold text-gray-900 dark:text-white">{totalEpisodes}</div>
-                <div className="text-sm text-gray-500 dark:text-gray-400">总集数</div>
+              <div className="bg-white rounded-lg border border-gray-200 p-4">
+                <div className="text-2xl font-bold text-gray-900">{totalEpisodes}</div>
+                <div className="text-sm text-gray-500">总集数</div>
               </div>
               {(() => {
                 const stats = episodes.reduce((acc: any, ep: any) => {
@@ -534,9 +534,9 @@ function OverviewTab({
                   { label: '失败', count: stats['failed'] || 0, color: 'text-red-500' },
                   { label: '待生产', count: stats['pending'] || 0, color: 'text-gray-500' },
                 ].map(s => (
-                  <div key={s.label} className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+                  <div key={s.label} className="bg-white rounded-lg border border-gray-200 p-4">
                     <div className={`text-2xl font-bold ${s.color}`}>{s.count}</div>
-                    <div className="text-sm text-gray-500 dark:text-gray-400">{s.label}</div>
+                    <div className="text-sm text-gray-500">{s.label}</div>
                   </div>
                 ));
               })()}
@@ -544,12 +544,12 @@ function OverviewTab({
 
             {/* 进度条 */}
             {totalEpisodes > 0 && (
-              <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 mb-4">
+              <div className="bg-white rounded-lg border border-gray-200 p-4 mb-4">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm font-medium text-gray-700 dark:text-gray-300">整体进度</span>
+                  <span className="text-sm font-medium text-gray-700">整体进度</span>
                   <span className="text-sm text-gray-500">{Math.round(((episodes.filter((e: any) => e.status === 'done').length) / totalEpisodes) * 100)}%</span>
                 </div>
-                <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                <div className="w-full bg-gray-200 rounded-full h-2">
                   <div
                     className="bg-green-500 h-2 rounded-full transition-all"
                     style={{ width: `${((episodes.filter((e: any) => e.status === 'done').length) / totalEpisodes) * 100}%` }}
@@ -559,30 +559,30 @@ function OverviewTab({
             )}
 
             {/* 剧集列表 */}
-            <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
-              <div className="p-4 border-b border-gray-200 dark:border-gray-700">
-                <h4 className="font-semibold text-gray-900 dark:text-white">剧集列表</h4>
-                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">点击集数查看剧本详情</p>
+            <div className="bg-white rounded-lg border border-gray-200">
+              <div className="p-4 border-b border-gray-200">
+                <h4 className="font-semibold text-gray-900">剧集列表</h4>
+                <p className="text-xs text-gray-500 mt-1">点击集数查看剧本详情</p>
               </div>
 
-              <div className="divide-y divide-gray-200 dark:divide-gray-700">
+              <div className="divide-y divide-gray-200">
                 {episodes.map((ep: any) => (
                   <button
                     key={ep.episode_no}
                     onClick={() => loadEpisodeDetail(ep.episode_no)}
-                    className="w-full p-4 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors text-left"
+                    className="w-full p-4 hover:bg-gray-50 transition-colors text-left"
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">
-                        <span className="flex items-center justify-center w-8 h-8 rounded-full bg-indigo-100 dark:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 text-sm font-semibold">
+                        <span className="flex items-center justify-center w-8 h-8 rounded-full bg-indigo-100 text-indigo-600 text-sm font-semibold">
                           {ep.episode_no}
                         </span>
                         <div>
-                          <p className="font-medium text-gray-900 dark:text-white">
+                          <p className="font-medium text-gray-900">
                             第 {ep.episode_no} 集
-                            {ep.chapter_title && <span className="ml-2 text-sm text-indigo-600 dark:text-indigo-400">《{ep.chapter_title}》</span>}
+                            {ep.chapter_title && <span className="ml-2 text-sm text-indigo-600">《{ep.chapter_title}》</span>}
                           </p>
-                          <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                          <p className="text-xs text-gray-500 mt-0.5">
                             章节 {ep.chapter_index ?? ep.episode_no}
                           </p>
                         </div>
@@ -590,7 +590,7 @@ function OverviewTab({
 
                       <div className="flex items-center gap-4">
                         <div className="text-right">
-                          <div className="text-sm text-gray-600 dark:text-gray-400">
+                          <div className="text-sm text-gray-600">
                             {ep.completed_shots} / {ep.shot_count} 镜头
                           </div>
                           {ep.created_at && (
@@ -599,10 +599,10 @@ function OverviewTab({
                         </div>
 
                         <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                          ep.status === 'done' ? 'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400' :
-                          ep.status === 'producing' ? 'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-400' :
-                          ep.status === 'failed' ? 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400' :
-                          'bg-gray-100 text-gray-700 dark:bg-gray-500/20 dark:text-gray-400'
+                          ep.status === 'done' ? 'bg-green-100 text-green-700' :
+                          ep.status === 'producing' ? 'bg-blue-100 text-blue-700' :
+                          ep.status === 'failed' ? 'bg-red-100 text-red-700' :
+                          'bg-gray-100 text-gray-700'
                         }`}>
                           {ep.status === 'done' ? '✓ 完成' :
                            ep.status === 'producing' ? '▶ 生产中' :
@@ -617,7 +617,7 @@ function OverviewTab({
                     </div>
 
                     {ep.shot_count > 0 && (
-                      <div className="mt-3 w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5">
+                      <div className="mt-3 w-full bg-gray-200 rounded-full h-1.5">
                         <div
                           className={`h-1.5 rounded-full transition-all ${
                             ep.status === 'done' ? 'bg-green-500' :
@@ -657,9 +657,9 @@ function AssetCard({
     <button
       type="button"
       onClick={onClick}
-      className="text-left bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden hover:shadow-lg transition-shadow"
+      className="text-left bg-white rounded-xl border border-gray-200 overflow-hidden hover:shadow-lg transition-shadow"
     >
-      <div className="aspect-video bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-900 flex items-center justify-center overflow-hidden">
+      <div className="aspect-video bg-gradient-to-br from-gray-100 to-gray-200 flex items-center justify-center overflow-hidden">
         {imageUrl && !broken ? (
           <img
             src={imageUrl}
@@ -673,7 +673,7 @@ function AssetCard({
         )}
       </div>
       <div className="p-3">
-        <h4 className="font-medium text-gray-900 dark:text-white text-sm truncate">{item.name}</h4>
+        <h4 className="font-medium text-gray-900 text-sm truncate">{item.name}</h4>
         <p className="text-xs text-gray-500 mt-1">
           {item.category || (item.view_count ? `${item.view_count} 个视角` : fallbackIcon === '👤' ? '角色' : fallbackIcon === '📦' ? '物品' : '场景')}
         </p>
@@ -683,6 +683,9 @@ function AssetCard({
 }
 
 // ========== Asset Preview Modal ==========
+// 薄封装：遮罩、头部、动画、ESC / 遮罩关闭、滚动锁定、焦点陷阱、层级全部由共享 Modal
+// 负责（方案 P1-7）。此前这里是一份独立的自建弹层（bg-black/60 + p-4 头部 + z-[100]），
+// 与全站 Modal 的观感和层级都对不上。本组件只保留资产预览自己的业务：多视角切换 + 下载。
 function AssetPreviewModal({
   preview,
   onClose,
@@ -692,11 +695,6 @@ function AssetPreviewModal({
 }) {
   const [active, setActive] = useState(0);
   const isOpen = !!preview;
-  // 复用共享弹窗行为（ESC 关闭 / 锁定背景滚动 / 焦点陷阱 / 关闭后归还焦点）。
-  // 此前这套自建弹窗是三无产品：不能按 ESC 关、打开后背景还能滚、
-  // 键盘用户 Tab 会跑到弹窗后面的页面上；z-index 也和共享 Modal 不一致（z-50 vs z-[100]）。
-  const containerRef = useModalBehavior({ isOpen, onClose });
-  const titleId = React.useId();
 
   useEffect(() => { setActive(0); }, [preview]);
 
@@ -719,38 +717,48 @@ function AssetPreviewModal({
     return () => document.removeEventListener('keydown', onKey);
   }, [isOpen, gallery.length]);
 
-  if (!preview) return null;
-  const { item } = preview;
+  // 共享 Modal 已处理 isOpen=false 时不渲染，这里只需容忍 preview 为空时的取值
+  const item = preview?.item;
   const current = gallery[active];
   const src = assetSrc(current?.url);
 
-  const node = (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm animate-modal-backdrop" onClick={onClose} aria-hidden="true" />
-      <div
-        ref={containerRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        className="relative flex w-full max-w-3xl max-h-[90vh] flex-col rounded-2xl bg-white shadow-xl animate-modal-in dark:bg-gray-800"
-      >
-        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-gray-200 p-4 dark:border-gray-700">
-          <h3 id={titleId} className="min-w-0 truncate font-semibold text-lg text-gray-900 dark:text-white">{item.name}</h3>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="关闭"
-            className="shrink-0 rounded-lg p-1 text-2xl leading-none text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
-          >
-            ×
-          </button>
+  const downloadCurrent = () => {
+    if (!src) return;
+      const a = document.createElement('a');
+      a.href = src;
+        a.download = `${item?.name || 'asset'}${current?.view ? '_' + current.view : ''}.png`;
+        a.click();
+        };
+        
+        return (
+        <Modal
+        isOpen={isOpen}
+        onClose={onClose}
+        title={item?.name || '资产预览'}
+        size="xl"
+        footer={
+        <div className="flex w-full items-center gap-2">
+        <Button size="sm" variant="secondary" onClick={downloadCurrent}>
+        下载当前图
+        </Button>
+        {current?.size && (
+        <span className="text-xs text-ink-3">{(current.size / 1024).toFixed(0)} KB</span>
+        )}
+        {gallery.length > 1 && (
+        <span className="ml-auto text-xs text-ink-3">← → 切换视角</span>
+        )}
         </div>
-
-        <div className="flex-1 space-y-4 overflow-y-auto p-4">
+        }
+      >
+        <div className="space-y-4">
           {src ? (
-            <img src={src} alt={`${item.name}${current?.view ? ` - ${current.view}` : ''}`} className="w-full rounded-lg bg-gray-100 dark:bg-gray-900" />
+            <img
+            src={src}
+            alt={`${item?.name || ''}${current?.view ? ` - ${current.view}` : ''}`}
+            className="w-full rounded-md bg-surface-2"
+            />
           ) : (
-            <div className="py-16 text-center text-gray-500 dark:text-gray-400">图片不可用</div>
+            <div className="py-16 text-center text-ink-2">图片不可用</div>
           )}
 
           {gallery.length > 1 && (
@@ -765,7 +773,9 @@ function AssetPreviewModal({
                     aria-selected={i === active}
                     aria-label={g.view || `视角 ${i + 1}`}
                     onClick={() => setActive(i)}
-                    className={`h-14 w-20 overflow-hidden rounded border-2 ${i === active ? 'border-indigo-500' : 'border-transparent hover:border-gray-300 dark:hover:border-gray-600'}`}
+                    className={`h-14 w-20 overflow-hidden rounded border-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${
+                    i === active ? 'border-brand' : 'border-transparent hover:border-line-strong'
+                    }`}
                   >
                     {t && <img src={t} alt="" className="h-full w-full object-cover" />}
                   </button>
@@ -773,33 +783,9 @@ function AssetPreviewModal({
               })}
             </div>
           )}
-
-          <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={() => {
-                if (!src) return;
-                const a = document.createElement('a');
-                a.href = src;
-                a.download = `${item.name}${current?.view ? '_' + current.view : ''}.png`;
-                a.click();
-              }}
-            >
-              下载当前图
-            </Button>
-            {current?.size && (
-              <span className="text-xs text-gray-500">{(current.size / 1024).toFixed(0)} KB</span>
-            )}
-            {gallery.length > 1 && (
-              <span className="ml-auto text-xs text-gray-400">← → 切换视角</span>
-            )}
           </div>
-        </div>
-      </div>
-    </div>
+        </Modal>
   );
-  return typeof document === 'undefined' ? node : createPortal(node, document.body);
 }
 
 // ========== QC Tab（功能质检） ==========
@@ -844,9 +830,9 @@ function QcTab({ projectKey }: { projectKey: string }) {
   };
 
   const verdictBadge = (v: string) => {
-    if (v === 'pass') return 'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400';
-    if (v === 'fail') return 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400';
-    return 'bg-gray-100 text-gray-700 dark:bg-gray-500/20 dark:text-gray-400';
+    if (v === 'pass') return 'bg-green-100 text-green-700';
+    if (v === 'fail') return 'bg-red-100 text-red-700';
+    return 'bg-gray-100 text-gray-700';
   };
 
   if (loading) return <Loading />;
@@ -864,12 +850,12 @@ function QcTab({ projectKey }: { projectKey: string }) {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h3 className="text-lg font-semibold text-gray-900 dark:text-white">功能质检</h3>
+        <h3 className="text-lg font-semibold text-gray-900">功能质检</h3>
         <Button size="sm" variant="secondary" onClick={load}>刷新</Button>
       </div>
 
       {notice && (
-        <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-green-600 dark:text-green-400 text-sm">
+        <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-green-600 text-sm">
           {notice}
         </div>
       )}
@@ -878,38 +864,38 @@ function QcTab({ projectKey }: { projectKey: string }) {
       )}
 
       {/* 质检引擎状态 */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+      <div className="bg-white rounded-lg border border-gray-200 p-4">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="font-medium text-gray-900 dark:text-white">质检引擎</span>
+          <span className="font-medium text-gray-900">质检引擎</span>
           <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-            cfg.enabled ? 'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400'
-                        : 'bg-gray-100 text-gray-600 dark:bg-gray-500/20 dark:text-gray-400'
+            cfg.enabled ? 'bg-green-100 text-green-700'
+                        : 'bg-gray-100 text-gray-600'
           }`}>
             {cfg.enabled ? '已启用' : '未启用'}
           </span>
           <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-            cfg.ready ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-500/20 dark:text-indigo-400'
-                      : 'bg-yellow-100 text-yellow-700 dark:bg-yellow-500/20 dark:text-yellow-400'
+            cfg.ready ? 'bg-indigo-100 text-indigo-700'
+                      : 'bg-yellow-100 text-yellow-700'
           }`}>
             {cfg.ready ? '就绪' : '未就绪'}
           </span>
         </div>
         <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
           <div>
-            <div className="text-gray-500 dark:text-gray-400 text-xs">模型</div>
-            <div className="text-gray-900 dark:text-gray-200 truncate">{cfg.effective_model || cfg.model || '—'}</div>
+            <div className="text-gray-500 text-xs">模型</div>
+            <div className="text-gray-900 truncate">{cfg.effective_model || cfg.model || '—'}</div>
           </div>
           <div>
-            <div className="text-gray-500 dark:text-gray-400 text-xs">通过分数线</div>
-            <div className="text-gray-900 dark:text-gray-200">{cfg.pass_score ?? '—'}</div>
+            <div className="text-gray-500 text-xs">通过分数线</div>
+            <div className="text-gray-900">{cfg.pass_score ?? '—'}</div>
           </div>
           <div>
-            <div className="text-gray-500 dark:text-gray-400 text-xs">接口地址</div>
-            <div className="text-gray-900 dark:text-gray-200 truncate">{cfg.effective_base_url || cfg.base_url || '—'}</div>
+            <div className="text-gray-500 text-xs">接口地址</div>
+            <div className="text-gray-900 truncate">{cfg.effective_base_url || cfg.base_url || '—'}</div>
           </div>
           <div>
-            <div className="text-gray-500 dark:text-gray-400 text-xs">API Key</div>
-            <div className="text-gray-900 dark:text-gray-200">{cfg.has_api_key ? (cfg.api_key_masked || '已配置') : '未配置'}</div>
+            <div className="text-gray-500 text-xs">API Key</div>
+            <div className="text-gray-900">{cfg.has_api_key ? (cfg.api_key_masked || '已配置') : '未配置'}</div>
           </div>
         </div>
         <div className="mt-3 flex flex-wrap gap-2 text-xs">
@@ -920,8 +906,8 @@ function QcTab({ projectKey }: { projectKey: string }) {
             { label: '音频', on: cfg.audio_enabled },
           ].map((k) => (
             <span key={k.label} className={`px-2 py-0.5 rounded ${
-              k.on ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-400'
-                   : 'bg-gray-100 text-gray-500 dark:bg-white/5 dark:text-gray-500'
+              k.on ? 'bg-indigo-50 text-indigo-600'
+                   : 'bg-gray-100 text-gray-500'
             }`}>
               {k.label}质检 {k.on ? '开' : '关'}
             </span>
@@ -932,29 +918,29 @@ function QcTab({ projectKey }: { projectKey: string }) {
       {/* 统计 */}
       <div className="grid grid-cols-4 gap-4">
         {[
-          { label: '质检总数', value: stats.total, color: 'text-gray-900 dark:text-white' },
+          { label: '质检总数', value: stats.total, color: 'text-gray-900' },
           { label: '通过', value: stats.passed, color: 'text-green-500' },
           { label: '未通过', value: stats.failed, color: 'text-red-500' },
           { label: '待重试', value: stats.retry_count, color: 'text-yellow-500' },
         ].map((s) => (
-          <div key={s.label} className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 text-center">
+          <div key={s.label} className="bg-white rounded-lg border border-gray-200 p-4 text-center">
             <div className={`text-2xl font-bold ${s.color}`}>{s.value ?? 0}</div>
-            <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">{s.label}</div>
+            <div className="text-xs text-gray-500 mt-1">{s.label}</div>
           </div>
         ))}
       </div>
 
       {/* 逐镜明细 */}
       {records.length === 0 ? (
-        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-8 text-center text-gray-500 dark:text-gray-400">
+        <div className="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500">
           暂无质检记录。镜头在流水线跑到「质检」环节后会在此出现。
         </div>
       ) : (
-        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 divide-y divide-gray-200 dark:divide-gray-700">
+        <div className="bg-white rounded-lg border border-gray-200 divide-y divide-gray-200">
           {records.map((r, i) => (
             <div key={`${r.shot_id}-${r.kind}-${i}`} className="p-3 flex items-center gap-3">
-              <span className="font-mono text-sm text-gray-900 dark:text-gray-200">{r.shot_id}</span>
-              <span className="text-xs px-2 py-0.5 rounded bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400">
+              <span className="font-mono text-sm text-gray-900">{r.shot_id}</span>
+              <span className="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-600">
                 {KIND_LABEL[r.kind] || r.kind || '质检'}
               </span>
               <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${verdictBadge(r.verdict)}`}>
@@ -964,13 +950,13 @@ function QcTab({ projectKey }: { projectKey: string }) {
               </span>
               {typeof r.score === 'number' && (
                 // ⚠️ 后端 score 是 **0~100**（实测区间 15~98），不是 0~1 的比例。
-                //    这里此前无条件 *100，会把 82 分显示成「8200」。
-                <span className="text-xs text-gray-500 dark:text-gray-400">
+                // 这里此前无条件 *100，会把 82 分显示成「8200」。
+                <span className="text-xs text-gray-500">
                   得分 {Math.round(r.score <= 1 ? r.score * 100 : r.score)}
                 </span>
               )}
               {r.timestamp && (
-                <span className="text-xs text-gray-400 dark:text-gray-500 ml-auto">{String(r.timestamp).replace('T', ' ').slice(0, 19)}</span>
+                <span className="text-xs text-gray-400 ml-auto">{String(r.timestamp).replace('T', ' ').slice(0, 19)}</span>
               )}
               {(r.kind === 'image' || r.kind === 'video') && (
                 <Button
@@ -1015,7 +1001,7 @@ function StoryboardHubTab({ projectKey }: { projectKey: string }) {
             className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-all ${
               sub === s.id
                 ? 'bg-indigo-600 text-white shadow'
-                : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-white/5 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-white'
+                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
             }`}
           >
             <span>{s.icon}</span>
@@ -1084,21 +1070,21 @@ function KeyframesTab({ projectKey }: { projectKey: string }) {
 
       {plan && (
         <div className="grid grid-cols-4 gap-4">
-          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 text-center">
+          <div className="bg-white rounded-lg border border-gray-200 p-4 text-center">
             <div className="text-3xl font-bold text-indigo-400">{plan.shot_count}</div>
-            <div className="text-sm text-gray-500 dark:text-gray-400">总镜头数</div>
+            <div className="text-sm text-gray-500">总镜头数</div>
           </div>
-          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 text-center">
+          <div className="bg-white rounded-lg border border-gray-200 p-4 text-center">
             <div className="text-3xl font-bold text-green-400">{plan.start_frames_ready}</div>
-            <div className="text-sm text-gray-500 dark:text-gray-400">首帧就绪</div>
+            <div className="text-sm text-gray-500">首帧就绪</div>
           </div>
-          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 text-center">
+          <div className="bg-white rounded-lg border border-gray-200 p-4 text-center">
             <div className="text-3xl font-bold text-blue-400">{plan.end_frames_ready}</div>
-            <div className="text-sm text-gray-500 dark:text-gray-400">尾帧就绪</div>
+            <div className="text-sm text-gray-500">尾帧就绪</div>
           </div>
-          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 text-center">
+          <div className="bg-white rounded-lg border border-gray-200 p-4 text-center">
             <div className="text-3xl font-bold text-yellow-400">{plan.to_generate}</div>
-            <div className="text-sm text-gray-500 dark:text-gray-400">待生成</div>
+            <div className="text-sm text-gray-500">待生成</div>
           </div>
         </div>
       )}
@@ -1116,17 +1102,17 @@ function KeyframesTab({ projectKey }: { projectKey: string }) {
 
       {plan && (
         <div className="space-y-2">
-          <h4 className="font-semibold text-gray-700 dark:text-gray-300 mb-3">镜头列表</h4>
+          <h4 className="font-semibold text-gray-700 mb-3">镜头列表</h4>
           {plan.plan?.map((shot: any) => (
             <div
               key={shot.seq}
               className={`flex items-center gap-4 p-3 rounded-lg ${
                 shot.need_gen ? 'bg-yellow-500/10 border border-yellow-500/30' :
                 shot.has_end ? 'bg-green-500/10 border border-green-500/30' :
-                'bg-gray-50 dark:bg-white/5'
+                'bg-gray-50'
               }`}
             >
-              <span className="w-12 font-mono text-gray-500 dark:text-gray-400">#{shot.seq}</span>
+              <span className="w-12 font-mono text-gray-500">#{shot.seq}</span>
               <span className="flex-1">{shot.status || shot.shot_id}</span>
               <div className="flex gap-2">
                 {shot.has_start && <span className="px-2 py-1 bg-green-500/20 text-green-400 rounded text-xs">首帧</span>}
@@ -1235,19 +1221,19 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
       </div>
 
       {summary && (
-        <div className="flex flex-wrap gap-4 text-sm text-gray-600 dark:text-gray-400">
+        <div className="flex flex-wrap gap-4 text-sm text-gray-600">
           <span>共 {summary.shot_count} 镜</span>
           <span>分镜图 {summary.storyboard_ready ?? 0}</span>
           <span>视频 {summary.video_ready ?? 0}</span>
           <span>尾帧 {summary.keyframe_end_ready ?? 0}</span>
           {(summary.qc_blocked ?? 0) > 0 && (
-            <span className="text-amber-600 dark:text-amber-400">质检拦截 {summary.qc_blocked}</span>
+            <span className="text-amber-600">质检拦截 {summary.qc_blocked}</span>
           )}
         </div>
       )}
 
       {notice && (
-        <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-green-600 dark:text-green-400 text-sm">
+        <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-green-600 text-sm">
           {notice}
         </div>
       )}
@@ -1258,7 +1244,7 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
       )}
 
       {error === 'no-data' && (
-        <div className="py-12 text-center text-gray-500 dark:text-gray-400">
+        <div className="py-12 text-center text-gray-500">
           <div className="text-4xl mb-3">🎬</div>
           <p>暂无分镜数据，请先进行剧本生成</p>
         </div>
@@ -1275,14 +1261,14 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
           const vidBusy = busy === `${card.shot_id}:video`;
           const mode = videoMode[sid] || 'reference';
           return (
-            <div key={card.seq} className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 flex flex-col">
+            <div key={card.seq} className="bg-white rounded-lg border border-gray-200 p-4 flex flex-col">
               <div className="flex items-center justify-between mb-2">
-                <span className="font-mono text-sm text-gray-500 dark:text-gray-400">#{card.seq}</span>
+                <span className="font-mono text-sm text-gray-500">#{card.seq}</span>
                 <span className="text-xs text-gray-500">{card.camera}</span>
               </div>
 
               <div className="flex gap-3 mb-2">
-                <div className="w-24 h-24 shrink-0 rounded bg-gray-100 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 overflow-hidden flex items-center justify-center text-xs text-gray-400">
+                <div className="w-24 h-24 shrink-0 rounded bg-gray-100 border border-gray-200 overflow-hidden flex items-center justify-center text-xs text-gray-400">
                   {card.storyboard?.exists && card.storyboard?.url ? (
                     <img src={card.storyboard.url} alt={`镜头 ${card.seq} 分镜图`} className="w-full h-full object-cover" />
                   ) : (
@@ -1290,11 +1276,11 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
                   )}
                 </div>
                 <div className="min-w-0 flex-1 text-xs space-y-1">
-                  <p className="text-gray-700 dark:text-gray-300 line-clamp-3">{card.description}</p>
+                  <p className="text-gray-700 line-clamp-3">{card.description}</p>
                   {card.dialogue_text && (
                     <p className="text-gray-500 italic line-clamp-2">{card.dialogue_text}</p>
                   )}
-                  <p className={card.video?.exists ? 'text-green-600 dark:text-green-400' : 'text-amber-600 dark:text-amber-400'}>
+                  <p className={card.video?.exists ? 'text-green-600' : 'text-amber-600'}>
                     视频：{card.video?.exists ? '已生成' : '未生成'}
                   </p>
                   {card.consistency?.score != null && (
@@ -1319,7 +1305,7 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
                   onChange={(e) =>
                     setVideoMode((prev) => ({ ...prev, [sid]: e.target.value as 'reference' | 'keyframe' }))
                   }
-                  className="text-xs rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-700 dark:text-gray-200 px-1 py-1"
+                  className="text-xs rounded border border-gray-300 bg-white text-gray-700 px-1 py-1"
                   title="reference：用分镜图+主角锚点生成；keyframe：用首尾帧插值（需已有尾帧）"
                 >
                   <option value="reference">分镜图驱动</option>
@@ -1351,18 +1337,18 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
 
 // ========== 超分（FlashVSR） ==========
 // 接口：
-//   GET  /api/upscale/env             链路自检（ComfyUI 在线 / 模型 / 节点）
-//   GET  /api/upscale/sources         候选输入视频（成片 / 片段 / 已有超分 / ComfyUI）
-//   POST /api/upscale/video           {project_name, video_path, scale, attach_audio} -> task_id
-//   GET  /api/upscale/status/<id>     轮询进度
-//   GET  /api/upscale/list            该项目已生成的超分产物
+// GET /api/upscale/env 链路自检（ComfyUI 在线 / 模型 / 节点）
+// GET /api/upscale/sources 候选输入视频（成片 / 片段 / 已有超分 / ComfyUI）
+// POST /api/upscale/video {project_name, video_path, scale, attach_audio} -> task_id
+// GET /api/upscale/status/<id> 轮询进度
+// GET /api/upscale/list 该项目已生成的超分产物
 //
 // ⚠️ attach_audio 必须传 true：后端 TE-Speed 链路默认 attach_audio=False，
-//    对「成片」超分会把已合成的 TTS 配音整轨丢掉（backend 侧该参数此前也不在白名单，
-//    已一并补上）。
+// 对「成片」超分会把已合成的 TTS 配音整轨丢掉（backend 侧该参数此前也不在白名单，
+// 已一并补上）。
 //
 // ⚠️ 可下载性取决于 URL 前缀：只有 /api/upscale/<project>/<name> 支持 ?download=1；
-//    ComfyUI 侧来源走 /api/upscale/comfyview 是 302 重定向，不能直接当附件下载。
+// ComfyUI 侧来源走 /api/upscale/comfyview 是 302 重定向，不能直接当附件下载。
 function UpscaleTab({ projectKey }: { projectKey: string }) {
   const { t } = useApp();
   const [env, setEnv] = useState<UpscaleEnv | null>(null);
@@ -1534,8 +1520,8 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{t('upscale.title')}</h3>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">{t('upscale.subtitle')}</p>
+          <h3 className="text-lg font-semibold text-gray-900">{t('upscale.title')}</h3>
+          <p className="text-sm text-gray-500 mt-0.5">{t('upscale.subtitle')}</p>
         </div>
         <Button size="sm" variant="secondary" onClick={load} disabled={loading || busy}>
           {t('common.refresh')}
@@ -1546,8 +1532,8 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
       <div
         className={`p-3 rounded-lg border text-sm ${
           ready
-            ? 'bg-green-50 dark:bg-green-500/10 border-green-200 dark:border-green-500/30 text-green-700 dark:text-green-300'
-            : 'bg-amber-50 dark:bg-amber-500/10 border-amber-200 dark:border-amber-500/30 text-amber-700 dark:text-amber-300'
+            ? 'bg-green-50 border-green-200 text-green-700'
+            : 'bg-amber-50 border-amber-200 text-amber-700'
         }`}
       >
         <div className="flex items-center justify-between gap-3">
@@ -1585,18 +1571,18 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
           必须给一个真正的关闭入口（之前 enable_upscale 不在 PLAN_DEFAULTS 里，
           接口会把该字段过滤掉，等于关不掉）。 */}
       {planOn !== null && (
-        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+        <div className="bg-white rounded-lg border border-gray-200 p-4">
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
-              <p className="text-sm font-medium text-gray-900 dark:text-white">
+              <p className="text-sm font-medium text-gray-900">
                 {t('upscale.planToggle')}
               </p>
-              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              <p className="text-xs text-gray-500 mt-1">
                 {t('upscale.planToggleHint')}
               </p>
             </div>
             <div className="flex items-center gap-3 shrink-0">
-              <span className={`text-xs font-medium ${planOn ? 'text-green-600 dark:text-green-400' : 'text-gray-500 dark:text-gray-400'}`}>
+              <span className={`text-xs font-medium ${planOn ? 'text-green-600' : 'text-gray-500'}`}>
                 {planOn ? t('upscale.on') : t('upscale.off')}
               </span>
               <button
@@ -1605,7 +1591,7 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
                 disabled={savingPlan}
                 onClick={() => savePlan({ enable_upscale: !planOn })}
                 className={`relative w-11 h-6 rounded-full transition-colors disabled:opacity-50 ${
-                  planOn ? 'bg-indigo-600' : 'bg-gray-300 dark:bg-gray-600'
+                  planOn ? 'bg-indigo-600' : 'bg-gray-300'
                 }`}
               >
                 <span
@@ -1618,8 +1604,8 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
           </div>
 
           {/* 自动生产的超分倍率（与手工超分独立配置） */}
-          <div className="mt-3 pt-3 border-t border-gray-100 dark:border-gray-700 flex items-center gap-3">
-            <span className="text-xs text-gray-600 dark:text-gray-300">{t('upscale.planScale')}</span>
+          <div className="mt-3 pt-3 border-t border-gray-100 flex items-center gap-3">
+            <span className="text-xs text-gray-600">{t('upscale.planScale')}</span>
             <div className="flex gap-2">
               {([2, 3, 4] as const).map((n) => (
                 <button
@@ -1629,44 +1615,44 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
                   className={`px-3 py-1 rounded-md text-xs font-medium transition-all disabled:opacity-50 ${
                     planScale === n
                       ? 'bg-indigo-600 text-white'
-                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-white/5 dark:text-gray-400 dark:hover:bg-white/10'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                   }`}
                 >
                   {t('upscale.scaleTimes', { n })}
                 </button>
               ))}
             </div>
-            <span className="text-xs text-gray-400 dark:text-gray-500">{t('upscale.planScaleHint')}</span>
+            <span className="text-xs text-gray-400">{t('upscale.planScaleHint')}</span>
           </div>
         </div>
       )}
 
       {error && (
-        <div className="p-3 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-lg text-sm text-red-700 dark:text-red-300">
+        <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
           {error}
         </div>
       )}
 
       {/* 选择源 + 倍率 + 发起 */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-4">
+      <div className="bg-white rounded-lg border border-gray-200 p-4 space-y-4">
         {sources.length === 0 ? (
           <div className="text-center py-8">
             <div className="text-4xl mb-3">🔍</div>
-            <h4 className="text-base font-medium text-gray-900 dark:text-white mb-1">{t('upscale.sourceEmpty')}</h4>
-            <p className="text-sm text-gray-500 dark:text-gray-400">{t('upscale.sourceEmptyTip')}</p>
+            <h4 className="text-base font-medium text-gray-900 mb-1">{t('upscale.sourceEmpty')}</h4>
+            <p className="text-sm text-gray-500">{t('upscale.sourceEmptyTip')}</p>
           </div>
         ) : (
           <>
             <div className="grid md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1.5">
+                <label className="block text-xs font-medium text-gray-600 mb-1.5">
                   {t('upscale.selectSource')}
                 </label>
                 <select
                   value={selected}
                   onChange={(e) => { setSelected(e.target.value); setPlaying(null); }}
                   disabled={busy}
-                  className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-900 text-gray-900 dark:text-white"
+                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg bg-white text-gray-900"
                 >
                   {Array.from(new Set(visibleSources.map((s) => s.kind))).map((kind) => (
                     <optgroup key={kind} label={kind}>
@@ -1679,26 +1665,26 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
                   ))}
                 </select>
                 {/* ComfyUI 侧是全局素材池（不分项目），默认折叠避免淹没本项目成片 */}
-                <label className="mt-2 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 cursor-pointer">
+                <label className="mt-2 flex items-center gap-2 text-xs text-gray-500 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={showComfy}
                     onChange={(e) => setShowComfy(e.target.checked)}
-                    className="rounded border-gray-300 dark:border-gray-600"
+                    className="rounded border-gray-300"
                   />
                   {t('upscale.showComfy', {
                     n: sources.length - sources.filter((s) => !s.kind.startsWith('ComfyUI')).length,
                   })}
                 </label>
                 {source && (
-                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1.5">
+                  <p className="text-xs text-gray-500 mt-1.5">
                     {source.mtime} · {source.size_mb} MB
                   </p>
                 )}
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1.5">
+                <label className="block text-xs font-medium text-gray-600 mb-1.5">
                   {t('upscale.scale')}
                 </label>
                 <div className="flex gap-2">
@@ -1710,14 +1696,14 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
                       className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
                         scale === n
                           ? 'bg-indigo-600 text-white shadow-lg'
-                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200 hover:text-gray-900 dark:bg-white/5 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-white'
+                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200 hover:text-gray-900'
                       }`}
                     >
                       {t('upscale.scaleTimes', { n })}
                     </button>
                   ))}
                 </div>
-                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1.5">
+                <p className="text-xs text-gray-500 mt-1.5">
                   {t('upscale.scaleHint')}
                 </p>
               </div>
@@ -1741,7 +1727,7 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
                 </Button>
               )}
               {!ready && (
-                <span className="text-xs text-amber-600 dark:text-amber-400 self-center">
+                <span className="text-xs text-amber-600 self-center">
                   {t('upscale.notReadyTip')}
                 </span>
               )}
@@ -1752,15 +1738,15 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
 
       {/* 任务进度 / 结果 */}
       {task && (
-        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-3">
+        <div className="bg-white rounded-lg border border-gray-200 p-4 space-y-3">
           <div className="flex items-center justify-between gap-3">
-            <span className="font-semibold text-gray-900 dark:text-white">{statusText()}</span>
-            <span className="text-xs text-gray-500 dark:text-gray-400">
+            <span className="font-semibold text-gray-900">{statusText()}</span>
+            <span className="text-xs text-gray-500">
               {t('upscale.progress')} {task.progress || 0}%
             </span>
           </div>
 
-          <div className="h-2 rounded-full bg-gray-100 dark:bg-gray-700 overflow-hidden">
+          <div className="h-2 rounded-full bg-gray-100 overflow-hidden">
             <div
               className={`h-full transition-all ${
                 task.status === 'error' ? 'bg-red-500' : 'bg-indigo-600'
@@ -1770,39 +1756,39 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
           </div>
 
           {task.message && (
-            <p className="text-xs text-gray-500 dark:text-gray-400">{task.message}</p>
+            <p className="text-xs text-gray-500">{task.message}</p>
           )}
           {task.status === 'error' && task.error && (
-            <p className="text-xs text-red-600 dark:text-red-400 break-all">{task.error}</p>
+            <p className="text-xs text-red-600 break-all">{task.error}</p>
           )}
 
           {task.status === 'done' && res && (
-            <div className="pt-3 border-t border-gray-200 dark:border-gray-700 space-y-3">
+            <div className="pt-3 border-t border-gray-200 space-y-3">
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
                 <div>
-                  <div className="text-gray-500 dark:text-gray-400">{t('upscale.before')}</div>
-                  <div className="font-medium text-gray-900 dark:text-white">{fmtResolution(res.before)}</div>
+                  <div className="text-gray-500">{t('upscale.before')}</div>
+                  <div className="font-medium text-gray-900">{fmtResolution(res.before)}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500 dark:text-gray-400">{t('upscale.after')}</div>
-                  <div className="font-medium text-gray-900 dark:text-white">{fmtResolution(res.after)}</div>
+                  <div className="text-gray-500">{t('upscale.after')}</div>
+                  <div className="font-medium text-gray-900">{fmtResolution(res.after)}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500 dark:text-gray-400">{t('upscale.elapsed')}</div>
-                  <div className="font-medium text-gray-900 dark:text-white">
+                  <div className="text-gray-500">{t('upscale.elapsed')}</div>
+                  <div className="font-medium text-gray-900">
                     {res.elapsed_sec != null ? `${res.elapsed_sec}s` : '—'}
                   </div>
                 </div>
                 <div>
-                  <div className="text-gray-500 dark:text-gray-400">{t('upscale.resolution')}</div>
-                  <div className="font-medium text-gray-900 dark:text-white">
+                  <div className="text-gray-500">{t('upscale.resolution')}</div>
+                  <div className="font-medium text-gray-900">
                     {res.after?.size_mb != null ? `${res.after.size_mb} MB` : '—'}
                   </div>
                 </div>
               </div>
 
               {/* 音轨保留情况：无声超分是这里最容易踩的坑 */}
-              <p className={`text-xs ${res.after?.has_audio ? 'text-green-600 dark:text-green-400' : 'text-amber-600 dark:text-amber-400'}`}>
+              <p className={`text-xs ${res.after?.has_audio ? 'text-green-600' : 'text-amber-600'}`}>
                 {res.after?.has_audio ? t('upscale.audioKept') : t('upscale.audioLost')}
               </p>
 
@@ -1812,11 +1798,11 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
                   <div className="flex gap-2">
                     <a
                       href={downloadUrl(res.output_url) || res.output_url}
-                      className="inline-flex items-center px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                      className="inline-flex items-center px-3 py-1.5 text-sm rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
                     >
                       {t('common.download')}
                     </a>
-                    <span className="text-xs text-gray-500 dark:text-gray-400 self-center">
+                    <span className="text-xs text-gray-500 self-center">
                       {t('upscale.confirmClose')}
                     </span>
                   </div>
@@ -1829,19 +1815,19 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
 
       {/* 已生成的超分产物 */}
       {artifacts.length > 0 && (
-        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-          <h4 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">
+        <div className="bg-white rounded-lg border border-gray-200 p-4">
+          <h4 className="text-sm font-semibold text-gray-900 mb-3">
             {t('upscale.artifacts')}（{artifacts.length}）
           </h4>
           <div className="space-y-2">
             {artifacts.map((a) => (
               <div
                 key={a.name}
-                className="flex items-center justify-between gap-3 py-2 border-b border-gray-100 dark:border-gray-700 last:border-0"
+                className="flex items-center justify-between gap-3 py-2 border-b border-gray-100 last:border-0"
               >
                 <div className="min-w-0">
-                  <p className="text-sm text-gray-900 dark:text-white truncate">{a.name}</p>
-                  <p className="text-xs text-gray-500 dark:text-gray-400">{a.mtime} · {a.size_mb} MB</p>
+                  <p className="text-sm text-gray-900 truncate">{a.name}</p>
+                  <p className="text-xs text-gray-500">{a.mtime} · {a.size_mb} MB</p>
                 </div>
                 <div className="flex gap-2 shrink-0">
                   <Button
@@ -1854,7 +1840,7 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
                   {downloadUrl(a.url) && (
                     <a
                       href={downloadUrl(a.url)}
-                      className="inline-flex items-center px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                      className="inline-flex items-center px-3 py-1.5 text-sm rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
                     >
                       {t('common.download')}
                     </a>
@@ -1950,7 +1936,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
         return;
       }
       setRun({ steps: [], status: 'running' });
-      const deadline = Date.now() + 35 * 60 * 1000;   // 兜底，避免异常时永久轮询
+      const deadline = Date.now() + 35 * 60 * 1000; // 兜底，避免异常时永久轮询
       for (;;) {
         await new Promise(r => setTimeout(r, 1200));
         const job = await agentApi.job(started.job_id);
@@ -1978,18 +1964,18 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
     <aside
       // h-[calc(100vh-7rem)] = 视口高 −（顶栏 ~63px + main 上下 padding 48px），
       // 让面板与左列内容等高、上下贯通；sticky 使其随页面滚动保持停靠。
-      className="w-[340px] shrink-0 flex flex-col rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 overflow-hidden sticky top-0 h-[calc(100vh-7rem)] min-h-[420px]"
+      className="w-[340px] shrink-0 flex flex-col rounded-xl border border-gray-200 bg-white overflow-hidden sticky top-0 h-[calc(100vh-7rem)] min-h-[420px]"
     >
       {/* 头部：与工作台其他面板一致的白底 + 灰边 + indigo 强调 */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700 shrink-0">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
-          <span className="w-7 h-7 rounded-lg bg-indigo-50 dark:bg-indigo-500/15 flex items-center justify-center text-sm shrink-0">
+          <span className="w-7 h-7 rounded-lg bg-indigo-50 flex items-center justify-center text-sm shrink-0">
             💬
           </span>
           <div className="min-w-0">
-            <h3 className="font-semibold text-gray-900 dark:text-white leading-tight">AI总控</h3>
+            <h3 className="font-semibold text-gray-900 leading-tight">AI总控</h3>
             <div className="flex items-center gap-1.5 mt-0.5">
-              <p className="text-[11px] text-gray-500 dark:text-gray-400 leading-tight">
+              <p className="text-[11px] text-gray-500 leading-tight">
                 {autoMode ? `自主执行 · ${toolCount || '…'} 个功能` : '仅对话'}
               </p>
               <button
@@ -1997,8 +1983,8 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
                 title={autoMode ? '切回纯聊天（不执行动作）' : '切到自主执行（总控自己干活）'}
                 className={`text-[10px] leading-none px-1.5 py-0.5 rounded border transition-colors ${
                   autoMode
-                    ? 'border-indigo-300 text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-500/15'
-                    : 'border-gray-300 dark:border-gray-600 text-gray-500 dark:text-gray-400'
+                    ? 'border-indigo-300 text-indigo-600 bg-indigo-50'
+                    : 'border-gray-300 text-gray-500'
                 }`}
               >
                 {autoMode ? '自主' : '聊天'}
@@ -2013,8 +1999,8 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
               title={killOn ? '解除急停' : '急停：立即中止总控的一切动作'}
               className={`p-1.5 rounded-lg transition-colors ${
                 killOn
-                  ? 'text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-500/15'
-                  : 'text-gray-500 dark:text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-500/15'
+                  ? 'text-red-600 bg-red-50'
+                  : 'text-gray-500 hover:text-red-600 hover:bg-red-50'
               }`}
             >
               <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
@@ -2025,7 +2011,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
           <button
             onClick={loadHistory}
             title="刷新对话"
-            className="p-1.5 rounded-lg text-gray-500 dark:text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-500/15 transition-colors"
+            className="p-1.5 rounded-lg text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -2035,7 +2021,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
           <button
             onClick={onClose}
             title="收起面板"
-            className="p-1.5 rounded-lg text-gray-500 dark:text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-500/15 transition-colors"
+            className="p-1.5 rounded-lg text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
@@ -2045,7 +2031,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
       </div>
 
       {error && (
-        <div className="mx-3 mt-3 p-2 bg-red-500/10 border border-red-500/30 rounded-lg text-red-500 dark:text-red-400 text-xs shrink-0">
+        <div className="mx-3 mt-3 p-2 bg-red-500/10 border border-red-500/30 rounded-lg text-red-500 text-xs shrink-0">
           {error}
         </div>
       )}
@@ -2053,16 +2039,16 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
       {/* 消息区：浅色底以区别于面板头部/输入区，形成「对话」区域感。
           注意：空态与消息列表要二选一渲染 —— 若把滚动哨兵 <div> 和 h-full 的空态
           放在同一个 space-y-3 容器里，哨兵会额外吃到 12px margin 而撑出滚动条。 */}
-      <div className="flex-1 min-h-0 overflow-y-auto bg-gray-50 dark:bg-gray-900/40">
+      <div className="flex-1 min-h-0 overflow-y-auto bg-gray-50">
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center px-4">
-            <div className="w-11 h-11 rounded-xl bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 flex items-center justify-center text-lg mb-3">
+            <div className="w-11 h-11 rounded-xl bg-white border border-gray-200 flex items-center justify-center text-lg mb-3">
               💬
             </div>
-            <p className="text-sm text-gray-600 dark:text-gray-300">
+            <p className="text-sm text-gray-600">
               {autoMode ? '说一句话，总控自己决定并执行' : '和总控聊聊创作想法'}
             </p>
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 mb-4">
+            <p className="text-xs text-gray-500 mt-1 mb-4">
               {autoMode ? '无需确认，它会直接动手；点右上角方块可随时急停' : '当前只聊天，不会改动任何产物'}
             </p>
             <div className="w-full space-y-1.5">
@@ -2073,7 +2059,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
                 <button
                   key={ex}
                   onClick={() => setInput(ex)}
-                  className="w-full text-left text-xs px-3 py-2 rounded-lg bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-500 dark:text-gray-400 hover:border-indigo-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
+                  className="w-full text-left text-xs px-3 py-2 rounded-lg bg-white border border-gray-200 text-gray-500 hover:border-indigo-400 hover:text-indigo-600 transition-colors"
                 >
                   {ex}
                 </button>
@@ -2088,7 +2074,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
                 className={`px-3 py-2 rounded-lg text-sm ${
                   msg.role === 'user'
                     ? 'bg-indigo-600 text-white ml-6 rounded-br-sm'
-                    : 'bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 mr-6 rounded-bl-sm'
+                    : 'bg-white border border-gray-200 text-gray-700 mr-6 rounded-bl-sm'
                 }`}
               >
                 <p className="whitespace-pre-wrap break-words">{msg.content}</p>
@@ -2096,8 +2082,8 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
             ))}
             {/* 自主执行过程：把总控「自己调了哪些功能、成功没有」透明地摊开 */}
             {run && (
-              <div className="mr-6 px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 space-y-1.5">
-                <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+              <div className="mr-6 px-3 py-2 rounded-lg border border-gray-200 bg-white space-y-1.5">
+                <div className="flex items-center gap-2 text-xs text-gray-500">
                   {run.status === 'running' ? (
                     <span className="w-3 h-3 border-2 border-indigo-400/40 border-t-indigo-500 rounded-full animate-spin inline-block shrink-0" />
                   ) : (
@@ -2110,8 +2096,8 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
                     <span className={`shrink-0 ${s.blocked ? 'text-amber-500' : s.ok ? 'text-green-500' : 'text-red-500'}`}>
                       {s.blocked ? '⊘' : s.ok ? '✓' : '✕'}
                     </span>
-                    <span className="font-mono text-gray-500 dark:text-gray-400 shrink-0">{s.tool}</span>
-                    <span className="text-gray-600 dark:text-gray-300 break-all">
+                    <span className="font-mono text-gray-500 shrink-0">{s.tool}</span>
+                    <span className="text-gray-600 break-all">
                       {s.summary}
                       {s.cached ? '（复用缓存）' : ''}
                     </span>
@@ -2120,7 +2106,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
               </div>
             )}
             {sending && !run && (
-              <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 mr-6 px-3 py-2 rounded-lg text-sm text-gray-500 dark:text-gray-400 flex items-center gap-2">
+              <div className="bg-white border border-gray-200 mr-6 px-3 py-2 rounded-lg text-sm text-gray-500 flex items-center gap-2">
                 <span className="w-3 h-3 border-2 border-indigo-400/40 border-t-indigo-500 rounded-full animate-spin inline-block" />
                 思考中...
               </div>
@@ -2131,7 +2117,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
       </div>
 
       {/* 输入区 */}
-      <div className="p-3 border-t border-gray-200 dark:border-gray-700 shrink-0 bg-white dark:bg-gray-800">
+      <div className="p-3 border-t border-gray-200 shrink-0 bg-white">
         <div className="flex gap-2">
           <input
             type="text"
@@ -2139,7 +2125,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') sendMessage(); }}
             placeholder="输入消息..."
-            className="flex-1 min-w-0 px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 outline-none transition-colors"
+            className="flex-1 min-w-0 px-3 py-2 text-sm rounded-lg border border-gray-200 bg-white text-gray-900 placeholder-gray-400 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 outline-none transition-colors"
           />
           <button
             onClick={sendMessage}

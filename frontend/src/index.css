@@ -2,12 +2,98 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ==========================================================================
+   Design Token 层（唯一真源）
+   --------------------------------------------------------------------------
+   本次改造的目标不是「换个更好看的皮肤」，而是**收敛为一套设计语言**：
+   纯白卡片承载 + 浅灰画布分层 + 深色实心主按钮 + 青蓝强调色。
+
+   约束（改动本文件前请先读）：
+   1. 组件层**禁止**再写 hex / rgba 字面量，一律引用下面的 token 或
+      tailwind.config.js 里映射出的语义色（canvas / surface / line / ink /
+      brand / accent / success / warning / danger / info / state）。
+   2. ⚠️ 所有色值 token 一律存 **RGB 三元组**（`79 70 229`），不存 hex。
+      原因是 Tailwind v3 的透明度修饰符（`bg-brand/10`、`ring-brand/40`）
+      靠 `<alpha-value>` 占位符生成 `rgb(var(--x) / .1)`；若 token 存成
+      `#4f46e5` 这类 hex，`bg-brand/10` 会直接产出无效 CSS 而静默失效。
+      在 CSS 里直接使用时请写 `rgb(var(--brand))`。
+   3. -subtle = 徽标 / 提示条浅底；-strong = 同色系深字（白底上满足 WCAG AA
+      4.5:1）。⚠️ 不要拿 --success 这类主色直接当文字色：白底上仅 ~2.5:1。
+   4. 深色主题此前 619 处 `dark:` 类全部不可达（`.dark` 从未被注入），
+      已按方案整体移除；如需再上深色，请走 token 覆盖而非散落变体类。
+   ========================================================================== */
+
 :root {
+  /* ---- 承载与分层 ---- */
+  --bg-canvas: 247 248 250;     /* #F7F8FA 页面画布底 */
+  --bg-surface: 255 255 255;    /* #FFFFFF 卡片 / 面板 */
+  --bg-surface-2: 241 245 249;  /* #F1F5F9 次级区块、表头、代码块 */
+
+  /* ---- 描边 ---- */
+  --border: 226 232 240;        /* #E2E8F0 常规描边 */
+  --border-strong: 203 213 225; /* #CBD5E1 强调描边 / 悬停描边 */
+
+  /* ---- 文字 ---- */
+  --text-primary: 15 23 42;     /* #0F172A 标题与正文 */
+  --text-secondary: 71 85 105;  /* #475569 说明文字 */
+  --text-tertiary: 148 163 184; /* #94A3B8 占位、禁用 */
+
+  /* ---- 品牌 / 强调 / 主动作 ---- */
+  --brand: 79 70 229;           /* #4F46E5 */
+  --brand-hover: 67 56 202;     /* #4338CA */
+  --brand-subtle: 238 242 255;  /* #EEF2FF */
+  --accent: 6 182 212;          /* #06B6D4 */
+  --accent-subtle: 236 254 255; /* #ECFEFF */
+  --action: 15 23 42;           /* #0F172A 主按钮实心深色底 */
+
+  /* ---- 通用语义色 ---- */
+  --success: 16 185 129;
+  --success-subtle: 236 253 245;
+  --success-strong: 4 120 87;
+  --warning: 245 158 11;
+  --warning-subtle: 255 251 235;
+  --warning-strong: 180 83 9;
+  --danger: 239 68 68;
+  --danger-subtle: 254 242 242;
+  --danger-strong: 185 28 28;
+  --info: 59 130 246;
+  --info-subtle: 239 246 255;
+  --info-strong: 29 78 216;
+
+  /* ---- 生产状态语义色（本项目专用） ---- */
+  --state-pending: 148 163 184;
+  --state-pending-subtle: 241 245 249;
+  --state-pending-strong: 71 85 105;
+  --state-running: 6 182 212;
+  --state-running-subtle: 236 254 255;
+  --state-running-strong: 14 116 144;
+  --state-done: 16 185 129;
+  --state-done-subtle: 236 253 245;
+  --state-done-strong: 4 120 87;
+  --state-failed: 239 68 68;
+  --state-failed-subtle: 254 242 242;
+  --state-failed-strong: 185 28 28;
+  --state-skipped: 161 161 170;
+  --state-skipped-subtle: 244 244 245;
+  --state-skipped-strong: 82 82 91;
+  --state-attention: 245 158 11;
+  --state-attention-subtle: 255 251 235;
+  --state-attention-strong: 180 83 9;
+
+  /* ---- 层级规范（收敛自原先 40/50/100/200 四档乱序） ---- */
+  --z-sticky: 10;
+  --z-dropdown: 20;
+  --z-drawer: 30;
+  --z-modal: 40;
+  --z-toast: 50;
+  --z-preview: 60;
+
+  /* ---- 基础排版 ---- */
   font-family: 'PingFang SC', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  line-height: 1.5;
+  line-height: 1.6;
   font-weight: 400;
-  color: #1f2937;
-  background-color: #f0f4ff;
+  color: rgb(var(--text-primary));
+  background-color: rgb(var(--bg-canvas));
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -21,23 +107,33 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  background-attachment: fixed;
+  /* 原为 #667eea → #764ba2 的紫蓝渐变（第二套设计语言），现统一为画布底色 */
+  background: rgb(var(--bg-canvas));
 }
 
 #root {
   height: 100vh;
 }
 
-.dark {
-  color-scheme: dark;
+/* ==========================================================================
+   键盘焦点兜底
+   --------------------------------------------------------------------------
+   项目里有 69 处原生 button/input/select/textarea 绕过了 ui 组件，
+   逐个补 focus 样式不现实。这里在 base 层给所有可交互元素统一兜底：
+   鼠标点击不出现（:focus-visible 语义），键盘 Tab 必然可见。
+   ui 组件内部若已有 ring 样式会自然覆盖，不会叠加成双环。
+   ========================================================================== */
+@layer base {
+  :focus-visible {
+    outline: 2px solid rgb(var(--brand));
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
 }
 
-.dark :root {
-  color: #e2e8f0;
-  background: linear-gradient(135deg, #0f0c29 0%, #1a1a3e 50%, #0f0c29 100%);
-}
-
+/* ==========================================================================
+   滚动条
+   ========================================================================== */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -48,19 +144,21 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(99, 102, 241, 0.4);
+  background: rgb(var(--brand) / 0.35);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(99, 102, 241, 0.6);
+  background: rgb(var(--brand) / 0.55);
 }
 
-* {
-  transition-property: background-color, border-color, box-shadow, transform;
-  transition-duration: 200ms;
-  transition-timing-function: ease;
-}
+/* ==========================================================================
+   动效
+   --------------------------------------------------------------------------
+   ⚠️ 原先对 `*` 全局施加 200ms 过渡。这会拖累长列表与大图（每次重排都要
+   给成百上千个元素跑过渡），现已移除；需要过渡的组件请自己加
+   `transition-<property>` 工具类（默认时长已在 tailwind 里改为 160ms）。
+   ========================================================================== */
 
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(12px); }
@@ -68,14 +166,8 @@ body {
 }
 
 @keyframes pulse-glow {
-  0%, 100% { box-shadow: 0 0 5px rgba(99, 102, 241, 0.3); }
-  50% { box-shadow: 0 0 20px rgba(99, 102, 241, 0.6), 0 0 40px rgba(99, 102, 241, 0.3); }
-}
-
-@keyframes gradient-shift {
-  0% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
+  0%, 100% { box-shadow: 0 0 5px rgb(var(--brand) / 0.3); }
+  50% { box-shadow: 0 0 20px rgb(var(--brand) / 0.6), 0 0 40px rgb(var(--brand) / 0.3); }
 }
 
 /* ⚠️ 必须用 animation-fill-mode: backwards，不能用 both / forwards。
@@ -104,6 +196,16 @@ body {
   to { opacity: 1; transform: none; }
 }
 
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@keyframes skeleton {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
 .animate-modal-in {
   animation: modalIn 0.18s cubic-bezier(0.4, 0, 0.2, 1) backwards;
 }
@@ -116,197 +218,33 @@ body {
   animation: toastIn 0.22s cubic-bezier(0.4, 0, 0.2, 1) backwards;
 }
 
+/* 状态徽标「进行中」的脉冲圆点 */
+.animate-pulse-dot {
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+/* 骨架屏 */
+.animate-skeleton {
+  animation: skeleton 1.4s ease-in-out infinite;
+}
+
 /* 尊重系统「减少动态效果」设置：前庭失调用户对位移/缩放动画敏感 */
 @media (prefers-reduced-motion: reduce) {
   .fade-in,
   .animate-modal-in,
   .animate-modal-backdrop,
-  .animate-toast-in {
+  .animate-toast-in,
+  .animate-pulse-dot,
+  .animate-skeleton {
     animation: none;
   }
 }
 
-.glow-border {
-  box-shadow: 0 0 15px rgba(99, 102, 241, 0.2), inset 0 0 15px rgba(99, 102, 241, 0.05);
-  border: 1px solid rgba(99, 102, 241, 0.3);
-}
-
-.gradient-text {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
-  background-size: 200% auto;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  animation: gradient-shift 3s ease infinite;
-}
-
-.card-tech {
-  background: rgba(255, 255, 255, 0.85);
-  backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  box-shadow: 0 8px 32px rgba(31, 38, 135, 0.1);
-}
-
-.dark .card-tech {
-  background: rgba(15, 23, 42, 0.7);
-  border: 1px solid rgba(99, 102, 241, 0.2);
-  box-shadow: 0 8px 32px rgba(99, 102, 241, 0.15);
-}
-
-.btn-glow {
-  position: relative;
-  overflow: hidden;
-  transition: all 0.3s ease;
-}
-
-.btn-glow::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: -100%;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
-  transition: left 0.5s ease;
-}
-
-.btn-glow:hover::before {
-  left: 100%;
-}
-
-.input-tech {
-  background: rgba(255, 255, 255, 0.7);
-  border: 1px solid rgba(99, 102, 241, 0.3);
-  transition: all 0.3s ease;
-}
-
-.input-tech:focus {
-  border-color: #6366f1;
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
-  background: rgba(255, 255, 255, 0.95);
-}
-
-.dark .input-tech {
-  background: rgba(15, 23, 42, 0.6);
-  border-color: rgba(99, 102, 241, 0.4);
-}
-
-.dark .input-tech:focus {
-  background: rgba(15, 23, 42, 0.9);
-}
-
-/* Tech grid background */
-.bg-tech-grid {
-  background-image:
-    linear-gradient(rgba(99, 102, 241, 0.05) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(99, 102, 241, 0.05) 1px, transparent 1px);
-  background-size: 50px 50px;
-}
-
-.dark .bg-tech-grid {
-  background-image:
-    linear-gradient(rgba(99, 102, 241, 0.1) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(99, 102, 241, 0.1) 1px, transparent 1px);
-}
-
-/* Scanline effect for dark mode */
-.dark .scanlines::after {
-  content: '';
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: repeating-linear-gradient(
-    0deg,
-    transparent,
-    transparent 2px,
-    rgba(99, 102, 241, 0.03) 2px,
-    rgba(99, 102, 241, 0.03) 4px
-  );
-  pointer-events: none;
-  z-index: 9999;
-}
-
 /* ==========================================================================
-   补齐组件类：card-glass / input-field / btn-primary
-   --------------------------------------------------------------------------
-   这三个类在 AIVaultPage.tsx 与 ExportPage.tsx 中被引用，但从未在任何 CSS 中
-   定义过，导致两页的卡片、输入框、按钮全部退化为浏览器默认样式：
-     - 输入框只有 168px 宽（浏览器对 <input> 的默认宽度），文字被截断
-     - 卡片没有底色/圆角/阴影，页面看起来「没有卡片」
-     - 按钮没有背景色，只剩一个 emoji + 文字
-   这里按既有的 card-tech / input-tech / btn-glow 的设计语言补齐。
-   放在 @layer components 中，保证 Tailwind 工具类（w-48 / flex-1 等）仍可覆盖。
+   说明：以下旧装饰类已随设计体系收敛一并删除（原先均为零引用或属第二套语言）
+     card-tech / btn-glow / input-tech / bg-tech-grid / gradient-text /
+     glow-border / scanlines  —— 七个零引用死类
+     card-glass / input-field / btn-primary —— 仅 AIVaultPage 引用的补丁类，
+       已改为共享 ui 组件，定义随之删除
+   如需复用其中某个效果，请先确认它是否真的被引用，避免再次堆死代码。
    ========================================================================== */
-@layer components {
-  .card-glass {
-    background: rgba(255, 255, 255, 0.85);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.3);
-    border-radius: 16px;
-    box-shadow: 0 8px 32px rgba(31, 38, 135, 0.1);
-  }
-
-  .dark .card-glass {
-    background: rgba(15, 23, 42, 0.7);
-    border-color: rgba(99, 102, 241, 0.2);
-    box-shadow: 0 8px 32px rgba(99, 102, 241, 0.15);
-  }
-
-  .input-field {
-    display: block;
-    width: 100%;
-    padding: 0.5rem 0.75rem;
-    border-radius: 8px;
-    background: rgba(255, 255, 255, 0.7);
-    border: 1px solid rgba(99, 102, 241, 0.3);
-    color: #1f2937;
-    outline: none;
-  }
-
-  .input-field:focus {
-    border-color: #6366f1;
-    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
-    background: rgba(255, 255, 255, 0.95);
-  }
-
-  .input-field:disabled,
-  .input-field[readonly] {
-    cursor: not-allowed;
-  }
-
-  .dark .input-field {
-    background: rgba(15, 23, 42, 0.6);
-    border-color: rgba(99, 102, 241, 0.4);
-    color: #e2e8f0;
-  }
-
-  .dark .input-field:focus {
-    background: rgba(15, 23, 42, 0.9);
-  }
-
-  .btn-primary {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.375rem;
-    background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
-    color: #ffffff;
-    border: none;
-    box-shadow: 0 4px 14px rgba(99, 102, 241, 0.35);
-    cursor: pointer;
-  }
-
-  .btn-primary:hover:not(:disabled) {
-    background: linear-gradient(135deg, #4f46e5 0%, #4338ca 100%);
-    box-shadow: 0 6px 18px rgba(99, 102, 241, 0.45);
-  }
-
-  .btn-primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-    box-shadow: none;
-  }
-}

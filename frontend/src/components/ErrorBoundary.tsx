@@ -33,21 +33,21 @@ export class ErrorBoundary extends Component<Props, State> {
       }
 
       return (
-        <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-950">
-          <div className="text-center p-8 bg-white dark:bg-gray-900 rounded-lg shadow-lg max-w-md mx-4">
+        <div className="min-h-screen flex items-center justify-center bg-gray-50">
+          <div className="text-center p-8 bg-white rounded-lg shadow-lg max-w-md mx-4">
             <div className="text-6xl mb-4">⚠️</div>
-            <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-2">
+            <h2 className="text-xl font-bold text-gray-900 mb-2">
               页面出错了
             </h2>
-            <p className="text-gray-600 dark:text-gray-400 mb-4">
+            <p className="text-gray-600 mb-4">
               发生了意外错误，请尝试刷新页面
             </p>
             {import.meta.env.DEV && this.state.error && (
-              <details className="text-left text-sm text-gray-500 dark:text-gray-400 mb-4">
-                <summary className="cursor-pointer hover:text-gray-700 dark:hover:text-gray-300">
+              <details className="text-left text-sm text-gray-500 mb-4">
+                <summary className="cursor-pointer hover:text-gray-700">
                   错误详情
                 </summary>
-                <pre className="mt-2 p-3 bg-gray-100 dark:bg-gray-800 rounded overflow-auto text-xs">
+                <pre className="mt-2 p-3 bg-gray-100 rounded overflow-auto text-xs">
                   {this.state.error.toString()}
                 </pre>
               </details>
@@ -64,7 +64,7 @@ export class ErrorBoundary extends Component<Props, State> {
                   window.location.hash = '#/';
                   window.location.reload();
                 }}
-                className="px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
+                className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
               >
                 返回首页
               </button>

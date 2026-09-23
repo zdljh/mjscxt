@@ -58,22 +58,22 @@ const DEFAULT_DURATION: Record<ToastType, number> = {
 
 const STYLES: Record<ToastType, { wrap: string; icon: string; glyph: string }> = {
   success: {
-    wrap: 'border-green-200 bg-green-50 text-green-900 dark:border-green-800 dark:bg-green-950 dark:text-green-100',
+    wrap: 'border-green-200 bg-green-50 text-green-900',
     icon: 'bg-green-500',
     glyph: 'M5 13l4 4L19 7',
   },
   error: {
-    wrap: 'border-red-200 bg-red-50 text-red-900 dark:border-red-800 dark:bg-red-950 dark:text-red-100',
+    wrap: 'border-red-200 bg-red-50 text-red-900',
     icon: 'bg-red-500',
     glyph: 'M6 18L18 6M6 6l12 12',
   },
   warning: {
-    wrap: 'border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100',
+    wrap: 'border-amber-200 bg-amber-50 text-amber-900',
     icon: 'bg-amber-500',
     glyph: 'M12 9v4m0 4h.01M12 3l9 16H3l9-16z',
   },
   info: {
-    wrap: 'border-blue-200 bg-blue-50 text-blue-900 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-100',
+    wrap: 'border-blue-200 bg-blue-50 text-blue-900',
     icon: 'bg-blue-500',
     glyph: 'M12 8h.01M11 12h1v5h1',
   },

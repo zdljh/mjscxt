@@ -106,21 +106,21 @@ export function GridPage({ projectKey }: { projectKey?: string } = {}) {
   return (
     <div className="space-y-6">
       <div>
-        <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{t('nineGrid.title')}</h3>
-        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">{t('nineGrid.desc')}</p>
+        <h3 className="text-lg font-semibold text-gray-900">{t('nineGrid.title')}</h3>
+        <p className="text-sm text-gray-500 mt-1">{t('nineGrid.desc')}</p>
       </div>
 
       {/* Controls */}
-      <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 space-y-4">
+      <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-4">
         {!projectKey && (
           <div className="flex items-center gap-4 flex-wrap">
-            <label className="text-sm font-medium text-gray-700 dark:text-gray-300 whitespace-nowrap">
+            <label className="text-sm font-medium text-gray-700 whitespace-nowrap">
               {t('export.selectProject')}
             </label>
             <select
               value={project}
               onChange={(e) => setProject(e.target.value)}
-              className="flex-1 min-w-[200px] px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-800 dark:text-white"
+              className="flex-1 min-w-[200px] px-3 py-2 border border-gray-300 rounded-lg"
             >
               {projectList.map((p) => (
                 <option key={p.dir_key} value={p.dir_key}>
@@ -132,7 +132,7 @@ export function GridPage({ projectKey }: { projectKey?: string } = {}) {
         )}
 
         <div>
-          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+          <label className="block text-sm font-medium text-gray-700 mb-1">
             {t('nineGrid.sceneDescription')}
           </label>
           <textarea
@@ -140,7 +140,7 @@ export function GridPage({ projectKey }: { projectKey?: string } = {}) {
             onChange={(e) => setSceneDesc(e.target.value)}
             placeholder={t('nineGrid.scenePlaceholder')}
             rows={3}
-            className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-800 dark:text-white resize-none"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg resize-none"
           />
         </div>
 
@@ -148,16 +148,16 @@ export function GridPage({ projectKey }: { projectKey?: string } = {}) {
           <Button onClick={handleGenerate} disabled={generating || !project || !sceneDesc.trim()}>
             {generating ? t('common.generating') : t('nineGrid.generate')}
           </Button>
-          {notice && <span className="text-sm text-green-600 dark:text-green-400">{notice}</span>}
+          {notice && <span className="text-sm text-green-600">{notice}</span>}
           {error && <span className="text-sm text-red-500">{error}</span>}
         </div>
       </div>
 
       {/* Nine Grid */}
       {nineGrid ? (
-        <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6">
+        <div className="bg-white rounded-xl border border-gray-200 p-6">
           <div className="flex items-center justify-between mb-4">
-            <h4 className="text-sm font-medium text-gray-700 dark:text-gray-300">
+            <h4 className="text-sm font-medium text-gray-700">
               {t('nineGrid.resultTitle')} · {shots.length}
             </h4>
             {nineGrid.grid_id && (
@@ -177,24 +177,24 @@ export function GridPage({ projectKey }: { projectKey?: string } = {}) {
                     shot ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'
                   } ${
                     isSelected
-                      ? 'border-blue-500 ring-2 ring-blue-300 bg-blue-50/50 dark:bg-blue-900/10'
-                      : 'border-gray-200 dark:border-gray-700 hover:border-blue-300'
+                      ? 'border-blue-500 ring-2 ring-blue-300 bg-blue-50/50'
+                      : 'border-gray-200 hover:border-blue-300'
                   }`}
                 >
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-xs font-semibold text-gray-400">#{i + 1}</span>
                     {(isSelected || isPersisted) && (
-                      <span className="text-xs text-blue-600 dark:text-blue-400 font-medium">
+                      <span className="text-xs text-blue-600 font-medium">
                         {isPersisted ? '✓ 已选定' : '✓'}
                       </span>
                     )}
                   </div>
                   {shot ? (
                     <div className="space-y-1">
-                      <p className="text-sm font-medium text-gray-900 dark:text-white">
+                      <p className="text-sm font-medium text-gray-900">
                         {shot.composition || `格 ${i + 1}`}
                       </p>
-                      <p className="text-xs text-gray-500 dark:text-gray-400">
+                      <p className="text-xs text-gray-500">
                         {[shot.camera_angle, shot.zoom_level ? `变焦 ${shot.zoom_level}` : '']
                           .filter(Boolean)
                           .join(' · ')}
@@ -221,9 +221,9 @@ export function GridPage({ projectKey }: { projectKey?: string } = {}) {
         </div>
       ) : (
         !generating && (
-          <div className="bg-white dark:bg-gray-800 rounded-xl border border-dashed border-gray-300 dark:border-gray-600 p-8 text-center">
+          <div className="bg-white rounded-xl border border-dashed border-gray-300 p-8 text-center">
             <div className="text-4xl mb-3">🎨</div>
-            <p className="text-gray-500 dark:text-gray-400 text-sm">{t('nineGrid.info')}</p>
+            <p className="text-gray-500 text-sm">{t('nineGrid.info')}</p>
           </div>
         )
       )}

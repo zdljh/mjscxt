@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { useApp } from '@/context/AppContext';
 
 interface NavItem {
@@ -6,6 +6,10 @@ interface NavItem {
   icon: string;
   label: string;
 }
+
+/** 键盘焦点环：与 ui/index.tsx 的 FOCUS_RING 保持一致 */
+const FOCUS_RING =
+'focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas';
 
 // 侧边栏只放「全局」入口：
 // - 项目中心：项目列表 + 新建项目（上传小说已并入新建项目）
@@ -31,21 +35,16 @@ export function Sidebar({
   const { t } = useApp();
 
   return (
-    <aside className="relative flex flex-col transition-all duration-300 z-50"
-      style={{
-        width: collapsed ? '4rem' : '14rem',
-        background: 'linear-gradient(180deg, rgba(15,23,42,0.95) 0%, rgba(30,27,75,0.95) 100%)',
-        backdropFilter: 'blur(20px)',
-        borderRight: '1px solid rgba(99,102,234,0.3)',
-      }}
+    <aside className="relative z-sticky flex flex-col border-r border-line bg-surface transition-all duration-300"
+      style={{ width: collapsed ? '4rem' : '14rem' }}
     >
       {/* Toggle button */}
       <button
         onClick={onToggle}
-        className="m-2 p-2 rounded-lg transition-all duration-200 hover:bg-white/10 text-gray-400 hover:text-white"
-        style={{ alignSelf: 'flex-end' }}
+        aria-label={collapsed ? '展开侧边栏' : '收起侧边栏'}
+        className={`m-2 self-end rounded-lg p-2 text-ink-2 transition-all duration-200 hover:bg-surface-2 hover:text-ink-1 ${FOCUS_RING}`}
       >
-        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
         </svg>
       </button>
@@ -54,11 +53,10 @@ export function Sidebar({
       {!collapsed && (
         <div className="px-4 py-4 mb-2">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold text-sm"
-              style={{ background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' }}>
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand text-sm font-bold text-white">
               漫
             </div>
-            <span className="text-white font-semibold text-sm" style={{ background: 'linear-gradient(90deg, #667eea, #764ba2)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+            <span className="text-sm font-semibold text-ink-1">
               漫剧工坊
             </span>
           </div>
@@ -73,25 +71,22 @@ export function Sidebar({
             <button
               key={item.id}
               onClick={() => onNavigate(item.id)}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg mb-1 transition-all duration-200 group ${
+              aria-current={isActive ? 'page' : undefined}
+              className={`mb-1 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 transition-all duration-200 group ${
                 isActive
-                  ? 'text-white shadow-lg'
-                  : 'text-gray-400 hover:bg-white/5 hover:text-gray-200'
-              }`}
-              style={isActive
-                ? { background: 'linear-gradient(135deg, rgba(102,126,234,0.8) 0%, rgba(118,75,162,0.8) 100%)', boxShadow: '0 4px 15px rgba(102,126,234,0.4)' }
-                : {}
-              }
+                  ? 'bg-brand-subtle text-brand'
+                  : 'text-ink-2 hover:bg-surface-2 hover:text-ink-1'
+              } ${FOCUS_RING}`}
               title={collapsed ? t(item.label) : undefined}
             >
-              <span className="text-xl flex-shrink-0">{item.icon}</span>
+              <span className="flex-shrink-0 text-xl">{item.icon}</span>
               {!collapsed && (
-                <span className="text-sm font-medium whitespace-nowrap">
+                <span className="whitespace-nowrap text-sm font-medium">
                   {t(item.label)}
                 </span>
               )}
               {isActive && !collapsed && (
-                <div className="ml-auto w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+                <div className="ml-auto h-1.5 w-1.5 animate-pulse rounded-full bg-brand" />
               )}
             </button>
           );
@@ -99,9 +94,9 @@ export function Sidebar({
       </nav>
 
       {/* Footer */}
-      <div className="p-4 border-t border-white/10">
+      <div className="border-t border-line p-4">
         {!collapsed && (
-          <p className="text-xs text-gray-500 text-center">
+          <p className="text-center text-xs text-ink-3">
             v1.0.0 • AI Powered
           </p>
         )}

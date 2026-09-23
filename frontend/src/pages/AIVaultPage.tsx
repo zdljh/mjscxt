@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { aiConfigApi, watermarkApi } from '@/api/client';
-import { ConfirmDialog } from '@/components/ui';
+import { Badge, Button, Card, ConfirmDialog, Input, Loading, Select } from '@/components/ui';
+import { AlertTriangle, Brain, CheckCircle2, Network, Search, X } from '@/components/ui/icons';
+import type { IconProps } from '@/components/ui/icons';
 import type { AIConfigModule, AIConfigResponse, AITestResult } from '@/types';
 
 type ModuleKey = 'text' | 'qc' | 'chat';
@@ -35,39 +37,44 @@ interface SystemSettings {
   watermark_text: string;
 }
 
+/**
+* 模块卡片头部的图标底色 / 字色。
+* 原先是 `from-*-500 to-*-500` 渐变 —— 那是另一套设计语言，且与「卡片白底 +
+* 细描边」的观感冲突；这里统一走语义 token。
+*/
 const MODULE_CONFIG: Record<ModuleKey, {
-  icon: string;
+  icon: React.ComponentType<IconProps>;
   title: string;
   desc: string;
   placeholderUrl: string;
   placeholderModel: string;
   probe?: string;
-  color: string;
+  tone: string;
 }> = {
   text: {
-    icon: '📝',
+    icon: Brain,
     title: '文本分析模型（= LLM 引擎）',
     desc: '就是 LLM 引擎：小说转剧本、章节转剧本、提示词分析等纯文本任务都用它',
     placeholderUrl: 'https://api.deepseek.com/v1',
     placeholderModel: 'deepseek-chat',
-    color: 'from-blue-500 to-cyan-500',
+    tone: 'bg-brand-subtle text-brand',
   },
   qc: {
-    icon: '🔍',
+    icon: Search,
     title: '质检模型',
     desc: '负责分镜图片和视频的视觉质量检查（需支持图像输入）',
     placeholderUrl: 'https://api.openai.com/v1',
     placeholderModel: 'gpt-4o-mini',
     probe: 'vision',
-    color: 'from-purple-500 to-pink-500',
+    tone: 'bg-accent-subtle text-accent',
   },
   chat: {
-    icon: '💬',
+    icon: Network,
     title: '对话总控模型',
     desc: 'AI 创作总控：通过多轮对话确定漫剧风格、题材、画风等设定',
     placeholderUrl: 'https://api.deepseek.com/v1',
     placeholderModel: 'deepseek-chat',
-    color: 'from-emerald-500 to-teal-500',
+    tone: 'bg-success-subtle text-success-strong',
   },
 };
 
@@ -303,10 +310,7 @@ export function AIVaultPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-20">
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-12 h-12 border-4 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin" />
-          <p className="text-gray-500 dark:text-gray-400">加载配置中...</p>
-        </div>
+        <Loading label="加载配置中..." />
       </div>
     );
   }
@@ -316,16 +320,16 @@ export function AIVaultPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold text-gray-900 dark:text-white">AI 配置中心</h2>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+          <h2 className="text-2xl font-bold text-ink-1">AI 配置中心</h2>
+          <p className="text-sm text-ink-2 mt-1">
             配置各环节的 AI 模型接口与系统参数
           </p>
         </div>
         {message && (
           <div className={`px-4 py-2 rounded-lg text-sm ${
             message.type === 'success'
-              ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-              : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+              ? 'bg-success-subtle text-success-strong'
+              : 'bg-danger-subtle text-danger-strong'
           }`}>
             {message.text}
           </div>
@@ -333,9 +337,9 @@ export function AIVaultPage() {
       </div>
 
       {/* ===== 系统设置区 ===== */}
-      <div className="card-glass p-6 space-y-4">
-        <h3 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
-          <span className="text-xl">⚙️</span> 系统设置
+      <Card bodyClassName="p-6 space-y-4">
+        <h3 className="text-lg font-semibold text-ink-1 flex items-center gap-2">
+          系统设置
         </h3>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -344,64 +348,53 @@ export function AIVaultPage() {
               （各 ComfyUI 客户端都直接取模块级常量）。此前是个可编辑输入框，
               但保存后不生效——典型的「改了也没用」控件，故改为如实展示。 */}
           <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-              ComfyUI 地址
-            </label>
-            <input
-              type="text"
+            <Input
+              label="ComfyUI 地址"
               value={sysSettings.comfyui_url || '（未获取到）'}
-              readOnly
+              onChange={() => undefined}
               disabled
-              className="input-field font-mono text-sm opacity-70 cursor-not-allowed"
+              className="font-mono text-sm"
             />
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            <p className="text-xs text-ink-2 mt-1">
               由环境变量 <code className="font-mono">COMFYUI_URL</code> 决定，需修改环境变量后重启服务
             </p>
           </div>
         </div>
 
         {/* 水印设置 */}
-        <div className="border-t border-gray-200 dark:border-gray-700 pt-4 mt-4">
+        <div className="border-t border-line pt-4 mt-4">
           <div className="flex items-center gap-3 mb-3">
             <input
               type="checkbox"
               checked={sysSettings.watermark_enabled}
               onChange={e => updateSysField('watermark_enabled', e.target.checked)}
-              className="w-5 h-5 rounded border-gray-300"
+              className="w-5 h-5 rounded border-line-strong text-brand focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2"
             />
-            <span className="text-gray-700 dark:text-gray-300 font-medium">启用视频水印</span>
+            <span className="text-ink-2 font-medium">启用视频水印</span>
           </div>
           {sysSettings.watermark_enabled && (
             <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                水印文字
-              </label>
-              <input
-                type="text"
+              <Input
+                label="水印文字"
                 value={sysSettings.watermark_text}
-                onChange={e => updateSysField('watermark_text', e.target.value)}
+                onChange={v => updateSysField('watermark_text', v)}
                 placeholder="输入水印文字"
-                className="input-field text-sm"
+                className="text-sm"
               />
             </div>
           )}
         </div>
 
         <div className="flex justify-end pt-2">
-          <button
+          <Button
+          variant="brand"
             onClick={handleSysSave}
-            disabled={sysSaving}
-            className="btn-primary px-6 py-2 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+            loading={sysSaving}
           >
-            {sysSaving ? (
-              <span className="flex items-center gap-2">
-                <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin inline-block" />
-                保存中...
-              </span>
-            ) : '💾 保存水印设置'}
-          </button>
+            保存水印设置
+              </Button>
         </div>
-      </div>
+      </Card>
 
       {/* ===== AI 模块配置区 ===== */}
       <div className="grid grid-cols-1 gap-6">
@@ -412,39 +405,32 @@ export function AIVaultPage() {
           const result = testResult[moduleKey];
 
           return (
-            <div
-              key={moduleKey}
-              className="card-glass p-6 space-y-4"
-            >
+            <Card key={moduleKey} bodyClassName="p-6 space-y-4">
               {/* Card Header */}
               <div className="flex items-start justify-between">
                 <div className="flex items-center gap-3">
-                  <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${meta.color} flex items-center justify-center text-xl shadow-lg`}>
-                    {meta.icon}
+                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${meta.tone}`}>
+                    <meta.icon className="h-5 w-5" />
                   </div>
                   <div>
-                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                    <h3 className="text-lg font-semibold text-ink-1">
                       {meta.title}
                     </h3>
-                    <p className="text-xs text-gray-500 dark:text-gray-400">{meta.desc}</p>
+                    <p className="text-xs text-ink-2">{meta.desc}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                    isConfigured
-                      ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-                      : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
-                  }`}>
-                    {isConfigured ? '✓ 已配置' : '○ 未配置'}
-                  </span>
+                  <Badge variant={isConfigured ? 'success' : 'default'}>
+                    {isConfigured ? '已配置' : '未配置'}
+                      </Badge>
                   <button
+                  type="button"
                     onClick={() => handleClear(moduleKey)}
-                    className="p-2 text-gray-400 hover:text-red-500 transition-colors"
+                    className="rounded-md p-2 text-ink-3 transition-colors hover:bg-surface-2 hover:text-danger focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2"
                     title="清空配置"
+                    aria-label="清空配置"
                   >
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
+                    <X className="h-4 w-4" />
                   </button>
                 </div>
               </div>
@@ -452,65 +438,52 @@ export function AIVaultPage() {
               {/* Config Fields */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="md:col-span-2">
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                    Base URL
-                  </label>
-                  <input
-                    type="text"
+                  <Input
+                    label="Base URL"
                     value={state.base_url}
-                    onChange={e => updateField(moduleKey, 'base_url', e.target.value)}
+                    onChange={v => updateField(moduleKey, 'base_url', v)}
                     placeholder={meta.placeholderUrl}
-                    className="input-field font-mono text-sm"
+                    className="font-mono text-sm"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                    Model
-                  </label>
-                  <input
-                    type="text"
+                  <Input
+                    label="Model"
                     value={state.model}
-                    onChange={e => updateField(moduleKey, 'model', e.target.value)}
+                    onChange={v => updateField(moduleKey, 'model', v)}
                     placeholder={meta.placeholderModel}
-                    className="input-field font-mono text-sm"
+                    className="font-mono text-sm"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                    API Key
-                  </label>
-                  <input
+                  <Input
                     type="password"
+                    label="API Key"
                     value={state.api_key}
-                    onChange={e => updateField(moduleKey, 'api_key', e.target.value)}
+                    onChange={v => updateField(moduleKey, 'api_key', v)}
                     placeholder={state.has_api_key ? '••••••••' : 'sk-...'}
-                    className="input-field font-mono text-sm"
+                    className="font-mono text-sm"
                   />
                   {state.has_api_key && (
-                    <p className="text-xs text-gray-400 mt-1">密钥已保存，留空则保持原值</p>
+                    <p className="text-xs text-ink-3 mt-1">密钥已保存，留空则保持原值</p>
                   )}
                 </div>
                 {/* 思考档位：只对「思考不可关闭」的模型（如 GLM-5.3-Flash）有意义。
                     可关思考的模型（Qwen/vLLM 系）用 enable_thinking=false，不在这里调。 */}
                 <div className="md:col-span-2">
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                    思考档位（可选）
-                  </label>
-                  <select
+                  <Select
+                    label="思考档位（可选）"
                     value={state.reasoning_effort}
-                    onChange={e => updateField(moduleKey, 'reasoning_effort', e.target.value)}
-                    className="input-field text-sm"
-                  >
-                    {reOptions.map(opt => (
-                      <option key={opt || '__default__'} value={opt}>
-                        {REASONING_EFFORT_LABELS[opt] || opt}
-                      </option>
-                    ))}
-                  </select>
-                  <p className="text-xs text-gray-400 mt-1">
+                    onChange={v => updateField(moduleKey, 'reasoning_effort', v)}
+                    options={reOptions.map(opt => ({
+                  value: opt,
+                    label: REASONING_EFFORT_LABELS[opt] || opt,
+                      }))}
+                        />
+                      <p className="text-xs text-ink-3 mt-1">
                     仅「思考不可关闭」的模型需要设置（如 GLM-5.3-Flash，它没有关闭思考的开关，
                     只能调档）。留空 = 不注入该参数、由服务端取默认档；
-                    <span className="text-amber-600 dark:text-amber-400">
+                    <span className="text-warning-strong">
                       档位越高越贵（默认档通常是最贵的 max）
                     </span>
                     ，长 JSON 任务建议 low。
@@ -520,30 +493,22 @@ export function AIVaultPage() {
 
               {/* Action Buttons */}
               <div className="flex items-center gap-3 pt-2">
-                <button
+                <Button
+                variant="secondary"
                   onClick={() => handleTest(moduleKey)}
-                  disabled={testing === moduleKey || !state.base_url || !state.model}
-                  className="btn-secondary px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                  loading={testing === moduleKey}
+                  disabled={!state.base_url || !state.model}
                 >
-                  {testing === moduleKey ? (
-                    <span className="flex items-center gap-2">
-                      <span className="w-4 h-4 border-2 border-gray-400/30 border-t-gray-400 rounded-full animate-spin inline-block" />
-                      测试中...
-                    </span>
-                  ) : '🧪 测试连接'}
-                </button>
-                <button
+                  测试连接
+                    </Button>
+                      <Button
+                      variant="brand"
                   onClick={() => handleSave(moduleKey)}
-                  disabled={saving === moduleKey || !state.base_url || !state.model}
-                  className="btn-primary px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                  loading={saving === moduleKey}
+                  disabled={!state.base_url || !state.model}
                 >
-                  {saving === moduleKey ? (
-                    <span className="flex items-center gap-2">
-                      <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin inline-block" />
-                      保存中...
-                    </span>
-                  ) : '💾 保存配置'}
-                </button>
+                  保存配置
+                    </Button>
               </div>
 
               {/* Test Result */}
@@ -553,14 +518,15 @@ export function AIVaultPage() {
                 const partial = result.success && result.verdict !== 'ok';
                 const ms = result.latency_ms ?? result.response_time_ms;
                 const box = partial
-                  ? 'bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400'
+                  ? 'bg-warning-subtle text-warning-strong'
                   : result.success
-                    ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400'
-                    : 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400';
+                    ? 'bg-success-subtle text-success-strong'
+                    : 'bg-danger-subtle text-danger-strong';
+                    const ResultIcon = partial ? AlertTriangle : result.success ? CheckCircle2 : X;
                 return (
                   <div className={`p-3 rounded-lg text-sm ${box}`}>
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-lg">{partial ? '!' : result.success ? '✓' : '✗'}</span>
+                      <ResultIcon className="h-4 w-4 shrink-0" />
                       <span className="font-medium">
                         {partial ? '链路可达（未返回正文）' : result.success ? '测试成功' : '测试失败'}
                       </span>
@@ -591,15 +557,14 @@ export function AIVaultPage() {
                   </div>
                 );
               })()}
-            </div>
+            </Card>
           );
         })}
       </div>
 
       {/* Info Card */}
-      <div className="card-glass p-4">
-        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">💡 配置说明</h3>
-        <ul className="text-sm text-gray-500 dark:text-gray-400 space-y-1 list-disc list-inside">
+      <Card title="配置说明" bodyClassName="p-4">
+        <ul className="text-sm text-ink-2 space-y-1 list-disc list-inside">
           <li>三个 AI 模块完全独立：文本分析、质检、对话总控各有自己的接口配置</li>
           <li>「文本分析模型」就是 LLM 引擎（小说转剧本、提示词分析等纯文本任务都用它），无需另行配置</li>
           <li>质检模型需要支持图像输入（如 GPT-4o、Qwen-VL、GLM-4V）</li>
@@ -607,7 +572,7 @@ export function AIVaultPage() {
           <li>API Key 加密存储，不会在界面明文显示</li>
           <li>建议先点「测试连接」确认接口可用后再保存</li>
         </ul>
-      </div>
+      </Card>
 
       <ConfirmDialog
         isOpen={clearTarget !== null}
