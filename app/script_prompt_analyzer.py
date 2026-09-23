@@ -20,6 +20,7 @@ from dialogue_utils import format_line as _dlg_line
 from fs_atomic import atomic_write_json
 import h3_prompt_kit
 import style_kit
+import asset_prompt_kit
 
 logger = logging.getLogger(__name__)
 
@@ -298,6 +299,10 @@ def analyze_script(client, script: dict, mode: str = "all", shot_ids=None,
                                         extra_instruction=extra_instruction, progress_cb=progress_cb)
     if mode in ("assets", "all"):
         result["assets"] = analyze_asset_prompts(client, script, progress_cb=progress_cb)
+
+        # 分析器只拿 name/appearance/personality 就重写参考提示词，会把「黑发马尾」
+        # paraphrase 成「黑发垂肩」—— 这是漂移的第二来源，写完必须再收敛一次。
+        asset_prompt_kit.reconcile_script(script)
 
     meta = script.setdefault("metadata", {})
     meta["prompt_analysis"] = {

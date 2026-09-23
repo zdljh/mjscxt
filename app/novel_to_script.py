@@ -27,6 +27,7 @@ from dialogue_utils import dialogue_text as _dlg_text, normalize_lines as _dlg_l
 import fs_atomic
 import style_kit
 import h3_prompt_kit
+import asset_prompt_kit
 
 logger = logging.getLogger(__name__)
 
@@ -1338,6 +1339,12 @@ def convert_novel_to_script(client, novel_meta: dict, novel_text: str, style: st
     if not shots:
         raise LLMError("模型未返回有效分镜：" + ("；".join(warnings) or "未知错误"))
 
+    # 外形一致性收敛（2026-09-24）：资产**出图依据**是 reference_prompt_zh，而分镜
+    # 提示词 / 质检口径取 appearance —— 两者漂移会让「文字说黑寸头、参考图却是黑发高冠」
+    # 两条互斥指令同时生效（分镜是 cfg=1.0 的参考图编辑型 → 参考图压过文字），模型每次
+    # 随机倒向一边、质检必然抓到另一边 → 无限重试、整集跑不过。落盘前按 appearance 收敛。
+    asset_prompt_kit.reconcile_script({"characters": characters, "shots": shots})
+
     script = {
         "title": bible["title"],
         "theme": bible["theme"],
@@ -1673,6 +1680,12 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
     if not shots:
         raise LLMError("模型未返回有效分镜（每块均已自动提高 max_tokens，必要时二次切分）："
                        + ("；".join(warnings) or "未知错误"))
+
+    # 外形一致性收敛（2026-09-24）：资产**出图依据**是 reference_prompt_zh，而分镜
+    # 提示词 / 质检口径取 appearance —— 两者漂移会让「文字说黑寸头、参考图却是黑发高冠」
+    # 两条互斥指令同时生效（分镜是 cfg=1.0 的参考图编辑型 → 参考图压过文字），模型每次
+    # 随机倒向一边、质检必然抓到另一边 → 无限重试、整集跑不过。落盘前按 appearance 收敛。
+    asset_prompt_kit.reconcile_script({"characters": characters, "shots": shots})
 
     project_name = episode_project_name(novel_meta.get("name") or novel_title, episode_no)
     script = {

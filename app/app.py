@@ -2936,14 +2936,20 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                                    "derived_from": os.path.basename(base_dst),
                                    "derive_mode": "sheet_crop"})
                         saved_views.append(vk)
-                    # 仅在切分成功后才清理陈旧视角（失败时保留旧图，避免删了又没有新的）
-                    if _derived:
-                        try:
-                            sheet_split.prune_stale_views(
-                                asset_dir, keep=CHARACTER_SHEET_VIEWS,
-                                known=ASSET_VIEW_STEMS, logger=app.logger)
-                        except Exception as _pe:  # noqa: BLE001
-                            app.logger.warning("清理陈旧视角文件失败（不影响入库）：%s", _pe)
+                    # ⚠️ 切分**失败时也要清理**陈旧视角（2026-09-24 修正）。
+                    # 旧注释写的是「失败时保留旧图，避免删了又没有新的」，但那个顾虑不成立：
+                    # base.png 是本轮刚重画并通过质检的整图，下游 _first_existing_asset_image
+                    # 会按 _ASSET_IMG_PRIORITY（front > base）回落它 —— 一定「有新的」。
+                    # 而保留旧视角图的代价很大：旧图来自**上一轮**（可能是旧设定），却因优先级
+                    # 高于 base.png 被下游优先取走，于是「文字是新设定、参考图是旧设定」的互斥
+                    # 照旧存在（实测 逆天系统/赵天霸：重画后切分失败 → 旧发型图继续被用作参考，
+                    # 上游的外形收敛等于白做）。清掉后下游自动回落新整图。
+                    try:
+                        sheet_split.prune_stale_views(
+                            asset_dir, keep=CHARACTER_SHEET_VIEWS if _derived else (),
+                            known=ASSET_VIEW_STEMS, logger=app.logger)
+                    except Exception as _pe:  # noqa: BLE001
+                        app.logger.warning("清理陈旧视角文件失败（不影响入库）：%s", _pe)
                 else:
                     # 物品 / 场景：基础图即单主体图；清掉旧实现遗留的视角图，避免 UI 把陈旧的
                     # 「重渲染整图」继续当成一个视角展示。
