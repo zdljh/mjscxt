@@ -83,6 +83,12 @@ MIN_RERUN_INTERVAL = 45
 #: 托管轮询间隔（秒）：没有可做的活时休眠多久再扫一次
 IDLE_SLEEP = 20
 
+#: 单步骤停滞告警阈值（秒）：当前步骤的进度（message/percent）超过该时长无推进，
+#: 就在 status() 的 current 里上浮 stall_warning，让前端/总控能提示「卡在这一步多久了」。
+#: 这是报告 P1-5「生产无超时反馈」的补口：LLM 重试等场景会长时间停在同一 step，
+#: 用户此前只能看到「执行中」干等。阈值取 15 分钟（与报告建议的「单步骤超 N 分钟」一致）。
+STEP_STALL_WARN_SEC = 15 * 60
+
 #: 默认托管计划
 PLAN_DEFAULTS = {
     "enabled": False,              # 是否纳入托管
@@ -595,6 +601,9 @@ def _set_current(**kw) -> None:
     with _LOCK:
         cur = dict(_STATE.get("current") or {})
         cur.update(kw)
+        # 每次进度更新都刷新「最近推进时刻」（epoch 秒），供 status() 算停滞时长。
+        # 用 epoch 而非格式化字符串：status() 要做 now - 该值 的减法。
+        cur["step_updated_at"] = time.time()
         _STATE["current"] = cur
 
 
@@ -947,6 +956,26 @@ def status(project: str = "") -> dict:
             st["other_project_running"] = True
             # last_error 无项目归属，同样可能是别的项目的报错，一并藏起来
             st["last_error"] = ""
+    # P1-5 补口：基于「最近进度推进时刻」算停滞时长，超阈值上浮 stall_warning。
+    # LLM 重试/ComfyUI 排队等场景会长时间停在同一 step，用户此前只能看到「执行中」干等；
+    # 现在前端/总控能据此提示「当前步骤已运行多久、是否疑似卡住」。
+    _cur = st.get("current")
+    if isinstance(_cur, dict) and _cur:
+        try:
+            _upd = float(_cur.get("step_updated_at") or 0)
+        except (TypeError, ValueError):
+            _upd = 0.0
+        if _upd > 0:
+            _stall = max(0, int(time.time() - _upd))
+            _cur["step_stalled_sec"] = _stall
+            _cur["step_elapsed_sec"] = _stall  # 兼容旧字段语义（当前步骤已运行时长）
+            if _stall >= STEP_STALL_WARN_SEC:
+                _cur["stall_warning"] = (
+                    f"当前步骤（{_cur.get('step') or 'running'}）已运行 {_stall // 60} 分 "
+                    f"{_stall % 60} 秒仍未推进，可能卡在重试/排队，建议关注。")
+            else:
+                _cur["stall_warning"] = ""
+        st["current"] = _cur
     st.update({
         # 回显作用域：调用方（含 AI 总控）必须能一眼看出这份数字属于哪个项目，
         # 否则模型会拿历史对话里的项目名去「对号入座」，把 A 的数据说成 B 的。
