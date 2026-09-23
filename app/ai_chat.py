@@ -57,7 +57,11 @@ SETTING_FIELDS = [
     {"key": "era_world", "label": "世界观 / 时代背景", "hint": "故事发生的世界与年代", "options": ["古代架空", "现代都市", "近未来赛博", "末世废土", "仙侠三界"]},
     {"key": "tone", "label": "情绪基调", "hint": "情绪色彩", "options": ["热血", "温情", "紧张悬疑", "搞笑", "压抑", "明快"]},
     {"key": "audience", "label": "目标受众", "hint": "主要面向的人群", "options": ["男性向", "女性向", "全年龄", "青少年", "成年向"]},
-    {"key": "aspect_ratio", "label": "画面比例", "hint": "成片画幅", "options": ["9:16 竖屏", "16:9 横屏", "1:1 方形"]},
+    # 与前端 ProjectsPage.ASPECT_PRESETS 的 value 字面值保持一致（两入口同口径，
+    # style_kit.aspect_ratio 按显式 "a:b" 解析，后缀词「竖屏/横幅/超宽」仅供人读）。
+    {"key": "aspect_ratio", "label": "画面比例", "hint": "成片画幅",
+     "options": ["1:1 方形", "2:3 竖幅", "3:2 横幅", "3:4 竖幅", "4:3 横幅",
+                 "9:16 竖屏", "16:9 横屏", "21:9 超宽"]},
     {"key": "episode_duration", "label": "单集时长", "hint": "每集大致时长", "options": ["60 秒", "90 秒", "2 分钟", "3 分钟"]},
     {"key": "shots_per_episode", "label": "单集镜头数", "hint": "每集分镜数量", "options": ["8 个", "10 个", "12 个", "16 个"]},
     {"key": "pacing", "label": "分镜节奏", "hint": "镜头切换与叙事节奏", "options": ["快节奏卡点", "平缓叙事", "张弛有度"]},

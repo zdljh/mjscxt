@@ -38,10 +38,17 @@ const STYLE_PRESETS: { value: string; label: string }[] = [
 // 新建项目可选画面比例（与 ai_chat.SETTING_FIELDS 里 aspect_ratio 的 options 对齐）。
 // value 即写入 config.aspect_ratio 的字面值，沿用 \u 转义（本文件零 CJK 约定）。
 // 视频 / 分镜画幅由 style 串解析，这里落一个独立字段供生成链路与确认门识别。
-const ASPECT_PRESETS: { value: string; label: string }[] = [
-  { value: '9:16 \u7ad6\u5c4f', label: '9:16 \u7ad6\u5c4f' },
-  { value: '16:9 \u6a2a\u5c4f', label: '16:9 \u6a2a\u5c4f' },
-  { value: '1:1 \u65b9\u5f62', label: '1:1 \u65b9\u5f62' },
+// 8 种比例与 ComfyUI ResolutionSelector 节点的下拉一致（2026-09-23 用户截图）；
+// \u8d85\u5bbd/\u7ad6\u5e45/\u6a2a\u5e45 后缀词仅供人读，解析走显式 "a:b"（style_kit 显式优先）。
+const ASPECT_PRESETS: { value: string; labelKey: string }[] = [
+  { value: '1:1 \u65b9\u5f62', labelKey: 'project.aspect1x1' },
+  { value: '2:3 \u7ad6\u5e45', labelKey: 'project.aspect2x3' },
+  { value: '3:2 \u6a2a\u5e45', labelKey: 'project.aspect3x2' },
+  { value: '3:4 \u7ad6\u5e45', labelKey: 'project.aspect3x4' },
+  { value: '4:3 \u6a2a\u5e45', labelKey: 'project.aspect4x3' },
+  { value: '9:16 \u7ad6\u5c4f', labelKey: 'project.aspect9x16' },
+  { value: '16:9 \u6a2a\u5c4f', labelKey: 'project.aspect16x9' },
+  { value: '21:9 \u8d85\u5bbd', labelKey: 'project.aspect21x9' },
 ];
 
 const ACCEPT_EXTS = '.txt,.docx,.pdf,.epub,.md';
@@ -67,7 +74,9 @@ export function ProjectsPage() {
   const [stylePreset, setStylePreset] = useState(STYLE_PRESETS[0].value);
   const [customStyle, setCustomStyle] = useState('');
   // 画面比例（视频/分镜画幅）：与风格一起在新建入口统一设置
-  const [aspectRatio, setAspectRatio] = useState(ASPECT_PRESETS[0].value);
+  // \u9ed8\u8ba4 9:16 \u7ad6\u5c4f\uff08\u6f2b\u5267\u77ed\u89c6\u9891\u4e3b\u5f62\u6001\uff0c\u4e0e\u540e\u7aef style_kit.DEFAULT_RATIO \u4e00\u81f4\uff09\u3002
+  // \u26a0\ufe0f \u4e0d\u8981\u5199 ASPECT_PRESETS[0]\uff1a\u9884\u8bbe\u6309\u622a\u56fe\u987a\u5e8f\u6392\u5217\u540e\u7b2c\u4e00\u9879\u662f 1:1\u3002
+  const [aspectRatio, setAspectRatio] = useState('9:16 \u7ad6\u5c4f');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // --- 编辑项目弹窗 ---
@@ -110,7 +119,7 @@ export function ProjectsPage() {
     setFormError('');
     setStylePreset(STYLE_PRESETS[0].value);
     setCustomStyle('');
-    setAspectRatio(ASPECT_PRESETS[0].value);
+    setAspectRatio('9:16 \u7ad6\u5c4f');
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -477,7 +486,7 @@ export function ProjectsPage() {
               value={aspectRatio}
               onChange={(v) => { setAspectRatio(v); setFormError(''); }}
               label={t('project.aspectRatio')}
-              options={ASPECT_PRESETS}
+              options={ASPECT_PRESETS.map(p => ({ value: p.value, label: t(p.labelKey) }))}
             />
           </div>
 

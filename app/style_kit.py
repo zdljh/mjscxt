@@ -74,10 +74,14 @@ def style_tokens(style) -> List[str]:
 _RATIO_RE = re.compile(r"(?P<a>\d{1,2})\s*[:：]\s*(?P<b>\d{1,2})")
 
 #: 中文/英文关键词 → 画幅（关键词比裸数字更明确地表达用户意图，优先命中）
+#: ⚠️ 2026-09-23 起**显式比例（"a:b"）优先于关键词**（见 aspect_ratio）：
+#: 新建项目新增 2:3/3:2/3:4/4:3/21:9 等比例后，「横屏 21:9」这类串若关键词
+#: 优先会被压成 (16,9)，只有显式数字优先才能表达 UltraWide。
 _KEYWORD_RATIO: Sequence[Tuple[str, Tuple[int, int]]] = (
     ("竖屏", (9, 16)),
     ("竖向", (9, 16)),
     ("竖版", (9, 16)),
+    ("竖幅", (9, 16)),
     ("手机屏", (9, 16)),
     ("抖音", (9, 16)),
     ("portrait", (9, 16)),
@@ -85,10 +89,14 @@ _KEYWORD_RATIO: Sequence[Tuple[str, Tuple[int, int]]] = (
     ("横屏", (16, 9)),
     ("横向", (16, 9)),
     ("横版", (16, 9)),
+    ("横幅", (16, 9)),
     ("宽屏", (16, 9)),
     ("landscape", (16, 9)),
     ("方形", (1, 1)),
     ("square", (1, 1)),
+    ("超宽", (21, 9)),
+    ("宽银幕", (21, 9)),
+    ("ultrawide", (21, 9)),
 )
 
 #: 默认画幅：漫剧短视频主形态为竖屏 9:16（抖音/视频号）。
@@ -147,20 +155,22 @@ def asset_aspect_ratio(asset_type: str, is_multiview: bool = False
 def aspect_ratio(style) -> Optional[Tuple[int, int]]:
     """从风格串解析目标画幅，解析不到返回 None。
 
-    优先关键词（"竖屏" / "portrait"），其次显式比例（"9:16"）。
+    **显式比例（"a:b"）优先于关键词**（2026-09-23 语义修正）：「a:b」是精确表达，
+    「竖屏/横屏」是泛化表达；新建项目支持 21:9 等比例后，「横屏 21:9」若关键词
+    优先会被压成 (16,9)。仅当串中无显式比例时才回落关键词（"竖屏"单独出现仍生效）。
     """
     toks = style_tokens(style)
     if not toks:
         return None
     joined = "，".join(toks).lower()
-    for kw, ratio in _KEYWORD_RATIO:
-        if kw in joined:
-            return ratio
     m = _RATIO_RE.search(joined)
     if m:
         a, b = int(m.group("a")), int(m.group("b"))
         if 0 < a <= 32 and 0 < b <= 32:
             return (a, b)
+    for kw, ratio in _KEYWORD_RATIO:
+        if kw in joined:
+            return ratio
     return None
 
 
@@ -203,8 +213,9 @@ def aspect_label(style) -> str:
 # --------------------------------------------------------------------------- #
 
 #: 画幅类 token 不进「图像风格后缀」正文（已由尺寸节点表达，重复描述反而污染提示词）
-_ASPECT_TOKENS = ("竖屏", "横屏", "竖向", "横向", "竖版", "横版", "方形", "9:16", "16:9", "1:1",
-                  "portrait", "landscape", "square")
+_ASPECT_TOKENS = ("竖屏", "横屏", "竖向", "横向", "竖版", "横版", "竖幅", "横幅", "方形",
+                  "超宽", "宽银幕", "9:16", "16:9", "1:1", "2:3", "3:2", "3:4", "4:3", "21:9",
+                  "portrait", "landscape", "square", "ultrawide")
 
 #: 风格后缀的固定收尾（保画质、压畸形，与既有工作流负向词配合）
 _QUALITY_TAIL = "画面精致，光影细腻，构图稳定，无畸形"
@@ -361,7 +372,9 @@ _SELECTOR_ASPECT_TEXT = {
     (4, 3): "4:3 (Standard)",
     (9, 16): "9:16 (Portrait Widescreen)",
     (16, 9): "16:9 (Widescreen)",
-    (21, 9): "21:9 (Ultrawide)",
+    # ⚠️ "UltraWide" 大小写与 ComfyUI ResolutionSelector 节点真实选项一致
+    #（combo widget 按字面量匹配，写错大小写会被拒收 value not in list）。
+    (21, 9): "21:9 (UltraWide)",
 }
 
 
