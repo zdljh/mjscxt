@@ -99,6 +99,8 @@ export function AIVaultPage() {
   const [clearing, setClearing] = useState(false);
   /** API Key 明文可见性（按模块记忆，眼睛按钮切换） */
   const [visibleKeys, setVisibleKeys] = useState<Record<ModuleKey, boolean>>({ text: false, qc: false, chat: false });
+  /** 正在拉取已保存密钥明文的模块（回填期间按钮禁用） */
+  const [revealing, setRevealing] = useState<ModuleKey | null>(null);
 
   // 系统设置状态（ComfyUI 只读展示 + 水印）
   const [sysSettings, setSysSettings] = useState<SystemSettings>({
@@ -264,6 +266,27 @@ export function AIVaultPage() {
   // 清空配置：改为统一确认弹窗（原生 confirm 阻塞主线程、样式与深色主题脱节，
   // 也无法显示「处理中」状态，误点后没有可撤销的余地）
   const handleClear = (module: ModuleKey) => setClearTarget(module);
+
+  // 眼睛按钮：切换明文/圆点。已保存的密钥后端默认不下发明文（前端 value 为空，
+  // 圆点只是 placeholder），首次点开时按需拉一次明文回填输入框，否则切了 type
+  // 也什么都显不出来。
+  const handleToggleVisible = async (moduleKey: ModuleKey) => {
+    const turningOn = !visibleKeys[moduleKey];
+    setVisibleKeys(prev => ({ ...prev, [moduleKey]: !prev[moduleKey] }));
+    if (turningOn && !config[moduleKey].api_key.trim() && config[moduleKey].has_api_key && revealing === null) {
+      setRevealing(moduleKey);
+      try {
+        const r = await aiConfigApi.revealKey(moduleKey);
+        if (r?.success && r.api_key) {
+          updateField(moduleKey, 'api_key', r.api_key);
+        }
+      } catch {
+        showMessage('error', t('vault.revealFailed'));
+      } finally {
+        setRevealing(null);
+      }
+    }
+  };
 
   const doClear = async () => {
     const module = clearTarget;
@@ -484,8 +507,9 @@ export function AIVaultPage() {
                     suffix={
                       <button
                         type="button"
-                        onClick={() => setVisibleKeys(p => ({ ...p, [moduleKey]: !p[moduleKey] }))}
-                        className="rounded-sm p-1.5 text-ink-3 transition-colors hover:text-ink-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
+                        onClick={() => handleToggleVisible(moduleKey)}
+                        disabled={revealing === moduleKey}
+                        className="rounded-sm p-1.5 text-ink-3 transition-colors hover:text-ink-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 disabled:cursor-not-allowed disabled:opacity-50"
                         title={t(visibleKeys[moduleKey] ? 'vault.hideApiKey' : 'vault.showApiKey')}
                         aria-label={t(visibleKeys[moduleKey] ? 'vault.hideApiKey' : 'vault.showApiKey')}
                         aria-pressed={!!visibleKeys[moduleKey]}

@@ -5341,6 +5341,25 @@ def api_ai_config_get():
     return jsonify({"success": True, "config": _ai_config_view()})
 
 
+@app.route('/api/ai/config/reveal', methods=['GET'])
+def api_ai_config_reveal():
+    """按需回显某个模块已保存的 api_key 明文（前端「眼睛」按钮点开时调用）。
+
+    默认 GET /api/ai/config 仍一律脱敏（module_public_view 永不含明文）；
+    本端点只在用户显式点「显示」时被调用，把明文回填进输入框——否则已保存的
+    密钥在前端只是 placeholder 圆点，切 type 什么都显不出来。
+    本应用是本地单用户工具（仅 127.0.0.1），密钥明文本就只存在本机。
+    """
+    module = (request.args.get('module') or '').strip()
+    if module not in ai_config.MODULES:
+        return jsonify({"success": False, "error": f"未知的 AI 模块：{module}"}), 400
+    cfg = ai_config.load_config(AI_CONFIG_PATH, LLM_CONFIG_PATH)
+    ep = ai_config.get_module(cfg, module)
+    key = ep.get("api_key") or ""
+    return jsonify({"success": True, "module": module,
+                    "has_api_key": bool(key), "api_key": key})
+
+
 def _ai_credentials_verify(module: str, base_url: str = "", model: str = "",
                            new_key: str = "", cleared: bool = False) -> tuple:
     """保存/清空后**读回核对**：任务实际读的那份凭证（tasks.db）是否等于本次提交的值。

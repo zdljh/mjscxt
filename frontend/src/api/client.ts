@@ -847,6 +847,14 @@ export const exportApi = {
 export const aiConfigApi = {
   get: () => request<AIConfigResponse>('/ai/config'),
   /**
+   * 按需回显某模块已保存的 api_key 明文（眼睛按钮点开时调用）。
+   * 默认 get() 仍一律脱敏 —— 已保存密钥的前端 value 为空，圆点是 placeholder。
+   */
+  revealKey: (module: string) =>
+    request<{ success: boolean; module: string; has_api_key: boolean; api_key: string }>(
+      `/ai/config/reveal?module=${encodeURIComponent(module)}`
+    ),
+  /**
    * 保存单个模块。
    * reasoning_effort = 思考档位（'' | 'low' | 'high' | 'max'），只对「思考不可关闭」的模型
    * （如 GLM-5.3-Flash）有意义：留空 = 不注入该参数，由服务端取默认档。

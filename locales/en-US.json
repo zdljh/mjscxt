@@ -1092,6 +1092,7 @@
     "keySavedHint": "Key saved; leave blank to keep the current value",
     "showApiKey": "Show API Key",
     "hideApiKey": "Hide API Key",
+    "revealFailed": "Failed to load the saved key; please retry",
     "configured": "Configured",
     "notConfigured": "Not configured",
     "module": {
