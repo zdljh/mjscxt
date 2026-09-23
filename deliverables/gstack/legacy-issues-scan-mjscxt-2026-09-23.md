@@ -5,6 +5,8 @@
 - **方法**：先读项目记忆/历次审计报告的「待办清单」，再逐条到 `app/*.py`、`frontend/src` 源码核实当前状态，并跑防回潮守卫与静态检查交叉验证。
 - **结论一句话**：历史审计的 P0/P1 已全部落地且无回潮；**仍有 4 条有真实影响的后端遗留 + 3 条静默吞异常残留 + 6 条前端 P2 欠账 + 3 条安全/产品观察项**。
 
+> **修复状态（2026-09-23 当日收尾）**：**A1 / A2 / A3 / A4 + B1 / B2 / B3 + C1 / C2 / C3 / C4 + D3 已全部修复并推送到 `origin/main`**（`19cac69` → `58e28c9`，见第五节）；**C5 / C6 / D1 / D2 仍待定**（属 P2 欠账与产品/安全决策项，需需求方确认）。下文第一节为**排查当时的原始记录**，保留以便对照。
+
 ---
 
 ## 一、⚠️ 仍存在的遗留问题
@@ -104,3 +106,61 @@
 - 未跑**全量 65 个**测试脚本（按「每脚本一次独立调用」纪律只为关键守卫单独跑；其余属历史已绿项）。
 - 未做**在线服务级探针**（5000 正在监听、PID 32692，但本轮为静态/离线核实，未触发任何生成类请求）。
 - 未审计 ComfyUI 侧（`D:\ComfyUI_portable_TE_v260619`，仓外目录）。
+
+---
+
+## 五、✅ 修复落地（2026-09-23 收尾，已推 `origin/main`）
+
+### A 类（数据一致性）
+
+| 编号 | 修复方式 | 关键验证 |
+|---|---|---|
+| **A1** | `has_credentials()` 由「DB 里有任意一行即 True」改为 `bool(modules_with_key())`；新增 `modules_with_key()`（判据 `api_key_cipher <> ''`）；`migrate_from_legacy()` 去掉首行整体早退，改为**按模块**判空：已有密钥的模块 `skipped`、缺失的继续补齐 | 守卫 ★1.5：DB 只含 `text` 行时，`qc`/`chat` 迁移**仍会补齐**；`force=True` 三模块全迁 |
+| **A2** | 写侧**下沉到写函数内部**（而非各路由自己补一次）：① 新增 `ai_config._mirror_credentials_db`，由 `save_module` / `clear_module` 内置调用 → `/api/ai/settings`、`/api/llm/config/clear` 这类**绕过原路由的写点自动闭合**；② 新增 `qc_client._sync_credentials_db`，覆盖 `save_config` / `set_endpoint` / `reset_endpoint` / `clear_config` **四个**写点；③ `app._save_ai_module` **不再重复写库**（同一份值两个写点必漂移），改为新增 `_ai_credentials_verify` **读回核对**——能抓到「接口返回 200 但写没落地」与 env 覆盖这类页面上看不出的分叉；④ `qc_client.clear_config` 裸写改 `fs_atomic._atomic_write_json` | ★2.5 安全阀：端点全空且未改密钥时**不写 DB**（否则「只改一个开关」的调用会清空已存端点）；★2.7/2.9 reset/clear 同步；env 覆盖按「设计内高优先级」提示而非报错 |
+
+> 附带根治：`ai_credentials_db` 支持 `MJSCXT_CRED_ROOT` / `MJSCXT_CRED_DB` 环境变量重指向，并在 5 个隔离测试脚本里补齐「第三个根」（此前只重指向 `qc_client._PROJECT_ROOT` / `ai_config._ROOT_DIR`，漏掉 DB → A2 上线后隔离测试会写脏真实 `output/tasks.db`；当日确曾污染一次，已用 `ai.qc` 槽真钥恢复，备份 `output/tasks.db.bak_precred_fix_20260923`）。
+
+### B 类（静默吞异常 → 恢复守卫全绿）
+
+| 编号 | 修复方式 |
+|---|---|
+| **B1** | `ai_credentials_db.py` 读旧 `ai_config` 端点失败处：`except Exception: pass` → `except Exception as e: logger.debug(...)` |
+| **B2** | `app.py` 两处 `ai_selfcheck.reset_probe_cache()` 失败处：同上补 `as e` + `logger.debug` |
+| **B3** | `ai_credentials_db.py` 开 WAL 失败处：补 `as e`，日志带出真实原因 |
+
+`verify_silent_except.py` 由 **18/20 → 20/20**。
+
+### A3 / A4（fail-open 与原子写）
+
+- **A3** `pipeline._deliverable_review`：裸 `open + json.load` + `except: return {}` → `read_json_strict(idx_path, {})`，损坏且无可用 `.bak` 时 `logger.error` 后返回默认（不再把「记录损坏」误判成「无 review 记录」→ 打回不再失效）。
+- **A4** `script_prompt_analyzer.save_script_inplace`：裸 `open(...,"w") + json.dump` → `fs_atomic.atomic_write_json`。
+
+### C 类（前端三态）
+
+- **C1** `OverviewPage`：抽 `reload` useCallback（try/catch/finally）+ `loadError` state + `ErrorState` 硬失败块（`onRetry=reload`）；移除未用的 `novelsApi` import。
+- **C2/C3** `MemoryPage`：新增 `loadError` / `lessonError`；主加载抽 `reloadMain`；教训库 `.catch` 不再吞成 `lessons: []`，改为落 `lessonError` 并渲染 `ErrorState`（重试走 `reloadTick`）。
+- **C4** `AudioTab`：新增 `bootLoading`；首屏 `Promise.all([loadEnv, loadTtsPlan, loadMixPlan, loadQcCfg]).finally(...)`（避免多路并发里任一先返回就误判完成）+ 首屏 `Skeleton` 骨架。
+
+### D3（过期测试）
+
+`verify_ai_qc_sync.py` 移入 `.workbuddy/test/_out/_deprecated/verify_ai_qc_sync.py.deprecated_20260923`；新建**仓库根**守卫 `verify_cred_single_source.py`（**30 项**：§0 隔离自检 / §1 A1 迁移按模块判空 / §2 A2 写侧同步（含安全阀、reset、clear）/ §3 环境变量覆盖 / §4 测试卫生扫描）替代其口径。
+
+### 提交与重启记录
+
+| 提交 | 内容 |
+|---|---|
+| `19cac69` | A1/A2 凭证单一事实源闭合 + B1/B3 + `verify_cred_single_source.py` |
+| `be064e4` | A3 fail-loud + A4 原子写 |
+| `be5975c` | C1–C4 前端三态 + `app/static/` 构建产物入库 |
+| `82674ca` | 本报告 |
+| `58e28c9` | 补凭证镜像 docstring + 清空提示措辞对齐 |
+
+- 推送：`git fetch` 核对「落后 0 / 领先 5」→ `19e16a2..58e28c9`，复核 `origin/main..HEAD` = **0/0**。
+- 静态：`compileall app/` exit 0、`pyflakes` 无 `undefined name`、`tsc --noEmit` exit 0、`vite build` 成功。
+- 回归全绿：`verify_silent_except` 20/20、`verify_atomic_write` 58/0、`verify_index_failloud` 23/0、`verify_prompt_script_opt` 51/0、`verify_project_audit` 49/49、`verify_qc_bool_parse` 91/0、`verify_qc_ref_images` 38/0、`verify_atomic_write_locks` 77/0、`verify_reasoning_effort` 44/0、`verify_cred_read_fallback` 11/0、`verify_cred_single_source` 30/30。
+- 重启：`/api/autopilot/status` 确认 `current: null`（无项目被中断）→ 按 PID 停 **41696** → `schtasks /end` + `/run /tn MJSCXT_Flask` → 新 PID **41064**（启动 16:07:51 > 源码最后修改 16:06:12，**新代码确已加载**）；线上 `index.html` 已引用新产物 `index-BUJr-3mm.js`；启动日志「AI 前置自检：三个模块均已配置」→ 凭证**读侧**未被 A1 改坏。
+
+### 附：并发写入观察（需与队友协调）
+
+本工作区**存在并行会话同时改同一批文件**：`app/ai_config.py`（mtime 16:06:12）、`app/app.py`（16:06:04）在本次提交过程中被**另一写入者**补入 docstring / 提示措辞（内容与提交 `19cac69` 同主题、为惰性改动），已被 `58e28c9` 一并收口；`.workbuddy/memory/2026-09-23.md` 16:00 节亦记录「`app/ai_credentials_db.py` / `app/qc_client.py` 有队友在飞的改动」。**建议**：同一批文件（尤其凭证四件套 + `app.py`）后续只由一方改，改前后各自 `git fetch` 核对，避免同一份值出现两个写点。
+
