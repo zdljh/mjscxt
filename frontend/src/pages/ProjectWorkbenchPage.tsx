@@ -13,7 +13,7 @@ import { GridPage } from '@/pages/GridPage';
 import { RelationGraphTab } from '@/components/RelationGraphTab';
 import { OutputReviewTab } from '@/components/OutputReviewTab';
 import { AudioTab } from '@/components/AudioTab';
-import type { Project, Deliverable, UpscaleEnv, UpscaleSource, UpscaleTask, UpscaleArtifact, AgentStep } from '@/types';
+import type { Project, Deliverable, UpscaleEnv, UpscaleSource, UpscaleTask, UpscaleArtifact, AgentStep, AutopilotCurrent } from '@/types';
 
 // 焦点环：与 components/ui/index.tsx 里的 FOCUS_RING 逐字一致。
 // index.css 有全局 :focus-visible outline 兜底，这里显式加 focus:outline-none 把它压掉，
@@ -269,6 +269,126 @@ function sanitizeError(err: unknown, fallback = t('wb.actionFailed')): string {
 }
 
 // ========== Overview Tab ==========
+
+// 生产流水线步骤序列：与后端 pipeline.STEP_SEQUENCE 对齐（技术标识符 → i18n 键）。
+const PRODUCTION_STEPS: { id: string; labelKey: string }[] = [
+  { id: 'script', labelKey: 'wb.stepScript' },
+  { id: 'assets', labelKey: 'wb.stepAssets' },
+  { id: 'storyboard', labelKey: 'wb.stepStoryboard' },
+  { id: 'keyframe', labelKey: 'wb.stepKeyframe' },
+  { id: 'video', labelKey: 'wb.stepVideo' },
+  { id: 'final', labelKey: 'wb.stepFinal' },
+  { id: 'tts', labelKey: 'wb.stepTts' },
+  { id: 'mix', labelKey: 'wb.stepMix' },
+  { id: 'upscale', labelKey: 'wb.stepUpscale' },
+];
+
+/** 生产进度卡片：轮询 /api/autopilot/status，把「当前正在生产哪一集、当前步骤、百分比、
+ *  超时告警」实时展示出来。此前这些数据后端都有，但前端从未渲染 —— 用户生产时只能干等。
+ *  （报告 P1-5「无进度反馈」+ 建议 3「生产过程可视化」的落地） */
+function ProductionProgress({ projectKey }: { projectKey: string }) {
+  const { t } = useApp();
+  const [cur, setCur] = useState<AutopilotCurrent | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const poll = async () => {
+      try {
+        const st = await autopilotApi.status(projectKey);
+        if (!alive) return;
+        setCur((st.current as AutopilotCurrent) || null);
+      } catch {
+        // 轮询失败静默：状态刷新是锦上添花，不能因一次失败打断整页
+      }
+    };
+    poll();
+    timer = setInterval(poll, 3000);
+    return () => {
+      alive = false;
+      if (timer) clearInterval(timer);
+    };
+  }, [projectKey]);
+
+  if (!cur) return null;
+
+  const percent = Math.max(0, Math.min(100, Number(cur.percent) || 0));
+  const stepsDone = Array.isArray(cur.steps_done) ? cur.steps_done : [];
+  const stalled = Number(cur.step_stalled_sec) || 0;
+  const stalledMin = Math.floor(stalled / 60);
+  const stalledSec = stalled % 60;
+  const currentStepId = (cur.step || '').split(':')[0];
+  const currentStep = PRODUCTION_STEPS.find(s => s.id === currentStepId);
+
+  return (
+    <div
+      className="bg-surface rounded-lg border border-line p-4 mb-4"
+      role="status"
+      aria-live="polite"
+      aria-label={t('wb.productionProgress')}
+    >
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-sm font-semibold text-ink-1 flex items-center gap-2">
+          <span className="inline-block w-2 h-2 rounded-full bg-info animate-pulse" />
+          {t('wb.productionProgress')}
+        </span>
+        {cur.episode != null && (
+          <span className="text-sm text-ink-2">{t('wb.producingEpisode', { n: cur.episode })}</span>
+        )}
+      </div>
+
+      {/* 进度条 */}
+      <div className="w-full bg-line rounded-full h-2 mb-3">
+        <div
+          className="bg-brand h-2 rounded-full transition-all"
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+
+      {/* 步骤链 */}
+      <div className="flex flex-wrap items-center gap-1.5 mb-2">
+        {PRODUCTION_STEPS.map((s, i) => {
+          const done = stepsDone.includes(s.id);
+          const active = s.id === currentStepId;
+          return (
+            <React.Fragment key={s.id}>
+              {i > 0 && <span className="text-ink-3 text-xs">→</span>}
+              <span
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs ${
+                  done
+                    ? 'bg-success-subtle text-success-strong'
+                    : active
+                      ? 'bg-brand-subtle text-brand font-medium'
+                      : 'bg-surface-2 text-ink-3'
+                }`}
+              >
+                {done && <Check className="h-3 w-3" />}
+                {t(s.labelKey)}
+              </span>
+            </React.Fragment>
+          );
+        })}
+      </div>
+
+      {/* 当前步骤消息 + 超时告警 */}
+      {cur.message && <p className="text-xs text-ink-2 mb-1">{cur.message}</p>}
+      {stalled >= 900 && (
+        <div className="flex items-start gap-2 mt-2 p-2.5 rounded bg-warning-subtle text-warning-strong text-xs">
+          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+          <div>
+            <p className="font-medium">
+              {t('wb.currentStep')}
+              {currentStep ? `：${t(currentStep.labelKey)}` : ''} ·{' '}
+              {t('wb.stepStalled', { min: stalledMin, sec: stalledSec })}
+            </p>
+            <p className="text-ink-2 mt-0.5">{t('wb.stallHint')}</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function OverviewTab({
   assets,
   projectKey,
@@ -522,6 +642,9 @@ function OverviewTab({
 
   return (
     <div className="space-y-8">
+      {/* 生产进度（实时）：把 autopilot 当前正在生产的一集/步骤/百分比/超时告警展示出来 */}
+      <ProductionProgress projectKey={projectKey} />
+
       {/* 资产展示 */}
       {total > 0 && (
         <>

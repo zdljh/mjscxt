@@ -724,7 +724,10 @@ export const scriptConsistencyApi = {
 
 // --- Autopilot ---
 export const autopilotApi = {
-  status: () => request<AutopilotStatus>('/autopilot/status'),
+  status: (project?: string) =>
+    request<AutopilotStatus>(
+      project ? `/autopilot/status?project=${encodeURIComponent(project)}` : '/autopilot/status'
+    ),
   ready: () => request<{ ready: boolean }>('/autopilot/ready'),
   curve: () => request<any>('/autopilot/curve'),
   plans: () => request<{ success: boolean; plans: any[] }>('/autopilot/plans'),

@@ -587,7 +587,21 @@
     "switchView": "← → 切换视角",
     "imageUnavailable": "图片不可用",
     "viewSwitch": "视角切换",
-    "viewN": "视角 {n}"
+    "viewN": "视角 {n}",
+    "productionProgress": "生产进度",
+    "producingEpisode": "正在生产：第 {n} 集",
+    "currentStep": "当前步骤",
+    "stepStalled": "已停滞 {min} 分 {sec} 秒",
+    "stallHint": "该步骤长时间未推进，可能卡在重试或排队，建议关注。",
+    "stepScript": "剧本生成",
+    "stepAssets": "资产生成",
+    "stepStoryboard": "分镜图",
+    "stepKeyframe": "关键帧",
+    "stepVideo": "视频生成",
+    "stepFinal": "成片合成",
+    "stepTts": "配音合成",
+    "stepMix": "音画混音",
+    "stepUpscale": "超分"
   },
   "settings": {
     "title": "设置",

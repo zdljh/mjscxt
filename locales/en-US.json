@@ -587,7 +587,21 @@
     "switchView": "← → Switch view",
     "imageUnavailable": "Image unavailable",
     "viewSwitch": "Switch view",
-    "viewN": "View {n}"
+    "viewN": "View {n}",
+    "productionProgress": "Production progress",
+    "producingEpisode": "Producing: episode {n}",
+    "currentStep": "Current step",
+    "stepStalled": "Stalled {min}m {sec}s",
+    "stallHint": "This step has not progressed for a while; it may be stuck retrying or queued.",
+    "stepScript": "Script",
+    "stepAssets": "Assets",
+    "stepStoryboard": "Storyboard",
+    "stepKeyframe": "Keyframes",
+    "stepVideo": "Video",
+    "stepFinal": "Final cut",
+    "stepTts": "Voice-over",
+    "stepMix": "Mixing",
+    "stepUpscale": "Upscale"
   },
   "settings": {
     "title": "Settings",

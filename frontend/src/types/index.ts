@@ -493,6 +493,27 @@ export interface EpisodeListResponse {
 }
 
 // --- Autopilot ---
+/** 当前正在生产的一集（`current`）的字段，对应后端 `_set_current` 写入 + status() 增强。
+ *  step 是英文技术标识符（script/assets/storyboard/...），前端用 i18n 映射成展示名。 */
+export interface AutopilotCurrent {
+  project?: string;
+  episode?: number;
+  title?: string;
+  step?: string;
+  message?: string;
+  percent?: number;
+  phase?: string;
+  steps_done?: string[];
+  retries?: number;
+  started_at?: string;
+  /** epoch 秒：最近一次进度推进时刻（后端 _set_current 自动写） */
+  step_updated_at?: number;
+  /** 当前步骤停滞时长（秒），status() 动态计算 */
+  step_stalled_sec?: number;
+  /** 停滞超阈值时的告警文案（空串=正常） */
+  stall_warning?: string;
+}
+
 /** ⚠️ 形状按 `/api/autopilot/status` 的真实返回校正。
  *  旧版本声明的 `current_project` / `current_episode` / `totals{episodes_done,
  *  episodes_failed,retries}` 后端**均不返回**（真实是 `current` 对象 + `project`
@@ -502,7 +523,7 @@ export interface AutopilotStatus {
   paused: boolean;
   pause_reason?: string;
   project?: string;
-  current?: Record<string, unknown> | null;
+  current?: AutopilotCurrent | null;
   curve?: unknown;
   cycle?: unknown;
   delivered_total?: number;
