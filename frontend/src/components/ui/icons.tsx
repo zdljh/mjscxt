@@ -150,6 +150,24 @@ export const KeyRound = (p: IconProps) => (
   </Svg>
 );
 
+/** 可见（显示密码/密钥） */
+export const Eye = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+    <circle cx="12" cy="12" r="3" />
+  </Svg>
+);
+
+/** 不可见（隐藏密码/密钥） */
+export const EyeOff = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24" />
+    <path d="M10.7 5.12A9.8 9.8 0 0 1 12 5c6.5 0 10 7 10 7a13.2 13.2 0 0 1-1.67 2.68" />
+    <path d="M6.61 6.61A13.5 13.5 0 0 0 2 12s3.5 7 10 7a9.74 9.74 0 0 0 5.39-1.61" />
+    <path d="m2 2 20 20" />
+  </Svg>
+);
+
 /** 搜索 */
 export const Search = (p: IconProps) => (
   <Svg {...p}>

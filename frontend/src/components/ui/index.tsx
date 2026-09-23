@@ -308,6 +308,7 @@ export function Input({
   onEnter,
   autoFocus,
   error,
+  suffix,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -320,6 +321,8 @@ export function Input({
   autoFocus?: boolean;
   /** 错误态：描边转红并在下方给出原因，别只靠 placeholder 传达约束 */
   error?: string;
+  /** 尾部插槽（如「显示/隐藏密钥」按钮）：输入框自动让出右侧内边距，插槽绝对定位贴右 */
+  suffix?: React.ReactNode;
 }) {
   const input = (
     <input
@@ -331,13 +334,21 @@ export function Input({
       autoFocus={autoFocus}
       aria-invalid={error ? true : undefined}
       onKeyDown={onEnter ? (e) => { if (e.key === 'Enter') onEnter(); } : undefined}
-      className={`${FIELD_BASE} h-9 ${error ? FIELD_ERR : FIELD_OK} ${className}`}
+      className={`${FIELD_BASE} h-9 ${suffix ? 'pr-10' : ''} ${error ? FIELD_ERR : FIELD_OK} ${className}`}
     />
+  );
+  const field = suffix ? (
+    <div className="relative">
+      {input}
+      <div className="absolute inset-y-0 right-0 flex items-center pr-1.5">{suffix}</div>
+    </div>
+  ) : (
+    input
   );
   return (
     <FieldLabel label={label}>
       <>
-        {input}
+        {field}
         <FieldError error={error} />
       </>
     </FieldLabel>

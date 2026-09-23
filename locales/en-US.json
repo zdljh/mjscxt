@@ -1090,6 +1090,8 @@
     "watermarkSaved": "Watermark settings saved",
     "saveWatermark": "Save watermark settings",
     "keySavedHint": "Key saved; leave blank to keep the current value",
+    "showApiKey": "Show API Key",
+    "hideApiKey": "Hide API Key",
     "configured": "Configured",
     "notConfigured": "Not configured",
     "module": {

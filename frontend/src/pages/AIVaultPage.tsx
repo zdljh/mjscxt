@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useApp } from '@/context/AppContext';
 import { aiConfigApi, watermarkApi } from '@/api/client';
 import { Badge, Button, Card, ConfirmDialog, Input, Select, Skeleton } from '@/components/ui';
-import { AlertTriangle, Brain, CheckCircle2, Network, Search, X } from '@/components/ui/icons';
+import { AlertTriangle, Brain, CheckCircle2, Eye, EyeOff, Network, Search, X } from '@/components/ui/icons';
 import type { IconProps } from '@/components/ui/icons';
 import type { AIConfigModule, AIConfigResponse, AITestResult } from '@/types';
 
@@ -97,6 +97,8 @@ export function AIVaultPage() {
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [clearTarget, setClearTarget] = useState<ModuleKey | null>(null);
   const [clearing, setClearing] = useState(false);
+  /** API Key 明文可见性（按模块记忆，眼睛按钮切换） */
+  const [visibleKeys, setVisibleKeys] = useState<Record<ModuleKey, boolean>>({ text: false, qc: false, chat: false });
 
   // 系统设置状态（ComfyUI 只读展示 + 水印）
   const [sysSettings, setSysSettings] = useState<SystemSettings>({
@@ -473,12 +475,24 @@ export function AIVaultPage() {
                 </div>
                 <div>
                   <Input
-                    type="password"
+                    type={visibleKeys[moduleKey] ? 'text' : 'password'}
                     label="API Key"
                     value={state.api_key}
                     onChange={v => updateField(moduleKey, 'api_key', v)}
                     placeholder={state.has_api_key ? '••••••••' : 'sk-...'}
                     className="font-mono text-sm"
+                    suffix={
+                      <button
+                        type="button"
+                        onClick={() => setVisibleKeys(p => ({ ...p, [moduleKey]: !p[moduleKey] }))}
+                        className="rounded-sm p-1.5 text-ink-3 transition-colors hover:text-ink-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
+                        title={t(visibleKeys[moduleKey] ? 'vault.hideApiKey' : 'vault.showApiKey')}
+                        aria-label={t(visibleKeys[moduleKey] ? 'vault.hideApiKey' : 'vault.showApiKey')}
+                        aria-pressed={!!visibleKeys[moduleKey]}
+                      >
+                        {visibleKeys[moduleKey] ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    }
                   />
                   {state.has_api_key && (
                     <p className="text-xs text-ink-3 mt-1">{t('vault.keySavedHint')}</p>

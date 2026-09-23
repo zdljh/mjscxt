@@ -1090,6 +1090,8 @@
     "watermarkSaved": "水印设置已保存",
     "saveWatermark": "保存水印设置",
     "keySavedHint": "密钥已保存，留空则保持原值",
+    "showApiKey": "显示 API Key",
+    "hideApiKey": "隐藏 API Key",
     "configured": "已配置",
     "notConfigured": "未配置",
     "module": {
