@@ -30,6 +30,10 @@ temp/
 # 根目录若出现同名文件，是临时的 `sqlite3 tasks.db` 之类命令误建的空壳（无任何代码引用），
 # 一律不入库；排查见 `.workbuddy/memory/FRONTEND_NOTES.md`。
 /tasks.db
+# 同理：qc_config.json 本身已被忽略（上方），但原子写会在改前留一份 `qc_config.json.bak`
+# 快照（fs_atomic 的「发布前 .bak」设计，属正常产物、可随时重建）→ 一并忽略，避免
+# 每次保存质检配置都在 `git status` 里留一个未跟踪文件。
+/qc_config.json.bak
 
 # 小说原始文本与解析产物（含版权内容，不入库）
 novels/
