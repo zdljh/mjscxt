@@ -271,7 +271,23 @@ def get_module(cfg: dict, module: str) -> dict:
     modules = (cfg or {}).get("modules") or {}
     ep = _normalize_module(modules.get(module))
     ns = f"ai.{module}"
-    # 非密钥字段：环境变量优先
+    # ⭐ 单一事实源：DB（ai_credentials 表）优先。get_credentials 内部已按
+    # env > DB 解析，直接信任其结果；DB 有非空字段就覆盖 json 值。
+    try:
+        import ai_credentials_db
+        db_ep = ai_credentials_db.get_credentials(module)
+        if db_ep.get("base_url"):
+            ep["base_url"] = db_ep["base_url"]
+        if db_ep.get("model"):
+            ep["model"] = db_ep["model"]
+        if db_ep.get("api_key"):
+            ep["api_key"] = db_ep["api_key"]
+        if db_ep.get("reasoning_effort"):
+            ep["reasoning_effort"] = db_ep["reasoning_effort"]
+        return ep
+    except Exception as e:  # noqa: BLE001  DB 不可用回落旧口径（json + 加密库槽 + env）
+        logger.warning(f"AI 凭证 DB 读取失败，回落加密库/env：{e}")
+    # 回落：非密钥字段环境变量优先
     env_base = secret_store.SecretStore.env_base_url(ns)
     env_model = secret_store.SecretStore.env_model(ns)
     if env_base:

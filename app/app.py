@@ -197,6 +197,29 @@ except Exception as _e:  # noqa: BLE001  不得因任务库异常导致启动失
     _interrupted = 0
     app.logger.warning(f"任务库中断恢复失败（不影响启动）：{_e}")
 
+# ⭐ AI 凭证单一事实源（tasks.db · ai_credentials 表）：启动时一次性把旧
+# secrets.enc 双槽（ai.text/ai.qc/ai.chat + qc）+ ai_config.json 非密钥字段迁入 DB。
+# 幂等（DB 已有值则跳过），失败不影响启动（读侧对每个模块都有旧口径回落）。
+try:
+    import ai_credentials_db
+    _mig = ai_credentials_db.migrate_from_legacy()
+    if _mig.get("migrated"):
+        app.logger.info(f"AI 凭证已从旧源迁入 {TASKS_DB_PATH}：{_mig['migrated']}"
+                        + (f"（跳过 {_mig.get('skipped')}）" if _mig.get("skipped") else ""))
+except Exception as _e:  # noqa: BLE001  迁移失败不得阻断启动
+    app.logger.warning(f"AI 凭证库迁移失败（不影响启动，任务读侧仍回落旧口径）：{_e}")
+
+# ⭐ AI 前置自检（P0-5）：启动即体检三个 AI 模块的配置完整性，缺 key / 缺 base_url 时
+# 醒目告警（不阻断启动 —— 用户很可能正是启动后才去「AI 设置」页补配置）。
+# 这里只做静态检查、不打外网，避免拖慢启动或让启动依赖外部网络；端点可达性在
+# 开跑门禁（_ai_gate_or_400）与 /api/ai/selfcheck?probe=1 时才探测。
+try:
+    import ai_selfcheck
+    AI_SELFCHECK_BOOT = ai_selfcheck.startup_report()
+except Exception as _e:  # noqa: BLE001  自检失败不得阻断启动
+    AI_SELFCHECK_BOOT = {}
+    app.logger.warning(f"AI 前置自检执行失败（不影响启动）：{_e}")
+
 # 初始化组件
 script_gen = ScriptGenerator()
 comfyui_client = ComfyUIClient()
@@ -1526,6 +1549,8 @@ def api_keyframes_plan():
 @app.route('/api/keyframes/generate', methods=['POST'])
 def api_keyframes_generate():
     """批量生成尾帧（Qwen Edit，以分镜图为首帧参考）——后台任务 + 断点续跑"""
+    # ⚠️ 故意不设 AI 门禁：尾帧提示词在 shot/剧本数据里（上游产出），本步只做 Qwen Edit
+    # 图生图 + 质检，不读 AI 凭证。门禁挂这里会误伤「有存量分镜、但 AI key 未配」的续跑。
     data = request.json or {}
     # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
     project, err = _project_or_400(data.get('project_name') or '')
@@ -2376,6 +2401,10 @@ def api_i18n(lang):
 
 @app.route('/api/script/generate', methods=['POST'])
 def api_generate_script():
+    # P0-5 门禁：文本分析模型未配置 / 端点不可达 → 直接阻断，不给「静默跑进执行中」的机会
+    _gate = _ai_gate_or_400("script")
+    if _gate is not None:
+        return _gate
     data = _body()
     theme = data.get('theme', '')
     episodes = data.get('episodes', 1)
@@ -2850,6 +2879,10 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
 @app.route('/api/assets/generate', methods=['POST'])
 def api_generate_assets():
     """生成资产（角色/物品/场景，含多视角）"""
+    # ⚠️ 这里**故意不设** AI 前置门禁：资产生成是「消费已产出的提示词 + ComfyUI 出图 +
+    # 质检」的链路，全程不读 text/qc/chat 凭证（提示词由上游剧本步骤产出、随 assets 传入）。
+    # 早前一版把门禁挂在这里，后果是「AI key 没配 → 连本来能出的图也一起被拦」，
+    # 属于护栏误伤业务。凡是光跑 ComfyUI 就能完成的入口都不挂门禁。
     data = _body()
     asset_type = data.get('asset_type', '')  # character / item / scene
     # P2-T2：写盘路由统一走 _project_or_400（契约必填 project_name）
@@ -3553,6 +3586,8 @@ def _style_aspect_guard(project_name: str, override_style: str = ""):
 @app.route('/api/storyboards/generate', methods=['POST'])
 def api_generate_storyboards():
     """为剧本的每个 shot 生成一张分镜图（参考角色/物品/场景资产图）"""
+    # ⚠️ 故意不设 AI 门禁：分镜图 = 消费剧本里已产出的 shot.prompt + ComfyUI 出图 + 质检，
+    # 不读任何 AI 凭证。挂在 LLM 门禁上会把「没配 key 但有存量剧本」的用户一起拦死。
     data = request.json or {}
     # P2-T2：写盘路由统一走 _project_or_400（缺省/越界 project_name → 400，
     # 不再静默回落共享 'project' 命名空间造成串项目）。前端契约必填。
@@ -5031,6 +5066,44 @@ def _ai_client_for_module(module: str, base_url: str = None, api_key: str = None
     return LLMClient(AI_CONFIG_PATH, config=ep, timeout=timeout or LLM_REQUEST_TIMEOUT)
 
 
+def _ai_gate_or_400(action: str, probe: bool = True):
+    """开跑前 AI 前置门禁（P0-5 收尾）。
+
+    通过 → 返回 None（调用方继续）；未通过 → 返回可直接 `return` 的 (response, 400) 元组。
+
+    为什么放在每个生产入口而不是散在内部：修复前的故障是「配置页测试通过、运行时 401、
+    整条流水线静默失败」，用户看不到任何原因。门禁要在**进入执行前**就把话说明白
+    （缺什么、去哪修），而不是跑 4 小时后再炸。
+
+    门禁自身异常按 fail-open 放行并响亮告警 —— 门禁是护栏，不是业务本身，
+    绝不能因为护栏故障把整条线堵死。
+    """
+    try:
+        import ai_selfcheck
+        rep = ai_selfcheck.gate(action, probe=probe)
+    except Exception as e:  # noqa: BLE001
+        app.logger.error(f"AI 门禁执行异常（按放行处理，action={action}）：{type(e).__name__}: {e}")
+        return None
+    if rep.get("ok"):
+        return None
+    return jsonify({
+        "success": False,
+        "error": rep.get("message") or "AI 前置自检未通过，已阻断执行",
+        "message": rep.get("message") or "",
+        "hint": rep.get("hint") or "",
+        "ai_selfcheck": {
+            "action": action,
+            "ok": False,
+            "blocked_modules": rep.get("blocked_modules") or [],
+            "blocked_labels": rep.get("blocked_labels") or [],
+            "modules": rep.get("modules") or {},
+            "hint": rep.get("hint") or "",
+            "gate_off": False,
+            "fix_url": "/api/ai/selfcheck?probe=1",
+        },
+    }), 400
+
+
 def _current_llm_client() -> LLMClient:
     """文本分析链路（小说转剧本 / 章节转剧本 / 提示词分析）专用客户端：只用「文本分析模型」"""
     return _ai_client_for_module("text")
@@ -5162,48 +5235,49 @@ def _save_ai_module(data: dict):
     cfg = ai_config.save_module(AI_CONFIG_PATH, module, base_url=base_url, model=model,
                                 api_key=None if keep else key, legacy_path=LLM_CONFIG_PATH,
                                 reasoning_effort=(reasoning_effort if has_reasoning_effort else None))
+    # ⭐ 单一事实源：AI 凭证统一写 tasks.db 的 ai_credentials 表（权威读源，见
+    # ai_config.get_module / qc_client.load_config 均改读 DB）。json + secrets.enc 仍写
+    # （向后兼容 + 首次冷启动兜底），但**任务实际读 DB**，DB 才是「前端配的=任务用的」。
+    # keep=True（留空/脱敏回显）时传 api_key=None（DB 内原密钥不动）；否则传新密钥。
+    db_note, db_error = "", ""
+    try:
+        import ai_credentials_db
+        ai_credentials_db.set_credentials(
+            module, base_url=base_url, model=model,
+            api_key=None if keep else key,
+            reasoning_effort=(reasoning_effort if has_reasoning_effort else None),
+            source="ui")
+        db_note = "，已写入 AI 凭证库（任务下次调用立即生效，无需重启）"
+    except Exception as e:  # noqa: BLE001
+        # DB 写失败不打断主保存（json/加密库已落），但**响亮**告警——此时任务读侧会
+        # 回落旧口径，可能出现「保存成功但任务用旧值」的漂移，必须让用户看到。
+        db_error = f"{type(e).__name__}: {e}"
+        app.logger.error(f"AI 凭证库写入失败（任务可能仍用旧凭证，请重试或检查 tasks.db）：{db_error}")
+    # 配置刚变 → 清掉前置自检的端点探测缓存，避免出现「明明确认改好了，开跑还是被拦」
+    try:
+        import ai_selfcheck
+        ai_selfcheck.reset_probe_cache()
+    except Exception:  # noqa: BLE001
+        pass
     view = ai_config.module_public_view(ai_config.get_module(cfg, module))
-    # ⭐ 质检模块保存后立即同步到「质检自己的配置」，让「前端改了模型，所有调用立刻生效」成立。
-    # 背景：质检链路读的是 qc_config.json（另一个文件 + 加密库 "qc" 槽），与 AI 设置的
-    #       ai_config.json / "ai.qc" 槽是两套完全独立的数据。不同步就会出现
-    #       「在 AI 设置改了模型，质检却仍旧模型」——实测这正是用户改了不生效的根因。
-    # load_config 是纯重读（无缓存）：落盘后下一个镜头的 load_config 就会读到新配置，
-    # 所以这里写完后**无需重启**，下一个镜头的质检就吃新配置（G13 已改走「worker 级
-    # 读一次并复用」，不在 load_config 里缓存，此处逐镜调用不受影响）。
-    sync_note, sync_error = "", ""
-    if module == "qc":
-        try:
-            # keep=True（留空/脱敏回显）时上面没写新密钥，需回读加密库里刚生效的那把
-            eff_key = (ai_config.get_module(
-                ai_config.load_config(AI_CONFIG_PATH, LLM_CONFIG_PATH), "qc"
-            ).get("api_key") or "").strip()
-            if base_url and model and eff_key:
-                qc_client.set_endpoint(QC_CONFIG_PATH, base_url, eff_key, model)
-                sync_note = "，已同步为质检接口（下一次质检立即生效，无需重启）"
-            else:
-                sync_error = ("质检接口信息不完整，未同步（base_url=%s key=%s model=%s）"
-                              % (bool(base_url), bool(eff_key), bool(model)))
-        except Exception as e:  # noqa: BLE001
-            sync_error = f"{type(e).__name__}: {e}"
-        if sync_error:
-            app.logger.warning(
-                f"质检配置同步失败（AI 设置已保存，但质检仍会用旧接口）：{sync_error}")
-        else:
-            app.logger.info("质检接口已随 AI 设置同步："
-                            f"{base_url} / {model}（下次质检立即生效）")
     return jsonify({
         "success": True,
         "module": module,
         "module_config": view,
         "config": _ai_config_view(),
         "config_path": os.path.abspath(AI_CONFIG_PATH),
-        "qc_synced": bool(module == "qc" and not sync_error),
-        "qc_sync_error": sync_error,
+        "credentials_db_updated": bool(not db_error),
+        "credentials_db_error": db_error,
         "message": (f"{AI_MODULE_LABEL.get(module, module)}配置已保存"
                     + ("（api_key 保持不变）" if keep else "")
-                    + sync_note
-                    + (f"；但同步到质检失败：{sync_error}" if sync_error else "")),
+                    + db_note
+                    + (f"；但 AI 凭证库写入失败：{db_error}" if db_error else "")),
     })
+
+
+# （历史说明）保存 qc 模块曾靠 qc_client.set_endpoint 把密钥从 ai.qc 槽 best-effort 复制到
+# qc 槽，任何绕过该路由的修改都会双槽漂移 → 401。现已由 ai_credentials_db（tasks.db）
+# 单一事实源取代：qc_client.load_config 直接读 DB 的 qc 模块，旧桥接退役。
 
 
 @app.route('/api/ai/config', methods=['POST'])
@@ -5222,8 +5296,17 @@ def api_ai_config_clear():
     # A-22（M5）：clear_module 有落盘副作用（清空模块配置 + 同步清密钥库），必须保留调用；
     # 返回值此前被赋给 cfg 却从未使用（响应改由下方 _ai_config_view() 重新取整份视图），故去掉赋值。
     ai_config.clear_module(AI_CONFIG_PATH, module=module, legacy_path=LLM_CONFIG_PATH)
-    # ⭐ 与「保存」对称：清空质检模块（或整体重置）时，同步清空质检自己的接口配置，
-    # 避免出现「AI 设置显示未配置，质检却仍在用旧接口」的新的不一致。
+    # ⭐ 与「保存」对称：清空某模块（或整体重置）时，同步清空 AI 凭证库（tasks.db）里
+    # 对应行，避免出现「AI 设置显示已清空，任务却仍读到 DB 旧凭证」。清 qc/整体重置时
+    # 也重置质检自己的 endpoint_override（旧 json 口径，保留向后兼容）。
+    db_clear_note, db_clear_error = "", ""
+    try:
+        import ai_credentials_db
+        ai_credentials_db.clear_credentials(module)
+        db_clear_note = "，AI 凭证库已同步清空"
+    except Exception as e:  # noqa: BLE001
+        db_clear_error = f"{type(e).__name__}: {e}"
+        app.logger.error(f"AI 凭证库清空失败（任务可能仍用旧凭证）：{db_clear_error}")
     reset_note, reset_error = "", ""
     if module in (None, "qc"):
         try:
@@ -5237,11 +5320,48 @@ def api_ai_config_clear():
         "module": module,
         "config": _ai_config_view(),
         "config_path": os.path.abspath(AI_CONFIG_PATH),
+        "credentials_db_cleared": bool(not db_clear_error),
+        "credentials_db_error": db_clear_error,
         "qc_reset": bool(module in (None, "qc") and not reset_error),
         "qc_reset_error": reset_error,
         "message": ((f"{AI_MODULE_LABEL.get(module, module)}配置已清除" if module else "AI 设置已整体重置")
+                    + db_clear_note
                     + reset_note
+                    + (f"；但 AI 凭证库清空失败：{db_clear_error}" if db_clear_error else "")
                     + (f"；但质检接口重置失败：{reset_error}" if reset_error else "")),
+    })
+
+
+@app.route('/api/ai/selfcheck', methods=['GET'])
+def api_ai_selfcheck():
+    """AI 前置自检（P0-5）：三个模块（text/qc/chat）的配置完整性 + 可选端点可达性。
+
+    query:
+      probe=1  附带端点可达性探测（GET {base_url}/models，结果带 60s 缓存）
+      fresh=1  强制绕过探测缓存（刚改完配置时用）
+
+    返回的 `ok=False` 即「当前配置一开跑就会失败」，前端据此在 AI 设置页 / 项目页
+    显示红字阻断提示；`modules[*].hint` 给出逐模块的修复指引。
+    """
+    _probe = str(request.args.get("probe") or "").strip().lower() in ("1", "true", "yes", "on")
+    _fresh = str(request.args.get("fresh") or "").strip().lower() in ("1", "true", "yes", "on")
+    try:
+        import ai_selfcheck
+        rep = ai_selfcheck.check_modules(probe=_probe, force_probe=_fresh)
+        _gate_off = ai_selfcheck.gate_disabled()
+    except Exception as e:  # noqa: BLE001  自检失败按 500 明确报出，不假装通过
+        return jsonify({"success": False,
+                        "error": f"自检执行失败：{type(e).__name__}: {e}"}), 500
+    return jsonify({
+        "success": True,
+        "ok": rep["ok"],
+        "probed": rep["probed"],
+        "message": rep["message"],
+        "hint": rep["hint"],
+        "blocked_modules": rep["blocked_modules"],
+        "blocked_labels": rep["blocked_labels"],
+        "modules": rep["modules"],
+        "gate_off": _gate_off,
     })
 
 
@@ -5262,6 +5382,12 @@ def api_ai_test():
     # 否则网关恢复/换好网关后，这里会被上一轮的熔断状态直接拦下并报"不可用"，
     # 用户会以为新配置也没用。
     LLMClient.reset_gateway_circuits()
+    # 同理清掉前置自检的端点探测缓存：测试通过后马上开跑，门禁不该还拿着改之前的旧结论
+    try:
+        import ai_selfcheck
+        ai_selfcheck.reset_probe_cache()
+    except Exception:  # noqa: BLE001
+        pass
 
     cfg = ai_config.load_config(AI_CONFIG_PATH, LLM_CONFIG_PATH)
     saved = ai_config.get_module(cfg, module)
@@ -5291,8 +5417,17 @@ def api_ai_test():
         return jsonify(result), (200 if result.get("success") else 400)
 
     try:
-        client = LLMClient(AI_CONFIG_PATH, config=ep, timeout=int(data.get("timeout") or 60))
+        # ⭐ P0-5 第②项收尾：探针与运行态**必须走同一条客户端构造路径**。
+        # 此前这里自建 LLMClient(AI_CONFIG_PATH, config=ep)，运行态走 _ai_client_for_module，
+        # 两边各写一份「参数取谁 / reasoning_effort 怎么注入 / 默认超时多少」的推导 ——
+        # 一旦分叉就是「测试连接通过、运行时行为不一致」的经典温床。现在只此一条路径。
+        client = _ai_client_for_module(
+            module, base_url=ep["base_url"], api_key=ep["api_key"], model=ep["model"],
+            timeout=int(data.get("timeout") or 60), reasoning_effort=ep["reasoning_effort"])
         result = dict(client.test_connection() or {})
+    except LLMError as e:
+        # 与运行态同一个报错：未配置时的提示语完全一致，不再出现"测试说没问题、跑起来报未配置"
+        result = {"success": False, "error": str(e)}
     except LLMGatewayUnavailable as e:
         # 网关整体不可用：明确区分于「密钥写错」
         result = {"success": False, "verdict": "gateway_unavailable",
@@ -9696,6 +9831,10 @@ def api_autopilot_plan_set(project_name):
 @_autopilot_guard
 def api_autopilot_enable():
     """开启托管（可同时带生产配置）。novel_id 缺省时从项目注册表自动关联。"""
+    # P0-5 门禁：托管是无人值守路径，配置不全时开闸只会白跑一整晚 —— 先在门口拦下
+    _gate = _ai_gate_or_400("episode")
+    if _gate is not None:
+        return _gate
     data = request.json or {}
     # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
     project, err = _project_or_400(data.get('project') or data.get('project_name') or '',
@@ -9870,6 +10009,10 @@ def api_autopilot_exception_resolve():
 @_autopilot_guard
 def api_autopilot_run_once():
     """立即生产指定一集（同步返回结果；用于联调与补跑，不建议前端长等待）"""
+    # P0-5 门禁：整集生产依赖文本分析模型，未配置直接阻断（不再「跑一半才 401」）
+    _gate = _ai_gate_or_400("episode")
+    if _gate is not None:
+        return _gate
     data = request.json or {}
     # 口径统一（F-01 收口）：run-once / review 此前用 _safe_project，会把越界/空/控制字符
     # 项目名静默收敛成合法键，与全仓 46 处 _project_or_400 不一致；现改走同一入口。
@@ -10977,6 +11120,10 @@ def api_agent_kill():
 @app.route('/api/agent/chat', methods=['POST'])
 def api_agent_chat():
     """下发一条自然语言指令，总控 AI 自主决策并执行（异步任务，返回 job_id 供轮询）"""
+    # P0-5 门禁：总控对话模型未配置 → 闸在门口，避免 issue 落库后才发现跑不动
+    _gate = _ai_gate_or_400("chat")
+    if _gate is not None:
+        return _gate
     data = request.json or {}
     message = str(data.get("message") or "").strip()
     if not message:

@@ -792,6 +792,29 @@ def _produce(project: str, plan: dict, pick: dict) -> None:
     A = _A()
     t0 = time.time()
 
+    # P0-5 门禁（无人值守分支）：托管最怕「静默失败」—— AI 配置不全时若照跑，整晚生产
+    # 会全是 401 且只留在日志里。这里直接落死信 + 更新当前态，让问题出现在前端
+    # 「异常」列表（可一键处理重跑），而不是被埋掉。
+    try:
+        import ai_selfcheck
+        _gate = ai_selfcheck.gate("episode")
+    except Exception as e:  # noqa: BLE001  门禁自身故障不得阻断生产
+        logger.error("AI 前置门禁执行异常（按放行处理）：%s", e)
+        _gate = {"ok": True}
+    if not _gate.get("ok"):
+        _reason = _gate.get("message") or "AI 前置自检未通过"
+        logger.error("第%s集托管生产被 AI 门禁阻断：%s", episode_no, _reason)
+        try:
+            pipeline.mark_dead_letter(project, episode_no, _reason,
+                                      detail=(_gate.get("hint") or ""))
+        except Exception as e:  # noqa: BLE001
+            logger.error("落死信失败：%s", e)
+        _set_current(project=project, episode=episode_no,
+                     title=chapter.get("title") or f"第{episode_no}章",
+                     step="blocked", message=_reason, percent=0,
+                     started_at=_now(), retries=0, phase="blocked", steps_done=[])
+        return
+
     _set_current(project=project, episode=episode_no,
                  title=chapter.get("title") or f"第{episode_no}章",
                  step="script", message=f"开始生产：{pick.get('reason')}",

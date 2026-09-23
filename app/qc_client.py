@@ -687,25 +687,42 @@ def load_config(config_path: str) -> dict:
             logger.error(f"质检配置文件损坏，解析失败（fail-loud，本次按默认关闭）：{e}")
             cfg["_config_corrupt"] = True
             cfg["_config_error"] = str(e)
-    # 密钥取值：环境变量 > 加密库 > json（迁移后应为空）
+    # ⭐ 单一事实源：AI 凭证统一走 tasks.db 的 ai_credentials 表（qc 模块）。
+    # get_credentials 内部已按 env > DB 解析密钥（env 仍最高，运维部署可用 env 覆盖），
+    # 故这里直接信任其结果；DB 有非空字段就覆盖 json 值。
+    # 回落：DB 读不到（模块异常）才走旧的 secrets.enc「qc 槽 + env base/model」。
     try:
-        import secret_store
-        secure = secret_store.get_store(_PROJECT_ROOT).get_api_key("qc")
-        if secure:
-            cfg["api_key"] = secure
-            # endpoint_override 若声明了 base_url/model 但密钥为空，用加密库的密钥补齐，
+        import ai_credentials_db
+        db_ep = ai_credentials_db.get_credentials("qc")
+        if db_ep.get("base_url"):
+            cfg["base_url"] = db_ep["base_url"]
+        if db_ep.get("model"):
+            cfg["model"] = db_ep["model"]
+        if db_ep.get("api_key"):
+            cfg["api_key"] = db_ep["api_key"]
+            # endpoint_override 若声明了 base_url/model 但密钥为空，用 DB 的密钥补齐，
             # 否则 resolve_endpoint 会因 override 缺 key 而落到未配置分支
             ov = cfg.get("endpoint_override")
             if isinstance(ov, dict) and ov and not (ov.get("api_key") or "").strip():
-                ov["api_key"] = secure
-        env_base = secret_store.SecretStore.env_base_url("qc")
-        env_model = secret_store.SecretStore.env_model("qc")
-        if env_base:
-            cfg["base_url"] = env_base
-        if env_model:
-            cfg["model"] = env_model
+                ov["api_key"] = db_ep["api_key"]
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"质检密钥读取异常（回退 json）：{e}")
+        logger.warning(f"AI 凭证 DB（qc）读取失败，回落加密库/env：{e}")
+        try:
+            import secret_store
+            secure = secret_store.get_store(_PROJECT_ROOT).get_api_key("qc")
+            if secure:
+                cfg["api_key"] = secure
+                ov = cfg.get("endpoint_override")
+                if isinstance(ov, dict) and ov and not (ov.get("api_key") or "").strip():
+                    ov["api_key"] = secure
+            env_base = secret_store.SecretStore.env_base_url("qc")
+            env_model = secret_store.SecretStore.env_model("qc")
+            if env_base:
+                cfg["base_url"] = env_base
+            if env_model:
+                cfg["model"] = env_model
+        except Exception as e2:  # noqa: BLE001
+            logger.warning(f"质检密钥读取异常（回退 json）：{e2}")
     # 类型兜底：统一交给 `_normalize`（save_config / load_config_dict 用的是同一套规则）
     # ⚠️ 审计 G2：这里原本手写了一份「简化版」归一化，且布尔项用的是裸 `bool()` ——
     #    字符串 "false"/"0"/"no"/"off" 都是非空字符串 → 一律判 True（用户在页面或第三方
