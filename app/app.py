@@ -5389,7 +5389,7 @@ def api_ai_config_clear():
         "message": ((f"{AI_MODULE_LABEL.get(module, module)}配置已清除" if module else "AI 设置已整体重置")
                     + db_clear_note
                     + reset_note
-                    + (f"；但 AI 凭证库清空失败：{db_clear_error}" if db_clear_error else "")
+                    + (f"；但凭证清空核对未通过：{db_clear_error}" if db_clear_error else "")
                     + (f"；但质检接口重置失败：{reset_error}" if reset_error else "")),
     })
 

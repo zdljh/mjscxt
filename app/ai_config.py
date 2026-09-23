@@ -368,6 +368,9 @@ def save_module(config_path: str, module: str, base_url: str = None, model: str 
     密钥处理（P0-3 加固）：
     - api_key 为 None / 空 / 含 * 的脱敏值时，视为「不改动原密钥」；
     - 有效新密钥写入**加密库**（output/secrets.enc），json 中该字段恒为空字符串；
+    - 并**镜像到凭证单一事实源 tasks.db**（任务实际读的就是它，见
+      `_mirror_credentials_db`）—— 镜像内置于本函数，任何调用方都自动闭合，
+      不再依赖各路由自己补一次；
     - 加密不可用时（未装 cryptography），拒绝保存明文并抛 ValueError，
       提示改用环境变量 MJSCXT_API_KEY_TEXT/QC/CHAT。
 
@@ -425,7 +428,11 @@ def _has_plaintext_key(raw: dict) -> bool:
 
 @_locked
 def clear_module(config_path: str, module: str = None, legacy_path: str = None) -> dict:
-    """清空单个模块；module 为空则清空全部三个模块（整体重置）。同步清除加密库中的密钥。"""
+    """清空单个模块；module 为空则清空全部三个模块（整体重置）。
+
+    同步清除三处：json（`api_key` 恒空）+ 旧加密库槽 `ai.<module>` + **凭证单一事实源
+    tasks.db 的 ai_credentials 行**（后者才是任务实际读的那份，见 `_mirror_credentials_db`）。
+    """
     cfg = load_config(config_path, legacy_path)
     if module:
         if module not in MODULES:
