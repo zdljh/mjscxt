@@ -691,6 +691,7 @@ def load_config(config_path: str) -> dict:
     # get_credentials 内部已按 env > DB 解析密钥（env 仍最高，运维部署可用 env 覆盖），
     # 故这里直接信任其结果；DB 有非空字段就覆盖 json 值。
     # 回落：DB 读不到（模块异常）才走旧的 secrets.enc「qc 槽 + env base/model」。
+    db_key = ""
     try:
         import ai_credentials_db
         db_ep = ai_credentials_db.get_credentials("qc")
@@ -699,22 +700,35 @@ def load_config(config_path: str) -> dict:
         if db_ep.get("model"):
             cfg["model"] = db_ep["model"]
         if db_ep.get("api_key"):
-            cfg["api_key"] = db_ep["api_key"]
+            db_key = db_ep["api_key"]
+            cfg["api_key"] = db_key
             # endpoint_override 若声明了 base_url/model 但密钥为空，用 DB 的密钥补齐，
             # 否则 resolve_endpoint 会因 override 缺 key 而落到未配置分支
             ov = cfg.get("endpoint_override")
             if isinstance(ov, dict) and ov and not (ov.get("api_key") or "").strip():
-                ov["api_key"] = db_ep["api_key"]
+                ov["api_key"] = db_key
     except Exception as e:  # noqa: BLE001
         logger.warning(f"AI 凭证 DB（qc）读取失败，回落加密库/env：{e}")
+    # ⚠️「DB 没有该模块的密钥」≠「没配过密钥」。本模块的密钥写入点（save_config /
+    #    set_endpoint）写的是**旧加密库**的裸槽 `qc`；AI 设置页（ai_config.save_module）
+    #    写的是 `ai.qc`。DB 只在这两种之外（启动迁移 / UI 显式写库）才落行。
+    #    原实现只在 DB **抛异常**时才回落旧口径 →「DB 无行 + 加密库有钥」被判成无钥
+    #    → public_view.ready=False / video_qc_active=False → 质检被静默跳过，
+    #    前端还弹「质检接口信息不完整」的误导警告（verify_project_audit A2 守护的正是它）。
+    #    现改为：DB 未给出密钥就回落旧口径。槽位顺序沿用
+    #    ai_credentials_db.migrate_from_legacy 的 slot_map["qc"]（ai.qc → qc）。
+    if not db_key:
         try:
             import secret_store
-            secure = secret_store.get_store(_PROJECT_ROOT).get_api_key("qc")
-            if secure:
-                cfg["api_key"] = secure
-                ov = cfg.get("endpoint_override")
-                if isinstance(ov, dict) and ov and not (ov.get("api_key") or "").strip():
-                    ov["api_key"] = secure
+            store = secret_store.get_store(_PROJECT_ROOT)
+            for _slot in ("ai.qc", "qc"):
+                secure = (store.get_api_key(_slot) or "").strip()
+                if secure:
+                    cfg["api_key"] = secure
+                    ov = cfg.get("endpoint_override")
+                    if isinstance(ov, dict) and ov and not (ov.get("api_key") or "").strip():
+                        ov["api_key"] = secure
+                    break
             env_base = secret_store.SecretStore.env_base_url("qc")
             env_model = secret_store.SecretStore.env_model("qc")
             if env_base:

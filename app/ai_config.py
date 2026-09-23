@@ -273,6 +273,7 @@ def get_module(cfg: dict, module: str) -> dict:
     ns = f"ai.{module}"
     # ⭐ 单一事实源：DB（ai_credentials 表）优先。get_credentials 内部已按
     # env > DB 解析，直接信任其结果；DB 有非空字段就覆盖 json 值。
+    db_key = ""
     try:
         import ai_credentials_db
         db_ep = ai_credentials_db.get_credentials(module)
@@ -281,12 +282,19 @@ def get_module(cfg: dict, module: str) -> dict:
         if db_ep.get("model"):
             ep["model"] = db_ep["model"]
         if db_ep.get("api_key"):
-            ep["api_key"] = db_ep["api_key"]
+            db_key = db_ep["api_key"]
+            ep["api_key"] = db_key
         if db_ep.get("reasoning_effort"):
             ep["reasoning_effort"] = db_ep["reasoning_effort"]
-        return ep
     except Exception as e:  # noqa: BLE001  DB 不可用回落旧口径（json + 加密库槽 + env）
         logger.warning(f"AI 凭证 DB 读取失败，回落加密库/env：{e}")
+    if db_key:
+        return ep
+    # ⚠️「DB 没有该模块的密钥」≠「没配过密钥」：本侧密钥写入点（save_module）落的是
+    #    旧加密库槽 `ai.<module>`，DB 只在「启动一次性迁移 / UI 显式写库」时才有行。
+    #    原实现在 DB 返回「无该模块行」时同样直接 return → 旧槽里的密钥永远读不到
+    #    （DB 无行 + 加密库有钥）→ 该模块被判「未配置」（chat 总控 / qc 质检实测命中）。
+    #    现改为：DB 未给出密钥就继续走旧口径回落（env > 加密库槽 > json 明文）。
     # 回落：非密钥字段环境变量优先
     env_base = secret_store.SecretStore.env_base_url(ns)
     env_model = secret_store.SecretStore.env_model(ns)
