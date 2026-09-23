@@ -30,7 +30,7 @@ from config import (
     DUB_DIR, TTS_DEFAULT_PARAMS, H3_STRIP_AUDIO, H3_EMIT_AUDIO, H3_SFX_ISOLATE,
     DUB_MIX_DIR, MIX_DEFAULT_PARAMS, CONTINUITY_DIR,
     TASKS_DB_PATH, TASK_QUEUE_CONCURRENCY, TASK_UNIT_MIN_BYTES,
-    KEYFRAME_CHAIN_MODE,
+    KEYFRAME_CHAIN_MODE, WORKFLOW_TEMPLATE,
 )
 from script_generator import ScriptGenerator
 from comfyui_client import (ComfyUIClient, camera_spec as _camera_spec,
@@ -3037,7 +3037,11 @@ def _match_shot_chars(shot: dict, char_idx: dict) -> list:
 
 def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_idx: dict,
                                project_name: str = None) -> list:
-    """为单个镜头分配最多 3 张参考图（对应 分镜生成.json 的 image1/image2/image3）
+    """为单个镜头分配最多 3 张参考图（对应分镜工作流的 3 个参考图槽位）
+
+    槽位键名随编辑节点换代而变（QwenImage2.1 的 TextEncodeQwenImage21 是
+    ``images.image_1..3``，老的 TextEncodeQwenImageEditPlus 是 ``image1..3``），
+    由 comfyui_client._find_image_slots 统一识别；本函数只负责**按序**给出这 3 张图。
 
     槽位语义（按重要性排序）：
       1) 主角色正视图 —— 人物外观锚点（S6：匹配不到任何角色时不再 take-first，
@@ -3464,7 +3468,8 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         blocked = sum(1 for r in manifest_shots if r.get("qc_blocked"))
         manifest = {
             "project_name": project_name,
-            "workflow": "分镜生成.json",
+            # 从模板表取，避免模型换代后 manifest 里还写着旧工作流名（口径漂移）
+            "workflow": WORKFLOW_TEMPLATE.get("storyboard_gen", ""),
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "total": len(manifest_shots),
             "success_count": ok,

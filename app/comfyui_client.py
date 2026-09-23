@@ -130,6 +130,110 @@ def _is_negative_slot(value: str) -> bool:
     return any(h.lower() in low for h in NEGATIVE_HINTS)
 
 
+# ===================== 提示词槽位极性（正负同体节点） =====================
+#
+# QwenImage2.1 起，``TextEncodeQwenImage21`` 把正向(prompt)与负向(negative_prompt)
+# **装在同一个节点**里，并输出 positive / negative / latent 三路。这打破了本模块此前
+# 「一个提示词节点一个极性，靠 NEGATIVE_HINTS 内容启发式判极性」的隐含前提：
+#
+#   把该节点的所有字符串输入拼起来判极性 → 必然命中「模糊/水印」等负向词
+#   → 整个节点被判成负向槽位。后果有两个方向，且**都不会报错**：
+#     ① ``_generate_base_image`` 落正向提示词时按「非 text 字段就把所有字符串输入都写成
+#        正向词」的老逻辑走 → 把 negative_prompt 覆盖成正向提示词，负向词彻底失效；
+#     ② ``clean_conflict_negative_tokens`` / ``_harden_no_watermark`` 会因为字段名
+#        (``negative_prompt``) 不在 PROMPT_TEXT_FIELDS 里而**完全跳过负向槽位**。
+#
+# 所以极性判定改为「节点类型优先、内容启发式兜底」：
+#   - 正负同体节点 → 按**字段名**定极性，不做任何内容启发式；
+#   - 老模板（CLIPTextEncode / TextEncodeQwenImageEditPlus）→ 沿用 _is_negative_slot。
+#: 「正负同体」提示词节点类型
+COMBINED_PROMPT_NODE_TYPES = ("TextEncodeQwenImage21",)
+#: 正负同体节点里承载正向 / 负向文本的字段名
+COMBINED_POSITIVE_FIELD = "prompt"
+COMBINED_NEGATIVE_FIELD = "negative_prompt"
+#: 图片链路的提示词编码节点白名单（集中一处，避免 4 处手抄漂移）
+PROMPT_NODE_TYPES = ("CLIPTextEncode", "TextEncodeQwenImageEditPlus",
+                     "TextEncodeQwenImage21")
+
+
+def _node_sort_key(nid) -> int:
+    """节点 id 排序键（数字 id 按数值，非数字 id 视作 0 —— 与历史行为一致）"""
+    return int(nid) if str(nid).isdigit() else 0
+
+
+#: 「动态展开」输入类型：object_info 里只登记**父名**，子项在提交时以点号键出现
+#:   COMFY_AUTOGROW_V3     → images.image_1 …
+#:   COMFY_DYNAMICCOMBO_V3 → format.bit_depth / format.input_color_space …
+DYNAMIC_INPUT_TYPES = ("COMFY_AUTOGROW_V3", "COMFY_DYNAMICCOMBO_V3")
+
+
+def _is_dynamic_child(declared: dict, key: str) -> bool:
+    """``key`` 是否是某个动态展开输入（autogrow / dynamic-combo）的子项？
+
+    服务端 `_expand_schema_for_dynamic` / `DynamicCombo` 就是这样生成子项名的，
+    校验器若只比对父名，会把合法的 `images.image_1`、`format.bit_depth` 全报成
+    「未知输入」——纯误报，会把真异常淹掉。
+    """
+    if "." not in str(key):
+        return False
+    parent = str(key).rsplit(".", 1)[0]
+    spec = declared.get(parent)
+    return bool(spec) and isinstance(spec, (list, tuple)) and bool(spec) \
+        and spec[0] in DYNAMIC_INPUT_TYPES
+
+
+def _prompt_slot_polarity(class_type: str, field: str, value) -> str:
+    """提示词槽位极性：``"pos"`` / ``"neg"`` / ``""``（不是提示词槽位）。
+
+    - 正负同体节点：按**字段名**判（prompt=正向、negative_prompt=负向），
+      空串也算（负向槽位默认就是空的，必须能被加固写入）；
+    - 老模板：空槽位返回 ""（无可判内容，跳过），否则走 `_is_negative_slot` 启发式。
+    """
+    if field not in PROMPT_TEXT_FIELDS or not isinstance(value, str):
+        return ""
+    if class_type in COMBINED_PROMPT_NODE_TYPES:
+        if field == COMBINED_POSITIVE_FIELD:
+            return "pos"
+        if field == COMBINED_NEGATIVE_FIELD:
+            return "neg"
+        return ""
+    if not value.strip():
+        return ""
+    return "neg" if _is_negative_slot(value) else "pos"
+
+
+def _iter_prompt_slots(api_prompt: dict, class_types=PROMPT_NODE_TYPES):
+    """遍历提示词槽位，产出 ``(节点id, 字段名, 取值, 极性)``。
+
+    判断单一来源：极性一律经 `_prompt_slot_polarity`，调用方不再各写一套启发式。
+    """
+    for nid, node in (api_prompt or {}).items():
+        if not isinstance(node, dict):
+            continue
+        ctype = str(node.get("class_type") or "")
+        if ctype not in class_types:
+            continue
+        inputs = node.get("inputs") or {}
+        for field in PROMPT_TEXT_FIELDS:
+            value = inputs.get(field)
+            polarity = _prompt_slot_polarity(ctype, field, value)
+            if polarity:
+                yield nid, field, value, polarity
+
+
+# ===================== 参考图槽位键名 =====================
+# 两代编辑节点两种键名，必须都认（只认老键名 → 新模板参考图静默不注入）：
+#   Qwen-Edit 2511 / TextEncodeQwenImageEditPlus :  image1 / image2 / image3
+#   QwenImage2.1 / TextEncodeQwenImage21         :  images.image_1 … (autogrow 点号键)
+_IMAGE_SLOT_RE = re.compile(r"^(?:images\.)?image_?(\d*)$")
+
+
+def _slot_index(key) -> int:
+    """参考图槽位序号（``images.image_3`` / ``image3`` → 3；无语尾数字 → 0）"""
+    m = _IMAGE_SLOT_RE.match(str(key))
+    return int(m.group(1)) if (m and m.group(1)) else 0
+
+
 # C 项⑧：图片链路**彻底无水印**（不修改 ComfyUI 工作流文件，仅在本模块提交前对内存中的
 # API prompt 做强化）：
 #   1) 正向提示词统一追加「无水印/无文字」声明；
@@ -254,8 +358,12 @@ def camera_spec(camera) -> str:
 SHOT_ACTION_SUFFIX = ("；上述动作必须完整、明确地表现出来（动作结果一眼可辨，如道具已收起、已离开手部），"
                       "不得省略、弱化或只做出起始姿态")
 
-# 提示词所在字段（CLIPTextEncode.text / TextEncodeQwenImageEditPlus.prompt）
-PROMPT_TEXT_FIELDS = ("text", "prompt")
+# 提示词所在字段：
+#   CLIPTextEncode.text / TextEncodeQwenImageEditPlus.prompt
+#   TextEncodeQwenImage21.prompt(正向) + TextEncodeQwenImage21.negative_prompt(负向)
+# ⚠️ negative_prompt 必须在内：漏掉它会让「冲突负向词清理 / 去水印负向加固」在
+#    QwenImage2.1 上**整段静默跳过**（字段名对不上 → 一句都没改，也不报错）。
+PROMPT_TEXT_FIELDS = ("text", "prompt", "negative_prompt")
 # 需要剥离的 LoadImage* 前端显示后缀
 SUFFIX_RE = re.compile(r"\s*\[(output|input|temp)\]\s*$")
 
@@ -641,12 +749,26 @@ class ComfyUIClient:
                     if v[0] not in ids:
                         dangling.append(f"{nid}.{k} -> {v[0]}")
                 elif spec is not None:
-                    if k not in ((spec.get("required") or {}) | (spec.get("optional") or {})):
+                    declared = (spec.get("required") or {}) | (spec.get("optional") or {})
+                    if k not in declared and not _is_dynamic_child(declared, k):
                         unexpected.append(f"{nid}.{k}")
             if spec:
                 for req in (spec.get("required") or {}).keys():
-                    if req not in (node.get("inputs") or {}):
-                        missing_required.append(f"{nid}({ct}).{req}")
+                    if req in (node.get("inputs") or {}):
+                        continue
+                    # autogrow 输入（COMFY_AUTOGROW_V3，如 TextEncodeQwenImage21.images）：
+                    # object_info 里它挂在 required 下，但服务端 `_expand_schema_for_dynamic`
+                    # 会把模板名展开成**点号键**（images.image_1 …）并全部登记为 optional，
+                    # `template.min=0` 时一个都不传也完全合法（execute 收到 {}）。
+                    # 所以：min=0 → 永不算缺失；min>0 → 有任一 `req.xxx` 键即满足。
+                    req_spec = (spec.get("required") or {}).get(req) or []
+                    if req_spec and req_spec[0] == "COMFY_AUTOGROW_V3":
+                        extra = req_spec[1] if len(req_spec) > 1 and isinstance(req_spec[1], dict) else {}
+                        if (extra.get("template") or {}).get("min", 0) == 0:
+                            continue
+                        if any(str(k).startswith(f"{req}.") for k in (node.get("inputs") or {})):
+                            continue
+                    missing_required.append(f"{nid}({ct}).{req}")
         report = {
             "node_count": len(api_prompt),
             "unknown_types": unknown_types,
@@ -662,10 +784,36 @@ class ComfyUIClient:
 
     def upload_image(self, image_path: str, name: str = None,
                      subfolder: str = "", image_type: str = "input") -> str:
-        """上传图片到 ComfyUI（input / output / temp 目录）"""
+        """上传图片到 ComfyUI（input / output / temp 目录）
+
+        ⚠️ ComfyUI 的 /upload/image 只接受**裸文件名**：
+        `name` 里带 "/" 而 subfolder 为空时，服务端会拿这个相对路径去 join 一个
+        不存在的目录 → 直接 **500 "Server got itself in trouble"**（实测复现）。
+        而调用方习惯把「项目/类型/资产」目录一起塞进 name（见 generate_multiview
+        的 filename_prefix），于是「资产基础图上传」100% 500，多视角链路整条断掉。
+        这里统一做归一化：name 里的目录部分挪到 subfolder 参数，name 只留文件名。
+        返回格式不变（"子目录/文件名"），下游 LoadImageOutput 的 [output] 标注照旧。
+        """
         url = f"{self.base_url}/upload/image"
         if name is None:
             name = os.path.basename(image_path)
+        # 归一化：反斜杠统一；按 "/" 切段（丢弃空段，兼容首/尾/重复斜杠）；
+        # 末段是文件名，前面所有段是目录 → 目录进 subfolder，name 只留裸文件名。
+        # 末尾带 "/" 视为「只给了目录」→ 文件名回落本地图片的 basename
+        # （否则 "d/" 会被当成名为 "d" 的无扩展名文件静默传上去）。
+        raw = str(name).replace("\\", "/")
+        parts = [p for p in raw.split("/") if p]
+        if parts and raw.endswith("/"):
+            head, tail = "/".join(parts), os.path.basename(image_path)
+        elif len(parts) > 1:
+            head, tail = "/".join(parts[:-1]), parts[-1]
+        elif parts:
+            head, tail = "", parts[0]
+        else:
+            head, tail = "", os.path.basename(image_path)
+        name = tail
+        if head:
+            subfolder = "/".join(p for p in (str(subfolder).strip("/"), head) if p)
         with open(image_path, "rb") as f:
             files = {"image": (name, f, "image/png")}
             data = {"overwrite": "true", "type": image_type}
@@ -839,35 +987,28 @@ class ComfyUIClient:
     def clean_conflict_negative_tokens(cls, api_prompt: dict) -> dict:
         """从负向提示词槽位剔除与正向 3D 风格冲突的词（P0：风格冲突）
 
-        只处理判定为负向的槽位（含 NEGATIVE_HINTS 之一），不改正向提示词。
-        返回 {节点id: 变更说明} 便于审计。
+        只处理**极性为负向**的槽位，不改正向提示词。极性经 `_prompt_slot_polarity`
+        判定（正负同体节点按字段名，老模板走内容启发式），因此 QwenImage2.1 的
+        ``TextEncodeQwenImage21.negative_prompt`` 也能被清理（此前字段名不在白名单 → 整段跳过）。
+        返回 {节点id.字段: 变更说明} 便于审计。
         """
         changed: dict = {}
-        for nid, node in (api_prompt or {}).items():
-            if not isinstance(node, dict):
+        for nid, field, value, polarity in _iter_prompt_slots(api_prompt):
+            if polarity != "neg" or not (value or "").strip():
                 continue
-            if str(node.get("class_type") or "") not in ("CLIPTextEncode", "TextEncodeQwenImageEditPlus"):
+            new = value
+            removed: List[str] = []
+            for tok in CONFLICT_NEGATIVE_SORTED:
+                if tok in new:
+                    new = new.replace(tok, "")
+                    removed.append(tok)
+            if not removed:
                 continue
-            inputs = node.get("inputs") or {}
-            for field in PROMPT_TEXT_FIELDS:
-                value = inputs.get(field)
-                if not isinstance(value, str) or not value.strip():
-                    continue
-                if not _is_negative_slot(value):
-                    continue    # 正向槽位不动（含「不得出现…水印」这类否定式正向约束）
-                new = value
-                removed: List[str] = []
-                for tok in CONFLICT_NEGATIVE_SORTED:
-                    if tok in new:
-                        new = new.replace(tok, "")
-                        removed.append(tok)
-                if not removed:
-                    continue
-                new = re.sub(r"[，,、]\s*(?=[，,、])", "", new)
-                new = re.sub(r"^\s*[，,、]+\s*", "", new)
-                new = re.sub(r"[，,、\s]+$", "", new)
-                inputs[field] = new
-                changed[str(nid)] = f"{field}: 移除冲突负向词 {removed}"
+            new = re.sub(r"[，,、]\s*(?=[，,、])", "", new)
+            new = re.sub(r"^\s*[，,、]+\s*", "", new)
+            new = re.sub(r"[，,、\s]+$", "", new)
+            (api_prompt[nid]["inputs"])[field] = new
+            changed[f"{nid}.{field}"] = f"移除冲突负向词 {removed}"
         if changed:
             logger.info(f"[风格冲突清理] 负向提示词已修正 {len(changed)} 处: {changed}")
         return changed
@@ -904,38 +1045,33 @@ class ComfyUIClient:
     def _harden_no_watermark(api_prompt: dict) -> dict:
         """C 项⑧：图片生成链路彻底去水印（仅改内存中的 API prompt，不动工作流文件）
 
-        对每个提示词节点（CLIPTextEncode / TextEncodeQwenImageEditPlus）：
-        - 该槽位是负向提示词 → 追加水印类排除词；
-        - 该槽位是正向提示词 → 追加「画面干净、无任何水印/文字」声明。
+        对每个提示词**槽位**（极性经 `_prompt_slot_polarity` 判定）：
+        - 负向槽位 → 追加水印类排除词；
+        - 正向槽位 → 追加「画面干净、无任何水印/文字」声明。
         幂等：已包含则不重复追加。
-        返回 {节点id: 变更说明} 便于日志审计。
+        返回 {节点id.字段: 变更说明} 便于日志审计。
+
+        ⚠️ 两处易错点，改动前先读：
+        1. **正向槽位必须非空才加固**：往空正向槽位追加会把「画面干净…」这段声明本身
+           变成全部正向提示词；
+        2. **负向槽位空着也要加固**：正负同体节点（TextEncodeQwenImage21）的
+           ``negative_prompt`` 在模板里就是空串，跳过它就等于负向排除词永远不生效。
         """
         changed = {}
-        for nid, node in (api_prompt or {}).items():
-            if not isinstance(node, dict):
+        for nid, field, value, polarity in _iter_prompt_slots(api_prompt):
+            # 幂等：已加固过的槽位直接跳过（否则正向后缀里的"水印"二字会被误判为负向）
+            if NO_WATERMARK_POSITIVE_SUFFIX in value or NO_WATERMARK_NEGATIVE_EXTRA in value:
                 continue
-            ctype = str(node.get("class_type") or "")
-            if ctype not in ("CLIPTextEncode", "TextEncodeQwenImageEditPlus"):
-                continue
-            inputs = node.get("inputs") or {}
-            for field in PROMPT_TEXT_FIELDS:
-                value = inputs.get(field)
-                if not isinstance(value, str) or not value.strip():
-                    continue
-                # 幂等：已加固过的槽位直接跳过（否则正向后缀里的"水印"二字会被误判为负向）
-                if NO_WATERMARK_POSITIVE_SUFFIX in value or NO_WATERMARK_NEGATIVE_EXTRA in value:
-                    continue
-                is_negative = _is_negative_slot(value)
-                if is_negative:
-                    if NO_WATERMARK_NEGATIVE_EXTRA in value:
-                        continue
-                    inputs[field] = value.rstrip("，,;； ") + ", " + NO_WATERMARK_NEGATIVE_EXTRA
-                    changed[str(nid)] = f"{field}: 负向追加水印排除词"
-                else:
-                    if NO_WATERMARK_POSITIVE_SUFFIX in value:
-                        continue
-                    inputs[field] = value.rstrip("。;； ") + NO_WATERMARK_POSITIVE_SUFFIX
-                    changed[str(nid)] = f"{field}: 正向追加无水印声明"
+            if polarity == "neg":
+                (api_prompt[nid]["inputs"])[field] = (
+                    value.rstrip("，,;； ") + ", " + NO_WATERMARK_NEGATIVE_EXTRA
+                    if value.strip() else NO_WATERMARK_NEGATIVE_EXTRA)
+                changed[f"{nid}.{field}"] = "负向追加水印排除词"
+            else:
+                if not value.strip():
+                    continue        # 空的正向槽位不加固（见 docstring ①）
+                (api_prompt[nid]["inputs"])[field] = value.rstrip("。;； ") + NO_WATERMARK_POSITIVE_SUFFIX
+                changed[f"{nid}.{field}"] = "正向追加无水印声明"
         if changed:
             logger.info(f"[去水印强化] 图片提示词已加固 {len(changed)} 处: {changed}")
         return changed
@@ -970,37 +1106,55 @@ class ComfyUIClient:
             logger.info(f"[H3 无字幕强化] 视频提示词已加固 {len(changed)} 处: {changed}")
         return changed
 
-    def _find_positive_text_node(self, api_prompt: dict, class_types=("CLIPTextEncode",)) -> Optional[str]:
-        """在提示词编码节点中定位正向节点（不含负向关键词者）"""
-        candidates = []
-        for nid, node in api_prompt.items():
-            if node.get("class_type") not in class_types:
-                continue
-            texts = [str(v) for v in (node.get("inputs") or {}).values() if isinstance(v, str)]
-            joined = " ".join(texts)
-            if not _is_negative_slot(joined):
-                candidates.append(nid)
-        if not candidates:
-            # 全部命中负向词时，退化为「id 最大的那个」
-            pool = [nid for nid, n in api_prompt.items() if n.get("class_type") in class_types]
-            return sorted(pool, key=lambda x: int(x) if str(x).isdigit() else 0)[-1] if pool else None
-        # 正向通常有多个文本槽（如 prompt/image1..3），取最后一个可用候选
-        return sorted(candidates, key=lambda x: int(x) if str(x).isdigit() else 0)[-1]
+    def _find_positive_text_node(self, api_prompt: dict,
+                                 class_types=PROMPT_NODE_TYPES) -> Optional[str]:
+        """定位**承载正向文本的节点**（返回节点 id）。
+
+        极性来源唯一：`_prompt_slot_polarity`。正负同体节点（TextEncodeQwenImage21）
+        永远有正向字段，因此必然命中；老模板靠内容启发式区分正/负节点。
+        """
+        pos = [nid for nid, _f, _v, pol in _iter_prompt_slots(api_prompt, class_types)
+               if pol == "pos"]
+        if pos:
+            return sorted(pos, key=_node_sort_key)[-1]
+        # 退化：模板里只有负向槽位（极端情况），取 id 最大的提示词节点，避免直接失败
+        pool = [nid for nid, n in (api_prompt or {}).items()
+                if isinstance(n, dict) and n.get("class_type") in class_types]
+        return sorted(pool, key=_node_sort_key)[-1] if pool else None
+
+    def _positive_field(self, api_prompt: dict, node_id: str) -> Optional[str]:
+        """返回该正向节点真正承载正向文本的**字段名**。
+
+        必须定位字段而不是「把所有字符串输入都写成正向词」：
+        ``TextEncodeQwenImage21`` 同节点里还有 ``negative_prompt``，后者被覆盖会
+        让负向词整段失效（且不报错）。
+        """
+        node = (api_prompt or {}).get(node_id) or {}
+        ctype = str(node.get("class_type") or "")
+        inputs = node.get("inputs") or {}
+        for field in PROMPT_TEXT_FIELDS:
+            if _prompt_slot_polarity(ctype, field, inputs.get(field)) == "pos":
+                return field
+        return None
+
+    def _find_negative_slot(self, api_prompt: dict,
+                            class_types=PROMPT_NODE_TYPES) -> Optional[Tuple[str, str]]:
+        """定位负向槽位，返回 ``(节点id, 字段名)``；找不到返回 None。
+
+        返回字段名是必须的：正负同体节点的负向文本在 ``negative_prompt`` 上，
+        老模板在 ``text`` / ``prompt`` 上——只回节点 id 会让调用方写错字段。
+        """
+        neg = [(nid, f) for nid, f, _v, pol in _iter_prompt_slots(api_prompt, class_types)
+               if pol == "neg"]
+        if not neg:
+            return None
+        return sorted(neg, key=lambda t: _node_sort_key(t[0]))[-1]
 
     def _find_negative_text_node(self, api_prompt: dict,
-                                 class_types=("CLIPTextEncode",)) -> Optional[str]:
-        """在提示词编码节点中定位负向节点（含负向关键词者）——风格负向词追加用"""
-        hits = []
-        for nid, node in api_prompt.items():
-            if node.get("class_type") not in class_types:
-                continue
-            texts = [str(v) for v in (node.get("inputs") or {}).values() if isinstance(v, str)]
-            joined = " ".join(texts)
-            if _is_negative_slot(joined):
-                hits.append(nid)
-        if not hits:
-            return None
-        return sorted(hits, key=lambda x: int(x) if str(x).isdigit() else 0)[-1]
+                                 class_types=PROMPT_NODE_TYPES) -> Optional[str]:
+        """定位负向节点 id（`_find_negative_slot` 的兼容包装，仅回节点 id）"""
+        hit = self._find_negative_slot(api_prompt, class_types)
+        return hit[0] if hit else None
 
     def _generate_base_image(self, workflow_file: str, prompt_zh: str,
                              asset_type: str = None, seed: int = None,
@@ -1033,15 +1187,19 @@ class ComfyUIClient:
         # 场景资产去人
         if asset_type == "scene":
             prompt_zh = self.sanitize_scene_prompt(prompt_zh)
-        node = api_prompt[node_id]
-        if "text" in node["inputs"]:
-            node["inputs"]["text"] = prompt_zh
-        else:
-            # TextEncodeQwenImageEditPlus 等使用 prompt 字段
-            for k, v in list(node["inputs"].items()):
-                if isinstance(v, str):
-                    node["inputs"][k] = prompt_zh
-        logger.info(f"[{workflow_file}] 正向提示词节点 {node_id} 已更新（共 {len(api_prompt)} 节点）")
+        # 只写「承载正向文本的那一个字段」：
+        #   老模板 CLIPTextEncode → text ；TextEncodeQwenImageEditPlus → prompt ；
+        #   QwenImage2.1 TextEncodeQwenImage21 → prompt（同节点另有 negative_prompt）。
+        # ⚠️ 旧实现是「非 text 字段就把 node 里所有字符串输入都写成正向提示词」——
+        #    遇到正负同体的 TextEncodeQwenImage21 会把 negative_prompt 覆盖掉，负向词静默失效。
+        pos_field = self._positive_field(api_prompt, node_id)
+        if pos_field is None:
+            logger.error(f"{workflow_file} 正向节点 {node_id} 未找到可写入的正向字段，"
+                         f"输入字段={sorted((api_prompt[node_id].get('inputs') or {}).keys())}")
+            return []
+        api_prompt[node_id]["inputs"][pos_field] = prompt_zh
+        logger.info(f"[{workflow_file}] 正向提示词节点 {node_id}.{pos_field} 已更新"
+                    f"（共 {len(api_prompt)} 节点）")
         self.clean_conflict_negative_tokens(api_prompt)                 # P0：清理风格冲突负向词
         # 负向词：按风格再压一批「画风打架」的词（如国漫风不该出现写实照片）
         if style:
@@ -1071,23 +1229,26 @@ class ComfyUIClient:
         return self.get_output_files(history, ".png")
 
     def _append_style_negative(self, api_prompt: dict, style: str) -> None:
-        """把「与目标风格冲突」的词追加到负向提示词节点（找不到负向节点则跳过）"""
+        """把「与目标风格冲突」的词追加到负向提示词**槽位**（找不到负向槽位则跳过）
+
+        写入字段由 `_find_negative_slot` 给出：正负同体节点是 ``negative_prompt``，
+        老模板是 ``text`` / ``prompt``——按字段写，不能靠猜。
+        """
         negs = style_kit.negative_for_style(style)
         if not negs:
             return
         try:
-            node_id = self._find_negative_text_node(api_prompt)
+            hit = self._find_negative_slot(api_prompt)
         except Exception:  # noqa: BLE001
-            node_id = None
-        if not node_id:
+            hit = None
+        if not hit:
             return
+        node_id, field = hit
         node = api_prompt[node_id]
-        cur = ""
-        for k in ("text", "prompt"):
-            if isinstance(node.get("inputs", {}).get(k), str):
-                cur = node["inputs"][k]
-                node["inputs"][k] = (cur.rstrip("，,。") + "，" + "，".join(negs)) if cur.strip() else "，".join(negs)
-                break
+        cur = node.get("inputs", {}).get(field)
+        if not isinstance(cur, str):
+            return
+        node["inputs"][field] = (cur.rstrip("，,。") + "，" + "，".join(negs)) if cur.strip() else "，".join(negs)
 
     def generate_character_base(self, prompt_zh: str, seed: int = None,
                                 style: str = "", size=None,
@@ -1217,17 +1378,19 @@ class ComfyUIClient:
                                 image_dir: str = ANNOTATED_DIR,
                                 seed: int = None, size=None,
                                 filename_prefix: str = None) -> Optional[str]:
-        """运行多视角编辑工作流（分镜生成.json：Qwen Edit 2511）"""
-        api_prompt, meta = self.load_workflow(WORKFLOW_TEMPLATE["multiview_gen"], return_meta=True)
+        """运行多视角编辑工作流（分镜生成_Qwen21.json：QwenImage2.1 参考图编辑）"""
+        wf_name = WORKFLOW_TEMPLATE["multiview_gen"]
+        api_prompt, meta = self.load_workflow(wf_name, return_meta=True)
         if seed is not None:
             logger.info(f"多视角采样种子已注入: {self._inject_seed(api_prompt, seed)}")
 
-        # 1) 正向提示词（TextEncodeQwenImageEditPlus：prompt 字段）
-        node_id = self._find_positive_text_node(api_prompt, class_types=("TextEncodeQwenImageEditPlus",))
-        if node_id is not None:
-            api_prompt[node_id]["inputs"]["prompt"] = prompt_zh
+        # 1) 正向提示词：只写正向字段（正负同体节点是 prompt，老模板是 prompt/text）
+        node_id = self._find_positive_text_node(api_prompt)
+        pos_field = self._positive_field(api_prompt, node_id) if node_id else None
+        if node_id is not None and pos_field:
+            api_prompt[node_id]["inputs"][pos_field] = prompt_zh
         else:
-            logger.warning("分镜生成.json 未定位到正向提示词节点")
+            raise RuntimeError(f"{wf_name} 未定位到正向提示词字段（节点={node_id}）")
         self.clean_conflict_negative_tokens(api_prompt)   # P0：清理风格冲突负向词
         # 画幅落地（与基础图一致，否则多视角会把竖屏 base 图改成模板的横屏尺寸）
         if size:
@@ -1250,7 +1413,7 @@ class ComfyUIClient:
             api_prompt[nid]["inputs"]["image"] = value
             ref_values.append(f"{nid}({ctype})={value}")
         if not ref_nodes:
-            logger.warning("分镜生成.json 中未找到参考图节点")
+            logger.warning(f"{wf_name} 中未找到参考图节点（LoadImageOutput/LoadImage）")
         else:
             logger.info(f"多视角参考图已替换 {len(ref_nodes)} 个节点: {ref_values}")
 
@@ -1270,32 +1433,41 @@ class ComfyUIClient:
 
     @staticmethod
     def _find_image_slots(api_prompt: dict, prompt_node_id: str) -> List[Tuple[str, Optional[str]]]:
-        """解析正向编辑节点的 image1/image2/image3 … 槽位 → 真正持有文件名的 LoadImage* 节点 id
+        """解析正向编辑节点的参考图槽位 → 真正持有文件名的 LoadImage* 节点 id
 
-        分镜生成.json 的链路为：
-            LoadImageOutput(读 output 目录) → FluxKontextImageScale → TextEncodeQwenImageEditPlus.imageN
-        因此需沿链路向上游回溯一层，拿到 LoadImage* 节点，才能替换参考图。
+        两种模板两种键名，**必须都认**：
+        - 老模板（Qwen-Edit 2511 / TextEncodeQwenImageEditPlus）：``image1/image2/image3``；
+        - QwenImage2.1（TextEncodeQwenImage21）：autogrow 点号键 ``images.image_1`` …
+          （服务端 `_expand_schema_for_dynamic` 用 finalize_prefix 生成）。
+        只认前者会让参考图**静默不注入**——分镜失去角色/场景一致性，且不报错。
+
+        链路可能是「LoadImageOutput → imageN」直连，也可能中间隔一层
+        （老的 ``FluxKontextImageScale`` / 新的 ``ImageScaleToTotalPixels``），
+        因此向上游最多回溯两层找 LoadImage*。
         """
         result: List[Tuple[str, Optional[str]]] = []
         node = api_prompt.get(prompt_node_id) or {}
-        keys = sorted((k for k in (node.get("inputs") or {}) if re.fullmatch(r"image\d*", str(k))),
-                      key=lambda k: int(re.sub(r"\D", "", str(k)) or 0))
+        keys = sorted((k for k in (node.get("inputs") or {}) if _IMAGE_SLOT_RE.match(str(k))),
+                      key=lambda k: _slot_index(k))
         for key in keys:
             value = node["inputs"][key]
-            load_id: Optional[str] = None
-            if isinstance(value, list) and len(value) == 2:
-                src = api_prompt.get(str(value[0])) or {}
-                if str(src.get("class_type", "")).startswith("LoadImage"):
-                    load_id = str(value[0])
-                else:
-                    for _k, v in (src.get("inputs") or {}).items():
-                        if isinstance(v, list) and len(v) == 2:
-                            cand = api_prompt.get(str(v[0])) or {}
-                            if str(cand.get("class_type", "")).startswith("LoadImage"):
-                                load_id = str(v[0])
-                                break
-            result.append((key, load_id))
+            result.append((key, ComfyUIClient._trace_load_image(api_prompt, value, depth=2)))
         return result
+
+    @staticmethod
+    def _trace_load_image(api_prompt: dict, value, depth: int) -> Optional[str]:
+        """沿连线向上游回溯，找到持有文件名的 LoadImage* 节点 id（找不到返回 None）"""
+        if depth <= 0 or not (isinstance(value, list) and len(value) == 2):
+            return None
+        src_id = str(value[0])
+        src = api_prompt.get(src_id) or {}
+        if str(src.get("class_type", "")).startswith("LoadImage"):
+            return src_id
+        for v in (src.get("inputs") or {}).values():
+            found = ComfyUIClient._trace_load_image(api_prompt, v, depth - 1)
+            if found:
+                return found
+        return None
 
     # 画面光源/时间要素 → 分镜图光影引导（从镜头描述/风格里抽取）
     # 历史缺陷：描述里的「黄昏/阴雨/烛光/月光」等光影要素没有独立成句，模型容易忽略，
@@ -1550,31 +1722,36 @@ class ComfyUIClient:
                             filename_prefix: str = "comic_drama_sb/shot",
                             seed: int = None, timeout: int = 900,
                             size=None) -> dict:
-        """使用 分镜生成.json（Qwen Edit 2511）生成单张分镜图
+        """使用 分镜生成_Qwen21.json（QwenImage2.1 参考图编辑）生成单张分镜图
 
         ref_images: 参考图列表（本地绝对路径或 /api/... HTTP 资源路径），最多 3 张，
-                    按顺序对应正向节点的 image1 / image2 / image3 槽位。
+                    按顺序对应正向编辑节点的参考图槽位
+                    （QwenImage2.1 是 images.image_1..3；老模板是 image1..3）。
         seed:       可选随机种子（质检不达标重生成时传入，保证产出与上一次不同）。
         size:       可选 (宽, 高)，按用户敲定的画幅覆写尺寸节点（竖屏 9:16 落地）。
         """
-        api_prompt, _meta = self.load_workflow(WORKFLOW_TEMPLATE["storyboard_gen"], return_meta=True)
+        wf_name = WORKFLOW_TEMPLATE["storyboard_gen"]
+        api_prompt, _meta = self.load_workflow(wf_name, return_meta=True)
         seed_changed = self._inject_seed(api_prompt, seed)
         if seed_changed:
             logger.info(f"分镜采样种子已注入: {seed_changed}")
 
-        # 1) 正向提示词
-        node_id = self._find_positive_text_node(api_prompt, class_types=("TextEncodeQwenImageEditPlus",))
-        if node_id is None:
-            raise RuntimeError("分镜生成.json 未定位到正向提示词节点（TextEncodeQwenImageEditPlus）")
-        api_prompt[node_id]["inputs"]["prompt"] = prompt_zh
+        # 1) 正向提示词：只写正向字段（正负同体节点的 negative_prompt 必须原样保留）
+        node_id = self._find_positive_text_node(api_prompt)
+        pos_field = self._positive_field(api_prompt, node_id) if node_id else None
+        if node_id is None or not pos_field:
+            raise RuntimeError(f"{wf_name} 未定位到正向提示词字段（节点={node_id}）")
+        api_prompt[node_id]["inputs"][pos_field] = prompt_zh
         self.clean_conflict_negative_tokens(api_prompt)                 # P0：清理风格冲突负向词
         if size:
             hit = style_kit.apply_latent_size(api_prompt, size)
             if hit:
                 logger.info("分镜图幅已覆写为 %s×%s：%s", size[0], size[1], ",".join(hit))
             else:
-                # 分镜生成.json 是「参考图编辑」型（FluxKontextImageScale 无尺寸参数），
-                # 输出画幅继承第一张参考图 → 画幅由基础资产图的尺寸决定，这里空转属正常。
+                # 「参考图编辑」型模板没有横向尺寸节点：
+                #   老模板 FluxKontextImageScale 与 QwenImage2.1 的 TextEncodeQwenImage21.latent
+                #   都按参考图尺寸出 latent → 输出画幅继承第一张参考图，
+                #   由基础资产图的尺寸决定，这里空转属正常。
                 logger.info("分镜工作流无尺寸节点，画幅继承参考图（%s×%s）"
                             "—— 由基础资产图尺寸决定", size[0], size[1])
         self._harden_no_watermark(api_prompt)   # C 项⑧：分镜图一律去水印

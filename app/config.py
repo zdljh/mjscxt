@@ -327,11 +327,19 @@ WORKFLOW_TEMPLATE = {
     # 实际段数由 h3_episode_builder 按调用方分镜数动态重建
     # （1 段 = 逐镜头；22/44 段 = 整集一次生成），不再固定 10 段。
     "h3_video": "H3信号10段测试001.json",
-    "character_gen": "角色生成.json",            # Qwen 2512 角色基础图
-    "item_gen": "物品生成.json",                 # Qwen 2512 物品基础图
-    "scene_gen": "场景生成.json",                # Qwen 2512 场景基础图
-    "multiview_gen": "分镜生成.json",            # Qwen Edit 2511 多视角编辑（角色多视图/物品场景3D多视角）
-    "storyboard_gen": "分镜生成.json",           # Qwen Edit 2511 分镜生成
+    # ---- 图片链路：2026-09-23 起统一切换到 QwenImage2.1 + TE-Speed 加速链 ----
+    # 母版参考 ComfyUI 工作流「TE-Speed-QwenImage21 加速插件-提速30%(1).json」；
+    # *_Qwen21.json 由 .workbuddy/tools/build_qwen21_workflows.py 生成（可复现）。
+    # 旧的 2512 / 2511 工作流文件**保留在同目录**，改回本表即可整体回滚。
+    #
+    # ⚠️ 新模板的提示词节点是 TextEncodeQwenImage21：**正负同体**（prompt + negative_prompt
+    #    在同一节点），参考图槽位是 autogrow 点号键（images.image_1..3）。
+    #    改图片链路前务必先跑 verify_qwen21_migration.py / verify_watermark_slot.py。
+    "character_gen": "角色生成_Qwen21.json",     # QwenImage2.1 角色基础图（T2I）
+    "item_gen": "物品生成_Qwen21.json",          # QwenImage2.1 物品基础图（T2I）
+    "scene_gen": "场景生成_Qwen21.json",         # QwenImage2.1 场景基础图（T2I）
+    "multiview_gen": "分镜生成_Qwen21.json",     # QwenImage2.1 多视角编辑（角色多视图/物品场景3D多视角）
+    "storyboard_gen": "分镜生成_Qwen21.json",    # QwenImage2.1 分镜生成（参考图编辑）
 }
 
 # 关键帧「跨镜链式」默认模式：上一镜尾帧 = 下一镜首帧（与参考工作流一致）
