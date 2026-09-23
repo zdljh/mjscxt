@@ -2072,8 +2072,11 @@ def _storyboard_retry_shot_impl():
         (autopilot.get_plan(project) or {}).get("style"))
     if _rs_style:
         shot = dict(shot, style=(shot.get("style") or _rs_style))
-    _rs_size = style_kit.aspect_size(style_kit.aspect_ratio(_rs_style))
+    # G19 同款兜底：风格串无画幅关键词时以默认 9:16 为底。本端点此前漏了这层兜底
+    # → size=None → 完全不覆写，画幅完全沿用模板/参考图，与批量 worker 口径不一致。
+    _rs_size = style_kit.aspect_size(style_kit.aspect_ratio(_rs_style) or style_kit.DEFAULT_RATIO)
     prompt = comfyui_client.build_storyboard_prompt(shot, labels)
+    refs = _unify_ref_canvas(refs, _rs_size, project)
     # ---- 提示词预检（生成前质检）：先判 → 确定性自愈 → 再出图 ----
     # 目的：把 GPU 花在有问题的提示词上是纯浪费，且出图后质检才发现就已经晚了。
     qc_cfg = _qc_load_cfg()
@@ -3282,6 +3285,127 @@ def _apply_closeup_ref_strategy(refs: list, shot: dict, project_name: str = None
     return out or refs
 
 
+# --------------------------------------------------------------------------- #
+# 分镜参考图「统一画幅」（2026-09-24）
+#   ⚠️ 为什么必须做：分镜模板 `分镜生成_Qwen21.json` 是「参考图编辑」型，**没有尺寸
+#      节点** → style_kit.apply_latent_size 返回空 → 输出画幅**继承第一张参考图**。
+#      而参考图随镜头而变：建立镜（characters_in_shot 为空）只有场景图（资产内置
+#      16:9 → 960×544 横屏）；有角色的镜头第一张是角色图（1:1 → 736×736 方形）；
+#      特写镜头第一张是头部裁剪条带（更小）→ **同一集分镜画幅在两三种尺寸间跳变**，
+#      与项目画幅（9:16 竖屏 544×960）不符，成片拼接会出现黑边 / 拉伸。
+#      这里在送进工作流前把每张参考图 cover 到目标画幅，使输出画幅恒定。
+# --------------------------------------------------------------------------- #
+
+#: 统一画幅结果的进程内缓存：键 = (绝对路径, mtime_ns, 目标宽, 目标高) → 处理后路径。
+#: 同一批分镜里同一张参考图会出现多次（84 镜共用寥寥数张），缓存避免逐镜重复裁剪。
+_REF_CANVAS_CACHE: dict = {}
+
+
+def _ref_canvas_target(size):
+    """把目标画幅规整成 (W, H) 正整数元组；None / 非法 → None（调用方按「不处理」走）。"""
+    try:
+        w, h = int(size[0]), int(size[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    return (w, h) if w > 0 and h > 0 else None
+
+
+def _fit_ref_to_canvas(im, size):
+    """按 **cover** 把图缩放到恰好覆盖 size 画布并居中裁剪（内容充满、无条带）。
+
+    ⚠️ 为什么用 cover 而不是 contain(letterbox)：2026-09-24 真图 A/B 实测
+    （逆天系统 shot_02，同镜同 prompt）——
+      · contain（内容缩放居中 + 自身模糊放大作底）→ 图像编辑型工作流**会模仿这个
+        布局**：输出内容只占中间约 44%，上下是模型自绘的虚化带，画面利用率腰斩；
+      · cover（放大到覆盖画布 + 居中裁剪）→ 内容充满整幅，构图正常（中景主体 +
+        背景群像，与 camera 描述一致）。
+    代价：宽幅参考图（场景资产内置 16:9）会被裁掉两侧。参考图的语义是「内容锚点」，
+    中心区域通常已含代表性主体，环境细节由模型按 prompt 补全 —— 比留虚化带更划算。
+    """
+    from PIL import Image
+    W, H = int(size[0]), int(size[1])
+    if im.width == W and im.height == H:
+        return im
+    s = max(W / im.width, H / im.height)
+    scaled = im.resize((max(W, int(round(im.width * s))),
+                        max(H, int(round(im.height * s)))), Image.LANCZOS)
+    left, top = (scaled.width - W) // 2, (scaled.height - H) // 2
+    return scaled.crop((left, top, left + W, top + H))
+
+
+def _unify_ref_canvas(refs: list, size, project_name: str = "") -> list:
+    """把分镜参考图统一到目标画幅（cover 填充），返回新的 refs（结构不变）。
+
+    只替换第 3 项（本地路径），kind / label 原样保留。失败降级：单张处理失败 → 该张
+    沿用原图；缓存目录不可建 → 整批沿用原图；size 非法 → 原样返回。任何情况都不抛
+    异常、不阻断分镜生成。
+    """
+    tgt = _ref_canvas_target(size)
+    if not tgt or not refs:
+        return refs
+    out_dir = os.path.join(QC_DIR, str(project_name or "default"), "ref_canvas")
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as e:
+        app.logger.warning("参考图统一画幅：缓存目录不可建，本次沿用原图（%s）", e)
+        return refs
+    unified, changed = [], 0
+    for item in refs:
+        try:
+            kind, label, path = item[0], item[1], item[2]
+        except (TypeError, IndexError, KeyError):
+            unified.append(item)
+            continue
+        newp = path
+        try:
+            local = comfyui_client.resolve_local_path(path) or path
+            if not local or not os.path.isfile(local):
+                raise FileNotFoundError(f"参考图本地路径不可用: {path}")
+            key = (os.path.normcase(os.path.abspath(local)),
+                   int(os.stat(local).st_mtime_ns), tgt[0], tgt[1])
+            cached = _REF_CANVAS_CACHE.get(key)
+            if cached and os.path.isfile(cached):
+                newp = cached
+            else:
+                import hashlib
+                import tempfile
+                from PIL import Image
+                with Image.open(local) as _im:
+                    _rgb = _im.convert("RGB")
+                    if (_rgb.width, _rgb.height) == tgt:
+                        unified.append(item)
+                        continue
+                    fixed = _fit_ref_to_canvas(_rgb, tgt)
+                _stem = os.path.splitext(os.path.basename(local))[0]
+                _h = hashlib.sha1(os.path.abspath(local).encode("utf-8")).hexdigest()[:8]
+                _dst = os.path.join(out_dir, f"{_stem}_{_h}_{tgt[0]}x{tgt[1]}.png")
+                # 仓库纪律：禁止「路径拼接固定 .tmp 后缀」这类**固定临时名**（并发会互相写坏，
+                # 守卫 verify_asset_skip_existing A3.3 会红）。用 mkstemp 拿唯一名。
+                _fd, _tmp = tempfile.mkstemp(dir=out_dir, prefix=".refcanvas_", suffix=".png")
+                os.close(_fd)
+                try:
+                    fixed.save(_tmp, format="PNG")
+                    os.replace(_tmp, _dst)
+                except BaseException:
+                    try:
+                        os.unlink(_tmp)
+                    except OSError:
+                        pass
+                    raise
+                _REF_CANVAS_CACHE[key] = _dst
+                newp = _dst
+            if newp != path:
+                changed += 1
+        except Exception as e:  # noqa: BLE001 —— 单张失败不影响整镜
+            app.logger.warning("参考图统一画幅失败，该张沿用原图（%s: %s）",
+                               type(e).__name__, e)
+            newp = path
+        unified.append((kind, label, newp))
+    app.logger.info("[分镜参考图画幅] 目标 %d×%d，%d/%d 张已统一（其余原尺寸或降级）",
+                    tgt[0], tgt[1], changed, len(refs))
+    return unified
+
+
 # 注：本处原为 `_shot_seq(shot_id, fallback)`。已收敛为 app/shot_key.shot_seq 的
 # 一行代理（见文件顶部），全项目唯一的镜号归一化实现见 app/shot_key.py。
 
@@ -3381,6 +3505,9 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             item = {"shot_id": shot_id, "success": False, "refs": {}, "prompt": ""}
             try:
                 refs = _allocate_storyboard_refs(shot, char_idx, item_idx, scene_idx, project_name)
+                # 统一参考图画幅：分镜工作流无尺寸节点，输出画幅继承第一张参考图，
+                # 不统一会让同集画幅在 16:9 / 1:1 间跳变（详见 _unify_ref_canvas）。
+                refs = _unify_ref_canvas(refs, _sb_size, project_name)
                 if not refs:
                     # S6：区分"无参考图"与"角色匹配失败"（_no_reference）
                     if shot.get("_no_reference"):
