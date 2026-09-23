@@ -1882,12 +1882,67 @@ def api_storyboard_shot_reorder():
                     "shot_order": [str(x) for x in order]})
 
 
+# ==========================================================================
+# 托管接口统一异常兜底
+# --------------------------------------------------------------------------
+# D1（2026-09-23）：本函数原先定义在文件后段，只能装饰**其后**注册的路由，
+# 导致更早注册的 /api/storyboard/retry-shot、/api/video/retry-shot 拿不到兜底
+# —— 它们抛错时前端收到的是 werkzeug 的 HTML 500，`readError()` 解析不出 error
+# 字段，用户只看到「服务内部错误」而无从判断。故前移到首个使用点之前。
+# 实现未改（仍复用下方的 _friendly_error，运行期解析）。
+# ==========================================================================
+def _autopilot_guard(fn):
+    """统一异常兜底：托管接口不应把 500 抛给前端，而是返回可读错误
+
+    注意不要把客户端错误（HTTPException，例如请求体不是合法 JSON 时
+    werkzeug 抛出的 400 BadRequest）误判成服务端 500——否则前端会看到
+    「500 服务内部错误」，而真实原因是自己发了个畸形请求，排查方向会被带偏。
+    """
+    def _wrap(*a, **k):
+        try:
+            return fn(*a, **k)
+        except KeyError as e:
+            return jsonify({"success": False, "error": f"对象不存在：{e}"}), 404
+        except HTTPException as e:
+            # 保留 werkzeug 原本的语义状态码（400/404/405…），不要降级成 500
+            return jsonify({
+                "success": False,
+                "error": e.description or e.name,
+            }), (e.code or 400)
+        except Exception as e:  # noqa: BLE001
+            app.logger.exception("托管接口异常")
+            return jsonify({"success": False, "error": _friendly_error(e)}), 500
+    _wrap.__name__ = fn.__name__
+    return _wrap
+
+
 @app.route('/api/storyboard/retry-shot', methods=['POST'])
+@_autopilot_guard
 def api_storyboard_retry_shot():
     """单镜分镜图重跑（同步返回；只影响该镜，不触碰其它镜头产物）
 
     body: {project_name, shot: {...}, seed?, episode_no?}
     未传 shot 时按 shot_id 从剧本取。
+
+    D1（2026-09-23）：见 `_storyboard_retry_shot_impl` 上方说明。
+    """
+    with gpu_task_gate.run_gpu_task(
+            f"sb_retry_{uuid.uuid4().hex[:8]}", "分镜图单镜重跑"):
+        return _storyboard_retry_shot_impl()
+
+
+def _storyboard_retry_shot_impl():
+    """单镜分镜图重跑的实际实现（整段在 GPU 闸门内执行）
+
+    D1（2026-09-23）：
+    - 加 @_autopilot_guard → 异常不再泄漏成裸 HTML 500（与其它托管接口一致）。
+    - 整段关键区（出图 → 质检 → 入库 → manifest 回写）进入 gpu_task_gate：
+        · 避免与批量分镜 worker 抢同一张 GPU（TASK_QUEUE_CONCURRENCY 默认 1）；
+        · 消除两边并发 read-modify-write storyboard_manifest.json 的**丢更新**
+          —— 批量 worker 的 manifest 写入在它的 gate 内（`_storyboard_worker`
+          由 `run_gpu_task` 包裹），本函数的写入也在本 gate 内，两者互斥。
+      代价：批量任务在跑时手动重跑会排队等待（与「单 GPU 并发度 1」的设计一致；
+      排队超过 30s 由 gpu_task_gate 打 warning，不静默）。
     """
     data = request.json or {}
     # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
@@ -2081,11 +2136,22 @@ def _update_storyboard_manifest_shot(project: str, shot_id, seq: int, dst: str,
 
 
 @app.route('/api/video/retry-shot', methods=['POST'])
+@_autopilot_guard
 def api_video_retry_shot():
     """单镜视频重跑（同步；只重生成该镜的 mp4）
 
     支持 mode：reference（默认，分镜图+主角锚点）/ keyframe（首尾帧插值）
+
+    D1（2026-09-23）：与分镜重跑同口径——加 @_autopilot_guard（异常不再泄漏成
+    裸 HTML 500）+ 整段关键区进入 gpu_task_gate（与批量视频 worker 互斥，
+    避免两个 ComfyUI 任务抢同一张 GPU）。
     """
+    with gpu_task_gate.run_gpu_task(
+            f"video_retry_{uuid.uuid4().hex[:8]}", "单镜视频重跑"):
+        return _video_retry_shot_impl()
+
+
+def _video_retry_shot_impl():
     data = request.json or {}
     # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
     project, err = _project_or_400(data.get('project_name') or '')
@@ -9987,29 +10053,9 @@ def _friendly_error(msg, fallback: str = "服务内部错误，请稍后重试�
     return text or fallback
 
 
-def _autopilot_guard(fn):
-    """统一异常兜底：托管接口不应把 500 抛给前端，而是返回可读错误
-
-    注意不要把客户端错误（HTTPException，例如请求体不是合法 JSON 时
-    werkzeug 抛出的 400 BadRequest）误判成服务端 500——否则前端会看到
-    「500 服务内部错误」，而真实原因是自己发了个畸形请求，排查方向会被带偏。
-    """
-    def _wrap(*a, **k):
-        try:
-            return fn(*a, **k)
-        except KeyError as e:
-            return jsonify({"success": False, "error": f"对象不存在：{e}"}), 404
-        except HTTPException as e:
-            # 保留 werkzeug 原本的语义状态码（400/404/405…），不要降级成 500
-            return jsonify({
-                "success": False,
-                "error": e.description or e.name,
-            }), (e.code or 400)
-        except Exception as e:  # noqa: BLE001
-            app.logger.exception("托管接口异常")
-            return jsonify({"success": False, "error": _friendly_error(e)}), 500
-    _wrap.__name__ = fn.__name__
-    return _wrap
+# 注：`_autopilot_guard` 已**前移**到本文件前段（首个使用点之前，见
+# 「托管接口统一异常兜底」段）—— 原先定义在这里（文件后段），只能装饰其后
+# 注册的路由，早注册的路由全部拿不到兜底（D1，2026-09-23）。
 
 
 @app.errorhandler(BadRequest)
