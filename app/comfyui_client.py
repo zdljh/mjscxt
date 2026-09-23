@@ -1265,17 +1265,29 @@ class ComfyUIClient:
 
     @staticmethod
     def _ensure_fullbody_prompt(prompt_zh: str, style: str = "") -> str:
-        """给角色参考图提示词确定性地补「全身三视图」版式约束（幂等）"""
+        """给角色参考图提示词确定性地补「全身三视图」版式约束（幂等）
+
+        2026-09-23 补强：除「三人同比例」外，再显式要求**间距均匀互不遮挡**、
+        **脚底落在同一条水平线**、**简洁纯色背景**。前两项直接对应实测里最容易
+        跑偏的两个量（三人横向粘连 / 脚底不共线），后一项避免把设定图渲染成
+        「三人合影」的写实场景（带透视景深 → 三人远近大小不一）。
+        画幅已同步改为 1:1（见 style_kit.ASSET_BASE_RATIO 的角色项），
+        「三人横排」版式与「竖幅画幅」的冲突已解除。
+        """
         text = str(prompt_zh or "").strip()
         # 幂等判断必须在 with_style 之前做（同 style_kit._style_suffix 的坑）
         marker = "全身三视图"
         base = text if marker in text else style_kit.with_style(text, style) if style else text
         if marker in base:
             return base
-        suffix = ("，全身三视图设定图：正面、左侧面、背面三张全身视图从左到右横排，"
-                  "同一角色同一比例，画面完整呈现从头到脚的全身，头顶上方与脚部下方留少量边距，"
-                  "人物身高占比一致")
-        return (base + suffix) if base else suffix
+        suffix = ("，全身三视图设定图：正面、左侧面、背面三张全身视图从左到右横排、"
+                  "间距均匀互不遮挡，同一角色同一比例，人物身高占比一致，"
+                  "三人脚底落在同一条水平线上，"
+                  "画面完整呈现从头到脚的全身，头顶上方与脚部下方留少量边距，"
+                  "简洁纯色背景，不要场景、道具与投影")
+        # 剧本层提示词常以「三视图。」收尾，直接拼会得到「三视图。，全身三视图…」的脏标点
+        base = base.rstrip("。，,.;； ")
+        return (base + suffix) if base else suffix.lstrip("，")
 
     def generate_item_base(self, prompt_zh: str, seed: int = None,
                            style: str = "", size=None,

@@ -2496,8 +2496,12 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
 
         # 风格（文字部分，如画风/色调）仍从总控敲定的 style 串解析；
         # 画幅**按资产类型内置写死**（2026-09-22 需求，不跟随视频比例）：
-        #   立绘 character 3:4 / 道具 item 1:1 / 场景 scene 16:9，多视图(三视图)恒 1:1
-        # 与成片画幅解耦——即使用户拍 9:16 视频，角色立绘仍是 3:4。
+        #   角色参考图(三视图设定图) 1:1 / 道具 item 1:1 / 场景 scene 16:9，
+        #   多视图(三视图) 恒 1:1
+        # 与成片画幅解耦——即使用户拍 9:16 视频，角色参考图仍是 1:1。
+        # ⚠️ 角色基础图内容是「正/侧/背三张全身视图横排的三视图设定图」，不是单人立绘，
+        #    2026-09-23 已从 3:4 竖幅改回 1:1（3:4 会把三人挤到贴边，实测留白 0~2px）；
+        #    详见 style_kit.ASSET_BASE_RATIO 上方注释。
         style_res = style_kit.resolve(style, default_ratio=style_kit.DEFAULT_RATIO)
         gen_style = style_res["style"]
         _base_ratio = style_kit.asset_aspect_ratio(asset_type) or style_kit.DEFAULT_RATIO

@@ -715,6 +715,11 @@ function AssetCard({
   const imageUrl = assetSrc(item.thumb?.url || item.views?.[0]?.url);
   const [broken, setBroken] = useState(false);
   const FallbackIcon = type === 'character' ? User : type === 'item' ? Box : Mountain;
+  // 缩略图容器比例必须跟随资产实际画幅（后端 style_kit.ASSET_BASE_RATIO 写死）：
+  // 角色三视图设定图与道具图是 1:1、场景原画是 16:9。此前一律 aspect-video + object-cover，
+  // 一张 1:1（或更早的 3:4 竖幅）三视图放进 16:9 容器会被裁掉上下两边 ——
+  // 人物头顶与脚底同时被切，看起来就是「三视图比例不对」。
+  const thumbAspect = type === 'scene' ? 'aspect-video' : 'aspect-square';
 
   return (
     <button
@@ -722,7 +727,7 @@ function AssetCard({
       onClick={onClick}
       className={`text-left bg-surface rounded-xl border border-line overflow-hidden hover:shadow-lg transition-shadow ${FOCUS_RING}`}
     >
-      <div className="aspect-video bg-surface-2 flex items-center justify-center overflow-hidden">
+      <div className={`${thumbAspect} bg-surface-2 flex items-center justify-center overflow-hidden`}>
         {imageUrl && !broken ? (
           <img
             src={imageUrl}
