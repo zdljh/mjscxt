@@ -1095,6 +1095,26 @@ def _run_full_coverage_check(client, novel_text: str, script: dict, reports=None
                     f"原文覆盖率：情节级 {rep.get('plot_coverage_percent')}%、"
                     f"细节级 {rep.get('detail_coverage_percent')}%，遗漏 "
                     f"{rep.get('missing_count')} 条、补生成 {rep.get('supplement_shots')} 镜", 99)
+        # ---- P0-3 剧本↔原著一致性：整本单集路径（1 集 = 整本小说）无单章比较基准，
+        #      锚定与要素覆盖显式跳过，只做元信息泄漏扫描 + 命中镜头定向重写。
+        try:
+            import script_consistency as sc_mod
+            sc_rep = sc_mod.run_script_consistency_check(
+                client, script, novel_meta=None, chapter_text="", chapter=None,
+                episode_no=1, auto_fix=True, events=None,
+                continuity_dir=continuity_dir, project_key=project_key, save=True,
+                skip_anchor=True, skip_elements=True)
+            if reports:
+                reports("consistency", total_steps, total_steps,
+                        f"剧本一致性：元信息泄漏 "
+                        f"{(sc_rep.get('leak') or {}).get('hit_count')} 处，"
+                        f"定向修复 {sc_rep.get('fix_rounds')} 轮"
+                        f"（{'已修复' if sc_rep.get('fixed') else '留告警'}）", 99.5)
+        except Exception as e:  # noqa: BLE001
+            note = (f"剧本一致性校验失败（已跳过，剧本仍按原结果落盘）："
+                    f"{type(e).__name__}: {str(e)[:200]}")
+            warnings.append(note)
+            logger.warning(note)
         return coverage_mod.summary_for_meta(rep, rep.get("report_path")) \
             or (script.get("metadata") or {}).get("coverage") or {}
     except Exception as e:  # noqa: BLE001

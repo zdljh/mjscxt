@@ -59,6 +59,7 @@ import autopilot
 import consistency
 import continuity
 import coverage
+import script_consistency
 import keyframe
 import export_manager
 from export_manager import ExportManager
@@ -7542,6 +7543,8 @@ def _episodes_worker(task_id: str, novel_meta: dict, chapters: list, style: str,
                 if _audit["warnings"]:
                     _meta_warnings.extend(_audit["warnings"])
                     app.logger.warning(f"第{ep}集剧本存在内容缺口：{_audit['warnings']}")
+                # P0-3 剧本↔原著一致性（三件套 + 定向修复）结果，随生成结果带出给前端
+                _sc = script["metadata"].get("script_consistency") or {}
                 results.append({
                     "episode_no": ep, "chapter_title": ch_title, "status": "success",
                     "path": path, "project_name": script["metadata"]["project_name"],
@@ -7575,6 +7578,23 @@ def _episodes_worker(task_id: str, novel_meta: dict, chapters: list, style: str,
                     "coverage_supplement_shots": (conv.get("coverage") or {}).get("supplement_shots"),
                     "coverage_supplement_rounds": (conv.get("coverage") or {}).get("supplement_rounds"),
                     "coverage_report_path": (conv.get("coverage") or {}).get("report_path"),
+                    # P0-3 剧本↔原著一致性：三件套 + 定向修复闭环
+                    "consistency_passed": _sc.get("passed"),
+                    "consistency_chapter_index": _sc.get("chapter_index"),
+                    "consistency_anchor_checked": _sc.get("anchor_checked"),
+                    "consistency_anchor_ok": _sc.get("anchor_ok"),
+                    "consistency_anchor_deviation": _sc.get("anchor_deviation"),
+                    "consistency_anchor_reason": _sc.get("anchor_reason"),
+                    "consistency_leak_count": _sc.get("leak_count"),
+                    "consistency_leak_shot_ids": _sc.get("leak_shot_ids") or [],
+                    "consistency_element_percent": _sc.get("element_coverage_percent"),
+                    "consistency_element_missing_count": _sc.get("element_missing_count"),
+                    "consistency_element_missing": [e.get("name") for e in (_sc.get("element_missing") or [])],
+                    "consistency_fix_rounds": _sc.get("fix_rounds"),
+                    "consistency_fixed": _sc.get("fixed"),
+                    "consistency_issue_count": _sc.get("issue_count"),
+                    "consistency_issue_stats": _sc.get("issue_stats") or {},
+                    "consistency_report_path": _sc.get("report_path"),
                     "message": "生成完成",
                 })
             except Exception as e:  # noqa: BLE001
@@ -8039,6 +8059,56 @@ def api_coverage_episode(novel_id, episode_no):
     return jsonify(data)
 
 
+@app.route('/api/script-consistency/<novel_id>', methods=['GET'])
+def api_script_consistency_overview(novel_id):
+    """P0-3 剧本↔原著一致性总览：逐集三件套结论 / 泄漏数 / 要素覆盖率 / 是否通过 / 报告路径
+    （注意与 /api/consistency/*「资产多视图一致性」区分：本组专指剧本 ↔ 本章原著）"""
+    try:
+        meta, proj, key = _resolve_continuity_key(novel_id)
+    except NovelParseError as e:
+        return jsonify({"success": False, "error": str(e)}), 404
+    eps = novel_to_script.list_episodes(SCRIPT_DIR, key)
+    rows = []
+    for e in eps:
+        ep = int(e.get("episode_no") or 0)
+        rep = script_consistency.load_consistency_report(CONTINUITY_DIR, key, ep)
+        if rep:
+            row = script_consistency.summary_for_meta(
+                rep, script_consistency.consistency_report_path(CONTINUITY_DIR, key, ep))
+            row.update({"episode_no": ep, "available": True,
+                        "chapter_title": e.get("chapter_title"),
+                        "script_path": e.get("path")})
+        else:
+            row = {"episode_no": ep, "available": False, "passed": None,
+                   "chapter_title": e.get("chapter_title"),
+                   "script_path": e.get("path"),
+                   "note": "该集尚无一致性校验报告（未按新流程重跑）"}
+        rows.append(row)
+    return jsonify({
+        "success": True, "novel_id": novel_id,
+        "project_id": (proj or {}).get("id", ""),
+        "novel_title": meta.get("title") or meta.get("name"),
+        "project_key": key,
+        "algorithm": script_consistency.SCRIPT_CONSISTENCY_VERSION,
+        "consistency_dir": os.path.abspath(os.path.join(CONTINUITY_DIR, key, "episodes")),
+        "count": len(rows),
+        "episodes": rows,
+    })
+
+
+@app.route('/api/script-consistency/<novel_id>/<int:episode_no>', methods=['GET'])
+def api_script_consistency_episode(novel_id, episode_no):
+    """单集 P0-3 一致性详情：章节锚定 / 元信息泄漏 / 要素覆盖 / 问题清单 / 定向修复轨迹"""
+    try:
+        meta, proj, key = _resolve_continuity_key(novel_id)
+    except NovelParseError as e:
+        return jsonify({"success": False, "error": str(e)}), 404
+    data = script_consistency.episode_consistency_view(CONTINUITY_DIR, key, episode_no)
+    data.update({"success": True, "novel_id": novel_id,
+                 "project_id": (proj or {}).get("id", "")})
+    return jsonify(data)
+
+
 @app.route('/api/continuity/<novel_id>/<int:episode_no>/revalidate', methods=['POST'])
 def api_continuity_revalidate(novel_id, episode_no):
     """对已落盘剧本重跑「相邻集六类一致性校验」（D⑨ 可选闸门；body.rewrite=true 时命中问题会局部重写）"""
@@ -8100,8 +8170,12 @@ def api_continuity_revalidate(novel_id, episode_no):
     validation["rewrite"] = rewrite
     validation["generated_at"] = continuity._now()
     continuity.save_json(continuity.validation_path(CONTINUITY_DIR, key, episode_no), validation)
+    # P0-3 剧本↔原著一致性摘要：直接复用生成时写入剧本的结论（三件套为确定性计算，
+    # 不在本接口重算，避免无章节正文时误报）
+    consistency = (script.get("metadata") or {}).get("script_consistency") or {}
     return jsonify({"success": True, "novel_id": novel_id, "episode_no": episode_no,
                     "project_key": key, "validation": validation, "rewrite": rewrite,
+                    "consistency": consistency,
                     "events": events})
 
 

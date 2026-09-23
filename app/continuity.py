@@ -1799,6 +1799,51 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
                            f"复检情节级 {coverage_report.get('plot_coverage_percent')}% / "
                            f"细节级 {coverage_report.get('detail_coverage_percent')}%", 98)
 
+    # ---- 8.6) 剧本↔原著一致性校验（P0-3：章节锚定 / 元信息泄漏 / 要素覆盖 + 定向修复闭环）
+    #      泄漏走局部重写、要素缺失走定向补生成（只增不删），绝不整集重生成；
+    #      章节锚定偏差根因在章节切分（P0-1 面），只记告警、不自动改。
+    consistency_summary = {}
+    try:
+        import script_consistency as sc_mod
+        consistency_report = sc_mod.run_script_consistency_check(
+            client, script, novel_meta=novel_meta, chapter_text=seg, chapter=chapter,
+            episode_no=int(episode_no), auto_fix=bool(enable_rewrite), events=events,
+            continuity_dir=continuity_dir, project_key=project_key, save=True,
+            continuity_ctx=ctx)
+        consistency_summary = sc_mod.summary_for_meta(
+            consistency_report, consistency_report.get("report_path"))
+        report("consistency",
+               f"第{episode_no}集：剧本一致性校验——元信息泄漏 "
+               f"{(consistency_report.get('leak') or {}).get('hit_count')} 处、要素覆盖率 "
+               f"{(consistency_report.get('elements') or {}).get('coverage_percent')}%、"
+               f"定向修复 {consistency_report.get('fix_rounds')} 轮"
+               f"（{'已修复' if consistency_report.get('fixed') else '留告警'}）", 98.5)
+        if consistency_report.get("fix_rounds"):
+            # 修复改动了镜头：重做资产对齐与 state 抽取（失败不阻断整集落盘）
+            try:
+                alignment = align_script_assets(script, bible, int(episode_no))
+                alignment["outfit_reconcile"] = outfit_reconcile
+                state = extract_episode_state(client, script, prev_state, episode_no, events=events)
+                state = align_state_with_bible(state, bible, int(episode_no))
+                script["state_in"] = state["state_in"]
+                script["state_out"] = state["state_out"]
+            except Exception as e:  # noqa: BLE001
+                note = (f"一致性修复后重抽 state 失败，保留修复前 state："
+                        f"{type(e).__name__}: {str(e)[:200]}")
+                logger.warning(f"第 {episode_no} 集：{note}")
+                events.append({"label": "consistency-state-refresh", "attempt": 0,
+                               "max_tokens": 0, "finish_reason": "error", "note": note})
+                meta_warn = script.setdefault("metadata", {}).setdefault("warnings", [])
+                if isinstance(meta_warn, list):
+                    meta_warn.append(note)
+    except Exception as e:  # noqa: BLE001
+        note = (f"剧本一致性校验失败（已跳过，剧本仍按原结果落盘）："
+                f"{type(e).__name__}: {str(e)[:200]}")
+        logger.warning(f"第 {episode_no} 集：{note}")
+        meta_warn = script.setdefault("metadata", {}).setdefault("warnings", [])
+        if isinstance(meta_warn, list):
+            meta_warn.append(note)
+
     # ---- 9) 落盘：剧本 + state + 摘要卡 + 校验
     meta = script.setdefault("metadata", {})
     meta["continuity"] = {
@@ -1818,6 +1863,7 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
         "issue_stats": validation.get("issue_stats"),
         "rewrite": rewrite_info,
         "coverage": coverage_mod.summary_for_meta(coverage_report, coverage_report.get("report_path")),
+        "consistency": consistency_summary,
         "truncation_events": events,
     }
     script["continuity"] = {

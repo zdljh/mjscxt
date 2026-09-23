@@ -714,6 +714,14 @@ export const coverageApi = {
     request<any>(`/coverage/${encodeURIComponent(novelId)}/${episodeNo}`),
 };
 
+// --- Script Consistency（P0-3 剧本↔原著一致性；区别于 consistencyApi 的资产多视图一致性） ---
+export const scriptConsistencyApi = {
+  get: (novelId: string) =>
+    request<any>(`/script-consistency/${encodeURIComponent(novelId)}`),
+  getByEpisode: (novelId: string, episodeNo: number) =>
+    request<any>(`/script-consistency/${encodeURIComponent(novelId)}/${episodeNo}`),
+};
+
 // --- Autopilot ---
 export const autopilotApi = {
   status: () => request<AutopilotStatus>('/autopilot/status'),
