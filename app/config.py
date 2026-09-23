@@ -127,8 +127,11 @@ NOVEL_BRIEF_CHARS = 800         # 「原著简报」正文取样字符数（喂�
 # 单次 LLM 请求超时（秒）。⚠️ 必须可 env 覆盖：reasoning_effort=max + 长章节（数千字正文）
 # 的剧本生成会一路提额 max_tokens（9300→12288→16384→24576），单次最重调用实测连 900s 都
 # 不够（2026-09-19 ep002 第一节 3297 字，900s 仍 ReadTimeout 反复 5 次）。
-# 默认放宽到 1800s（覆盖最重调用）；需要更严/更松可设 env LLM_REQUEST_TIMEOUT。
-LLM_REQUEST_TIMEOUT = int(os.environ.get("LLM_REQUEST_TIMEOUT", "1800"))
+# ⚠️ 2026-09-23 复测教训：默认 1800s 太激进 —— agnes 网关「只吐思考」/无响应时，单次请求
+# 会挂满 30 分钟，期间进程看似无响应，实测触发一次「无报错日志的服务自动重启」。现降到
+# 600s（10 分钟）：既覆盖最重调用，又让「网关挂起」在 10 分钟内暴露（配合 chat_json_robust
+# 的降档快速失败 + 网关熔断）。需要更严/更松仍可设 env LLM_REQUEST_TIMEOUT。
+LLM_REQUEST_TIMEOUT = int(os.environ.get("LLM_REQUEST_TIMEOUT", "600"))
 
 # ===================== 项目级隔离（每部小说 = 一个独立项目） =====================
 # 注册表与每项目配置/隔离目录；各产物仍落在既有 output/<kind>/<项目键>/ 下，

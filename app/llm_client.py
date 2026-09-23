@@ -788,6 +788,22 @@ class LLMClient:
                            f"降级为 {nxt or '(不注入)'}，以压缩思考长度")
             return True
 
+        def _reasoning_exhausted() -> bool:
+            """是否已「降档降无可降」——即当前已配置 reasoning_effort 且已到最低档。
+
+            此时若模型仍只吐思考，说明问题不在思考档位，而在模型/服务端本身在持续产出
+            超长思考（或参数异常）。继续提 max_tokens 是无意义的空转（实测：low 档下仍
+            只吐思考，一路提额到 32768 仍挂死 19 分钟），必须快速失败上浮。
+
+            ⚠️ 只对「配置了档位」的 always-on 模型判耗尽；**空档位（未配置）不算耗尽**——
+            普通「允许思考」模型只吐思考往往只是额度不够，仍应按原逻辑提额重试。
+            """
+            cur_re = str(getattr(self, "reasoning_effort", "") or "").strip().lower()
+            order = REASONING_EFFORT_DOWNGRADE_ORDER
+            if not order or cur_re not in order:
+                return False  # 未配置档位 → 不判耗尽，走原提额重试
+            return order.index(cur_re) >= len(order) - 1
+
         repaired_fallback = None
         for _ in range(max(1, int(max_attempts))):
             # 提额重试是最外层循环（每次都会重新发一次完整请求），收益最大：
@@ -797,10 +813,22 @@ class LLMClient:
             try:
                 r = self.chat_ex(messages, temperature=temperature, max_tokens=cur)
             except LLMReasoningOnlyError as e:
-                # 思考吃光额度：优先降思考档位（high/max → low → 不注入），再配合提额。
+                # 思考吃光额度：优先降思考档位（high/max → low），再配合提额。
                 # 只提 max_tokens 对「思考本身无限长」的 always-on 模型无效（实测 40 分钟空转）。
                 last_err = e
                 downgraded = _downgrade_reasoning_effort()
+                # ⚠️ 降档已耗尽（当前就是最低档）且模型仍只吐思考 → 不是档位问题，
+                # 继续提额只会空转（复测实测：low 档下仍只吐思考，提额到 32768 挂死 19 分钟）。
+                # 这里直接 break 抛错上浮，让上层把「模型持续只吐思考」如实报给用户。
+                if not downgraded and _reasoning_exhausted():
+                    logger.error(
+                        f"模型在最低思考档（{getattr(self, 'reasoning_effort', '') or '未注入'}）下"
+                        f"仍只吐思考内容（第 {attempts} 次，max_tokens={cur}），"
+                        "判定为模型/服务端异常，停止无意义提额，快速失败上浮。")
+                    history.append({"attempt": attempts, "max_tokens": cur,
+                                    "finish_reason": "reasoning_only", "truncated": True,
+                                    "content_len": 0, "latency_ms": None})
+                    break
                 nxt = _next_tokens(max(cur, _thinking_floor()))
                 logger.warning(f"模型只吐思考内容（第 {attempts} 次，max_tokens={cur}），"
                                f"提高到 {nxt} 重试")
@@ -870,6 +898,14 @@ class LLMClient:
                 f"连续 {attempts} 次调用均因输出被截断（finish_reason=length，最后一次 max_tokens="
                 f"{detail['max_tokens']}）而未能得到完整 JSON，建议进一步缩小单次分析规模。"
                 f"最后错误：{last_err}", detail=detail)
+        # 全是「只吐思考」的失败：给出针对性提示，别让上层/用户误以为是「JSON 格式问题」。
+        if history and all(h.get("finish_reason") == "reasoning_only" for h in history):
+            raise LLMError(
+                f"模型连续 {attempts} 次只返回思考内容（reasoning_content）而没有正文，"
+                "即使已把思考档位降到最低、额度提到上限仍无正文。这通常是模型/服务端异常"
+                "（思考无限长或参数异常），并非本任务的 JSON 格式问题。建议："
+                "到「AI 设置」降低该模块的 reasoning_effort（low）、或换一个非 reasoning 模型、"
+                "或稍后重试。")
         raise LLMError(f"连续 {attempts} 次调用均未返回合法 JSON。最后错误：{last_err}")
 
     # ---- 连接测试 ----
