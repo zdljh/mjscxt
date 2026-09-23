@@ -31,6 +31,7 @@ from config import (
     DUB_MIX_DIR, MIX_DEFAULT_PARAMS, CONTINUITY_DIR,
     TASKS_DB_PATH, TASK_QUEUE_CONCURRENCY, TASK_UNIT_MIN_BYTES,
     KEYFRAME_CHAIN_MODE, WORKFLOW_TEMPLATE,
+    CHARACTER_SHEET_VIEWS, ASSET_VIEW_STEMS,
 )
 from script_generator import ScriptGenerator
 from comfyui_client import (ComfyUIClient, camera_spec as _camera_spec,
@@ -75,6 +76,7 @@ import prompt_qc
 import qc_client
 import qc_coverage
 import style_kit
+import sheet_split
 import task_store
 import gpu_task_gate
 import video_watermark
@@ -308,21 +310,48 @@ def _cleanup_scratch_dir(dir_path: str, logger=None) -> None:
 # 认 front/base 固定名）。统一为：扩展名白名单 + 取第一张非空图片。
 _ASSET_IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
+#: 资产目录内「主视角图」的取图优先级（2026-09-24 修复）。
+#: ⚠️ 实测 bug：原来只按**文件名字典序**取第一张非空图，而角色资产目录里
+#:    back.png < base.png < front.png < left.png < right.png —— 于是 `back.png`
+#:    （**背面图**）被当成「主角锚点」喂给分镜/视频链路（_build_asset_index 在
+#:    剧本 characters 没有 front/base 字段时就走这条兜底，autopilot 正是这种形态）。
+#:    当时看不出来，是因为 4 张视角图与 base 内容完全一致（都是同一张三视图整图）；
+#:    一旦视角图变成真单机位（2026-09-24 sheet_split 改造后就是如此），
+#:    这个字典序兜底就会静默地把每个镜头的角色锚点换成「只有背面」。
+#: 故改为显式优先级：正面 > 整图 > 左侧 > 右侧 > 背面 > 其它图片（字典序）。
+_ASSET_IMG_PRIORITY = ("front.png", "base.png", "front.jpg", "base.jpg",
+                       "left.png", "right.png", "back.png",
+                       "left.jpg", "right.jpg", "back.jpg")
+
 
 def _first_existing_asset_image(directory: str) -> str:
-    """在目录内取第一张非空图片（扩展名白名单），无则返回 ''。
+    """在目录内取「主视角」图片（扩展名白名单），无则返回 ''。
 
     统一判据：
       1) 扩展名白名单 (".png", ".jpg", ".jpeg", ".webp")；
-      2) 按文件名字典序取第一张非空（size>0）图片；
-      3) 找不到任何图片 → 返回 ''，调用方自行决策（报错/跳过）。
+      2) 按 :data:`_ASSET_IMG_PRIORITY` 显式优先级取（**不是**文件名字典序，
+         否则 back.png 会排在 base/front 之前被取走，详见该常量注释）；
+      3) 优先级名都不存在时，再按字典序取第一张非空图片；
+      4) 找不到任何图片 → 返回 ''，调用方自行决策（报错/跳过）。
     """
     if not directory or not os.path.isdir(directory):
         return ""
-    for fn in sorted(os.listdir(directory)):
-        p = os.path.join(directory, fn)
-        if fn.lower().endswith(_ASSET_IMG_EXTS) and os.path.isfile(p) and os.path.getsize(p) > 0:
-            return p
+    try:
+        entries = sorted(os.listdir(directory))
+    except OSError:
+        return ""
+
+    def _ok(fn: str) -> bool:
+        return (fn.lower().endswith(_ASSET_IMG_EXTS)
+                and os.path.isfile(os.path.join(directory, fn))
+                and os.path.getsize(os.path.join(directory, fn)) > 0)
+
+    for cand in _ASSET_IMG_PRIORITY:
+        if cand in entries and _ok(cand):
+            return os.path.join(directory, cand)
+    for fn in entries:
+        if _ok(fn):
+            return os.path.join(directory, fn)
     return ""
 
 
@@ -2600,10 +2629,10 @@ def api_generate_script():
 
 def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_name: str,
                          style: str = "", overwrite: bool = False):
-    """后台资产生成任务：基础图 + 多视角图
+    """后台资产生成任务：基础图 + （角色）由整图本地切分派生的视角单图
 
-    P0 修复（④⑤）：全链路接入 AI 质检——基础图与每一张多视角图都必须送检；
-    不达标自动重生成（换 seed），重试仍不达标 / 质检调用异常 → 阻断入库并标记 qc_blocked。
+    P0 修复（④⑤）：全链路接入 AI 质检——基础图必须送检；不达标自动重生成（换 seed），
+    重试仍不达标 / 质检调用异常 → 阻断入库并标记 qc_blocked。
 
     A-2 P0 断点续跑：新增 overwrite 参数（默认 False）。已达标入库的资产
     （目录内已有非空图，判据同 pipeline.probe_assets）直接跳过，不再重复
@@ -2614,7 +2643,11 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
     出的参考图完全不体现用户与总控敲定的风格。现在：
       - 正向提示词在生成前统一追加风格后缀（幂等，二次追加不重复）；
       - 解析画幅并覆写尺寸节点，「竖屏 9:16」真正落到画布；
-      - 多视角图沿用同一风格与画幅，避免 base 竖屏、视角图又变横屏。
+      - 派生视角图继承基础图的画幅（切分件贴回同尺寸画布，见 sheet_split）。
+
+    ⚠️ 2026-09-24 视角图改造（勿回退为 GPU 多视角重渲染）：详见 app/sheet_split.py 模块头。
+      角色视角图由**基础图整图本地列投影切分**得到（零 GPU、零质检），物品/场景不再产出
+      视角图；`success` 也不再受视角质量影响。
     """
     try:
         base_dir = {"character": CHARACTERS_DIR, "item": ITEMS_DIR, "scene": SCENES_DIR}[asset_type]
@@ -2626,21 +2659,19 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
 
         # 风格（文字部分，如画风/色调）仍从总控敲定的 style 串解析；
         # 画幅**按资产类型内置写死**（2026-09-22 需求，不跟随视频比例）：
-        #   角色参考图(三视图设定图) 1:1 / 道具 item 1:1 / 场景 scene 16:9，
-        #   多视图(三视图) 恒 1:1
-        # 与成片画幅解耦——即使用户拍 9:16 视频，角色参考图仍是 1:1。
+        #   角色参考图(三视图设定图) 1:1 / 道具 item 1:1 / 场景 scene 16:9
+        # 与成片画幅解耦——即使用户拍 9:16 成片，角色参考图仍是 1:1。
         # ⚠️ 角色基础图内容是「正/侧/背三张全身视图横排的三视图设定图」，不是单人立绘，
         #    2026-09-23 已从 3:4 竖幅改回 1:1（3:4 会把三人挤到贴边，实测留白 0~2px）；
         #    详见 style_kit.ASSET_BASE_RATIO 上方注释。
+        # ⚠️ 2026-09-24：视角图已改为从基础图**本地切分**派生（app/sheet_split.py），
+        #    不再有「多视图独立画幅」这条路径，故这里只需解析基础图画幅。
         style_res = style_kit.resolve(style, default_ratio=style_kit.DEFAULT_RATIO)
         gen_style = style_res["style"]
         _base_ratio = style_kit.asset_aspect_ratio(asset_type) or style_kit.DEFAULT_RATIO
-        _multi_ratio = style_kit.asset_aspect_ratio(asset_type, is_multiview=True) or style_kit.DEFAULT_RATIO
         gen_size = style_kit.aspect_size(_base_ratio)
-        gen_multi_size = style_kit.aspect_size(_multi_ratio)
-        app.logger.info("[资产风格] %s 资产生成风格=%s；内置画幅 base=%s×%s / multi=%s×%s",
-                        asset_type, gen_style or style,
-                        _base_ratio[0], _base_ratio[1], _multi_ratio[0], _multi_ratio[1])
+        app.logger.info("[资产风格] %s 资产生成风格=%s；内置画幅 %s×%s",
+                        asset_type, gen_style or style, _base_ratio[0], _base_ratio[1])
 
         # 质检配置：任务级读取一次，本任务内所有资产共用
         qc_cfg = _qc_load_cfg()
@@ -2855,133 +2886,85 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                     qc=base_gate, asset_name=name,
                     extra={"asset_type": asset_type, "style": gen_style or None})
 
-                # ---------- 阶段2：多视角（逐视角质检 → 整组重生成 → 不达标阻断） ----------
+                # ---------- 阶段2：视角单图（本地切分，不再走 GPU 多视角编辑） ----------
+                # 2026-09-24 改造，机制与实测见 app/sheet_split.py 模块头 + config 同名注释：
+                #   旧实现在这里调 `comfyui_client.generate_multiview` 逐视角**重渲染** —— 实测
+                #   4 张产物与 base.png **内容一致**（参考图编辑 cfg=1.0 只复刻已见机位），
+                #   净成本 = 每资产 4 次 GPU 渲染 + 4 次质检，收益 = 0（下游只取 front.png），
+                #   且多视角不达标会把**整个资产判 failed**（旧 success = not blocked_views）。
+                #   现在：
+                #     · 角色 → 从三视图整图**本地列投影切分**出 front/left/back 单视角图
+                #       （零 GPU、零质检），并清掉旧实现遗留的 right.png；
+                #     · 物品 / 场景 → 基础图本身就是单主体图，不再产出任何视角图。
+                #   切分是**已通过质检**的基础图的确定性派生 —— 没有可重试的自由度
+                #   （重跑只会得到同一张切图），故不再需要「逐视角质检 → 整组重生成」循环。
                 view_paths = {"base": base_dst}
                 view_attempts = {}
                 view_gate = {}
-                view_src = {}
-                views = {}
-                # O3：多视角第 1 轮也用真实随机 seed 并始终注入（不再 None）
-                vseed = random.randint(1, 2 ** 31 - 1)
-                for attempt in range(max_retries + 1):
-                    if attempt > 0:
-                        vseed = random.randint(1, 2 ** 31 - 1)
-                        _set_phase(f"{name} 多视角质检不达标，重新生成（第 {attempt}/{max_retries} 次）",
-                                   "regenerating")
-                    views = comfyui_client.generate_multiview(
-                        base_image_path=base_dst, asset_type=asset_type, asset_name=name,
-                        base_prompt_zh=prompt_zh, seed=vseed, style=gen_style, size=gen_multi_size,
-                        filename_prefix=f"comic_drama/{project_name}/{asset_type}/{name}") or {}
-                    view_src = {}
-                    for vk, vp in views.items():
-                        sp = os.path.join(scratch_dir, f"{vk}_try{attempt + 1}.png")
-                        # G8②：多视角 ComfyUI output 源改 move（消费源，不留 output 残留）；
-                        # 后续 check_image / 入库读的都是 sp（scratch），不受影响
-                        shutil.move(vp, sp)
-                        view_src[vk] = sp
-                    if not views:
-                        break
-                    if not qc_on:
-                        if qc_declared:
-                            # 已声明开启质检但接口不可用：明确阻断（图仅留在暂存区），不静默放行
-                            for vk in views:
-                                view_gate[vk] = {"accept": False, "blocked": True, "skipped": False,
-                                                 "label": "质检接口未就绪",
-                                                 "reason": "已开启图片质检但质检接口不可用"
-                                                           "（qc_config.json 缺 base_url / api_key / model）",
-                                                 "critical_issues": []}
-                            break
-                        for vk in views:
-                            view_gate[vk] = {"accept": True, "blocked": False, "skipped": True,
-                                             "label": "质检未开启", "reason": "图片质检未开启（跳过）",
-                                             "critical_issues": []}
-                        break
-                    round_pass = True
-                    api_error = False
-                    for vk, sp in view_src.items():
-                        _set_phase(f"{name} 多视角质检中（{vk} · 第 {attempt + 1} 次）", "checking")
-                        verdict = qc_client.check_image(sp, qc_desc + f"；视角：{vk}", qc_cfg,
-                                                        style=gen_style)
-                        app.logger.info(f"[资产质检] view {asset_type}/{name}/{vk} 第{attempt + 1}次 → "
-                                        f"{verdict.get('call_url')} model={verdict.get('model')} "
-                                        f"ok={verdict.get('ok')} passed={verdict.get('passed')} "
-                                        f"score={verdict.get('score')} style_mismatch={verdict.get('style_mismatch')} "
-                                        f"latency={verdict.get('latency_ms')}ms")
-                        view_attempts.setdefault(vk, []).append(
-                            _qc_record_verdict(project_name, "asset_image", f"{name}_{vk}",
-                                               f"资产多视角质检（{vk}）", attempt + 1, vseed, sp, verdict,
-                                               style=gen_style))
-                        gate = _qc_gate(verdict)
-                        view_gate[vk] = gate
-                        if not gate["accept"]:
-                            round_pass = False
-                            if not verdict.get("ok"):
-                                api_error = True
-                    if round_pass:
-                        break
-                    if api_error:
-                        break     # 质检接口异常，重生成无意义
-                    # ★ G1 止损：逐视角检查连续两次缺陷是否完全相同，命中则停止该视角重试
-                    _per_view_hopeless = [vk for vk in view_src.keys()
-                                          if _qc_retry_hopeless(
-                                              view_attempts.get(vk, []))[0]]
-                    if _per_view_hopeless:
-                        for vk in _per_view_hopeless:
-                            _hk = view_attempts.get(vk, [])
-                            if _hk and isinstance(_hk[-1], dict):
-                                _hk[-1]["retry_stopped"] = True
-                                _hk[-1]["retry_stopped_features"] = _qc_retry_hopeless(
-                                    _hk)[1]
-                        app.logger.warning(
-                            f"资产多视角重试止损（{name}）：视角 {len(_per_view_hopeless)}/{len(view_src.keys())} "
-                            f"（{ '、'.join(_per_view_hopeless) }）连续 {max_retries + 1} 次缺陷完全相同，"
-                            f"提前停止该视角重试；整组不再重生成")
-                        break
-
-                blocked_views = []
                 saved_views = []
-                for vk in view_src.keys():
-                    gate = view_gate.get(vk) or {"accept": False, "blocked": True, "skipped": False,
-                                                 "label": "生成失败", "reason": "多视角图生成失败",
-                                                 "critical_issues": []}
-                    if gate["accept"] and os.path.isfile(view_src[vk]):
-                        view_dst = os.path.join(asset_dir, f"{vk}.png")
-                        shutil.copy2(view_src[vk], view_dst)
-                        view_paths[vk] = view_dst
-                        # O2：每个多视角图旁路元数据（复用基础图 seed 链 + 本视角质检结论）
+                blocked_views = []      # 保留字段：派生无「阻断」语义，恒为空
+                derive_error = None
+                if asset_type == "character":
+                    try:
+                        _derived = sheet_split.split_sheet_to_files(
+                            base_dst, asset_dir, CHARACTER_SHEET_VIEWS,
+                            logger=app.logger, prune=False)
+                    except Exception as _dv_err:  # noqa: BLE001 派生失败绝不拖垮已达标的基础图
+                        _derived = {}
+                        derive_error = f"{type(_dv_err).__name__}: {_dv_err}"
+                        app.logger.warning(
+                            "角色「%s」三视图整图切分失败，本次仅保留整图 %s"
+                            "（下游参考图将回退它）：%s",
+                            name, os.path.basename(base_dst), _dv_err)
+                    for vk, vpath in _derived.items():
+                        view_paths[vk] = vpath
+                        view_gate[vk] = {
+                            "accept": True, "blocked": False, "skipped": True,
+                            "label": "本地派生（继承基础图质检）",
+                            "reason": "由已达标的基础图整图切分得到，不单独质检",
+                            "critical_issues": [],
+                        }
+                        # O2：视角图旁路元数据（显式标注「由整图切分派生」，与基础图 seed 同源）
                         _write_artifact_meta(
-                            view_dst, kind="asset_view", project_name=project_name,
-                            seed=vseed, prompt=orig_asset_prompt, workflow_key="multiview_gen",
-                            qc=gate, asset_name=name,
-                            extra={"asset_type": asset_type, "view": vk})
+                            vpath, kind="asset_view", project_name=project_name,
+                            seed=seed, prompt=orig_asset_prompt, workflow_key=None,
+                            qc=view_gate[vk], asset_name=name,
+                            extra={"asset_type": asset_type, "view": vk,
+                                   "derived_from": os.path.basename(base_dst),
+                                   "derive_mode": "sheet_crop"})
                         saved_views.append(vk)
-                    else:
-                        blocked_views.append({"view": vk, "label": gate["label"],
-                                              "reason": gate["reason"],
-                                              "critical_issues": gate["critical_issues"]})
-                if not saved_views and not blocked_views:
-                    blocked_views.append({"view": "-", "label": "生成失败",
-                                          "reason": "多视角图全部生成失败", "critical_issues": []})
+                    # 仅在切分成功后才清理陈旧视角（失败时保留旧图，避免删了又没有新的）
+                    if _derived:
+                        try:
+                            sheet_split.prune_stale_views(
+                                asset_dir, keep=CHARACTER_SHEET_VIEWS,
+                                known=ASSET_VIEW_STEMS, logger=app.logger)
+                        except Exception as _pe:  # noqa: BLE001
+                            app.logger.warning("清理陈旧视角文件失败（不影响入库）：%s", _pe)
+                else:
+                    # 物品 / 场景：基础图即单主体图；清掉旧实现遗留的视角图，避免 UI 把陈旧的
+                    # 「重渲染整图」继续当成一个视角展示。
+                    try:
+                        sheet_split.prune_stale_views(
+                            asset_dir, keep=(), known=ASSET_VIEW_STEMS, logger=app.logger)
+                    except Exception as _pe:  # noqa: BLE001
+                        app.logger.warning("清理陈旧视角文件失败（不影响入库）：%s", _pe)
 
-                all_attempts = list(base_attempts)
-                for recs in view_attempts.values():
-                    all_attempts.extend(recs)
                 results.append({
                     "name": name,
-                    "success": not blocked_views,
+                    "success": True,
                     "dir": asset_dir,
                     "views": list(view_paths.keys()),
-                    "qc_blocked": bool(blocked_views),
+                    "qc_blocked": False,
                     "qc_blocked_views": blocked_views,
-                    "error": ("多视角质检阻断：" + "、".join(f"{b['view']}（{b['label']}）"
-                                                            for b in blocked_views)) if blocked_views else None,
-                    "qc": _qc_summary(all_attempts, qc_declared, qc_on,
+                    "derive_error": derive_error,
+                    "error": None,
+                    # 视角图为本地派生（不单独质检），故 qc 汇总只反映基础图
+                    "qc": _qc_summary(base_attempts, qc_declared, qc_on,
                                       int(qc_cfg.get("max_retries", 0))),
                     "qc_base": _qc_summary(base_attempts, qc_declared, qc_on,
                                            int(qc_cfg.get("max_retries", 0))),
-                    "qc_views": {vk: _qc_summary(recs, qc_declared, qc_on,
-                                                 int(qc_cfg.get("max_retries", 0)))
-                                 for vk, recs in view_attempts.items()},
+                    "qc_views": {},
                 })
 
             except Exception as _asset_err:  # noqa: BLE001
@@ -3248,6 +3231,13 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
 # 角色资产 5 个视角均为「右手握笛」形象（道具已被画进人物），直接作参考会让模型把笛子
 # 画进画面，与「道具已收起」类动作冲突；此处只取角色图顶部「头部条带」作锚点，
 # 从参考层面切断手部/道具先验。
+#
+# ⚠️ 2026-09-24 口径变化：角色参考图（front.png）已从「三视图整图」改为
+#    「从整图切分出的**单人格**并居中贴回同尺寸方底」（见 app/sheet_split.py）。
+#    切分后人物恰好落在画面**水平中部约 31%** 宽（x≈0.34~0.66），
+#    故下面的 x 区间 (0.32, 0.68) 现在正好框住这张单人格的头部 —— 语义与常量取值一致，
+#    **不需要再改**。反过来，若哪天把 front.png 换回三视图整图，这个区间会落到
+#    **中格（左侧面）** 的头上，取到侧脸锚点，需同步调整为最左格。
 CLOSEUP_CHAR_CROP_TOP = (0.32, 0.02, 0.68, 0.28)   # 头部条带（x0, y0, x1, y1）
 
 
