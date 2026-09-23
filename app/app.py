@@ -3629,13 +3629,19 @@ def _project_style(project_name: str = "") -> str:
         except Exception:  # noqa: BLE001
             brief = ""
     if not brief:
-        # 建项目时选的风格（config.json 的 style 字段）作为最后兜底
+        # 建项目时选的风格 + 画面比例（config.json 的 style / aspect_ratio 字段）作为最后兜底。
+        # 画面比例拼进风格串，让 style_kit.aspect_ratio 能解析，从而真正落到视频/分镜画布
+        # （与总控 style_brief 里的「画面比例：9:16 竖屏」同一种表达，解析口径一致）。
         try:
             rec = project_store.get_project(proj)
             if rec:
-                brief = str(project_store.read_config(rec["dir_key"]).get("style") or "").strip()
+                cfg = project_store.read_config(rec["dir_key"])
+                brief = str(cfg.get("style") or "").strip()
+                ar = str(cfg.get("aspect_ratio") or "").strip()
+                if ar:
+                    brief = f"{brief}，画面比例：{ar}" if brief else f"画面比例：{ar}"
         except Exception as e:  # noqa: BLE001
-            app.logger.warning(f"读取项目 config.style 失败（忽略）：{e}")
+            app.logger.warning(f"读取项目 config.style/aspect_ratio 失败（忽略）：{e}")
             brief = ""
     return style_kit.normalize_style(brief)
 
@@ -3668,6 +3674,16 @@ def _style_aspect_confirmed(project_name: str) -> dict:
         except Exception as e:  # noqa: BLE001
             app.logger.warning(f"确认门读取 config.style 失败（忽略）：{e}")
     aspect_confirmed = bool((s.get("aspect_ratio") or "").strip())
+    # 2026-09-23（建项目选比例）：用户「新建项目」时选的画面比例写进 config.json 的
+    # aspect_ratio，也算「比例已确认」，与 style 的同源兜底保持一致。总控 AI 敲定仍是第一优先级。
+    if not aspect_confirmed:
+        try:
+            rec = project_store.get_project(_safe_project(project_name or ""))
+            if rec:
+                cfg_ar = str(project_store.read_config(rec["dir_key"]).get("aspect_ratio") or "").strip()
+                aspect_confirmed = bool(cfg_ar)
+        except Exception as e:  # noqa: BLE001
+            app.logger.warning(f"确认门读取 config.aspect_ratio 失败（忽略）：{e}")
     missing = []
     if not style_confirmed:
         missing.append("风格")

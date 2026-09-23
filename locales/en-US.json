@@ -352,6 +352,7 @@
     "chooseOrUpload": "Select a project or upload a new novel",
     "count": " projects",
     "style": "Style",
+    "aspectRatio": "Aspect Ratio",
     "styleCustom": "— Custom —",
     "styleCustomPlaceholder": "Enter a custom style, e.g., Chinese 3D render, semi-realistic, cinematic lighting",
     "styleRequired": "Please pick or type a style",

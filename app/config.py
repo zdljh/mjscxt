@@ -146,6 +146,7 @@ PROJECT_DEFAULT_CONFIG = {
     "shots_per_episode": 12,
     "episode_duration_sec": 60,         # 每集期望时长（秒）
     "resolution": "768p_vertical",
+    "aspect_ratio": "",                 # 画面比例（视频/分镜画幅，如「9:16 竖屏」；空=未设置，沿用总控/默认 9:16）
     "fps": 24,
     "duration_per_shot": 5,             # 单镜头默认秒数
     "voice_map": {},                    # 角色→音色映射（按项目隔离）

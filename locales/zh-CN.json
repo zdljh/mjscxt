@@ -352,6 +352,7 @@
     "chooseOrUpload": "选择项目开始创作，或上传新小说",
     "count": "个项目",
     "style": "风格",
+    "aspectRatio": "画面比例",
     "styleCustom": "— 自定义 —",
     "styleCustomPlaceholder": "输入自定义风格，例如：国漫3D渲染、偏写实、电影级光影",
     "styleRequired": "请选择或填写风格",

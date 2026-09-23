@@ -14,6 +14,7 @@ const DEFAULT_CONFIG = {
   episodes: 10,
   shots_per_episode: 12,
   resolution: '768p_vertical',
+  aspect_ratio: '9:16 \u7ad6\u5c4f',
   fps: 24,
   duration_per_shot: 5,
   qc_enabled: true,
@@ -31,6 +32,15 @@ const STYLE_PRESETS: { value: string; label: string }[] = [
   { value: '\u5199\u5b9e\u7535\u5f71\u611f', label: '\u5199\u5b9e\u7535\u5f71\u611f' },
   { value: '\u65e5\u5f0f\u8d5b\u7490\u7490', label: '\u65e5\u5f0f\u8d5b\u7490\u7490' },
   { value: '\u539a\u6d82\u63d2\u753b', label: '\u539a\u6d82\u63d2\u753b' },
+];
+
+// 新建项目可选画面比例（与 ai_chat.SETTING_FIELDS 里 aspect_ratio 的 options 对齐）。
+// value 即写入 config.aspect_ratio 的字面值，沿用 \u 转义（本文件零 CJK 约定）。
+// 视频 / 分镜画幅由 style 串解析，这里落一个独立字段供生成链路与确认门识别。
+const ASPECT_PRESETS: { value: string; label: string }[] = [
+  { value: '9:16 \u7ad6\u5c4f', label: '9:16 \u7ad6\u5c4f' },
+  { value: '16:9 \u6a2a\u5c4f', label: '16:9 \u6a2a\u5c4f' },
+  { value: '1:1 \u65b9\u5f62', label: '1:1 \u65b9\u5f62' },
 ];
 
 const ACCEPT_EXTS = '.txt,.docx,.pdf,.epub,.md';
@@ -54,6 +64,8 @@ export function ProjectsPage() {
   // 风格选择：预设下拉 + 自定义输入。customStyle 非空时优先用自定义值。
   const [stylePreset, setStylePreset] = useState(STYLE_PRESETS[0].value);
   const [customStyle, setCustomStyle] = useState('');
+  // 画面比例（视频/分镜画幅）：与风格一起在新建入口统一设置
+  const [aspectRatio, setAspectRatio] = useState(ASPECT_PRESETS[0].value);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // --- 编辑项目弹窗 ---
@@ -92,6 +104,7 @@ export function ProjectsPage() {
     setFormError('');
     setStylePreset(STYLE_PRESETS[0].value);
     setCustomStyle('');
+    setAspectRatio(ASPECT_PRESETS[0].value);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -163,6 +176,7 @@ export function ProjectsPage() {
         config: {
           ...DEFAULT_CONFIG,
           style: finalStyle,
+          aspect_ratio: aspectRatio,
         },
       } as any);
       const key = res?.project?.dir_key || res?.project?.id || '';
@@ -408,6 +422,16 @@ export function ProjectsPage() {
                 />
               </div>
             )}
+          </div>
+
+          {/* 画面比例：与风格一起在新建入口统一设置，决定视频/分镜画幅 */}
+          <div>
+            <Select
+              value={aspectRatio}
+              onChange={(v) => { setAspectRatio(v); setFormError(''); }}
+              label={t('project.aspectRatio')}
+              options={ASPECT_PRESETS}
+            />
           </div>
 
           {/* 小说来源切换 */}
