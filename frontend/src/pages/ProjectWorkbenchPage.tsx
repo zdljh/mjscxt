@@ -1,15 +1,24 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '@/context/AppContext';
 import { projectsApi, keyframesApi, storyboardApi, videoApi, ttsApi, mixApi, qcApi, exportApi, autopilotApi, upscaleApi, chatApi, agentApi, episodesApi } from '@/api/client';
-import { Button, Loading, EmptyState, Modal } from '@/components/ui';
+import { Button, Input, Loading, EmptyState, Modal } from '@/components/ui';
 // tab 图标統一走线性 SVG（方案 P2-10）：此前是 emoji，字号受系统字体影响且观感与全站割裂
-import { BarChart3, CheckCircle2, Clapperboard, Music, Network, Share2, ZoomIn } from '@/components/ui/icons';
+import {
+  AlertTriangle, BarChart3, Box, Check, CheckCircle2, Clapperboard, FileText, FolderOpen,
+  ImageIcon, MessageSquare, Mountain, Music, Network, Share2, Target, User, X, ZoomIn,
+} from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 import { GridPage } from '@/pages/GridPage';
 import { RelationGraphTab } from '@/components/RelationGraphTab';
 import { OutputReviewTab } from '@/components/OutputReviewTab';
 import { AudioTab } from '@/components/AudioTab';
 import type { Project, Deliverable, UpscaleEnv, UpscaleSource, UpscaleTask, UpscaleArtifact, AgentStep } from '@/types';
+
+// 焦点环：与 components/ui/index.tsx 里的 FOCUS_RING 逐字一致。
+// index.css 有全局 :focus-visible outline 兜底，这里显式加 focus:outline-none 把它压掉，
+// 否则 outline + ring 会叠成双环。凡因形状/类型原因换不成共享组件的原生控件，统一补这一串。
+const FOCUS_RING =
+  'focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas';
 
 // ========== Workbench Tab Types ==========
 // 注意：'chat' 已移除 —— AI 总控改成了右侧常驻面板，不再是标签页（见 ChatPanel）
@@ -90,7 +99,7 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
   if (loading) return <Loading />;
   if (!project) return (
     <EmptyState
-      icon="⚠️"
+      icon={<AlertTriangle className="h-10 w-10" />}
       title="项目未找到"
       description={projectKey}
     />
@@ -99,14 +108,16 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
   return (
     <div className="fade-in">
       {/* 主体：左列（项目头 + 统计 + 标签内容） + 右列「AI总控」常驻面板。
-          头部与统计放进左列，右侧面板才能从顶部一直贯通到底部，不会变成悬空小盒。 */}
-      <div className="flex items-start gap-4">
+          头部与统计放进左列，右侧面板才能从顶部一直贯通到底部，不会变成悬空小盒。
+          ⚠️ < lg 时改为上下堆叠：面板固定 340px，375 视口扣掉侧边栏后只剩 311px，
+          横排必然把页面撑出横向滚动条。 */}
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
         <div className="flex-1 min-w-0 space-y-4">
           {/* Header */}
           <div className="flex items-center justify-between">
             <div>
-              <h2 className="text-2xl font-bold text-gray-900">{project.name}</h2>
-              <p className="text-sm text-gray-500 mt-1">
+              <h2 className="text-2xl font-bold text-ink-1">{project.name}</h2>
+              <p className="text-sm text-ink-2 mt-1">
                 风格: {project.config?.style} • {project.episode_count} {t('ep.suffix')}
               </p>
             </div>
@@ -122,24 +133,24 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             {[
               { label: '角色', count: assets?.counts?.characters || 0, color: 'text-brand' },
-              { label: '物品', count: assets?.counts?.items || 0, color: 'text-green-400' },
-              { label: '场景', count: assets?.counts?.scenes || 0, color: 'text-yellow-400' },
-              { label: '分镜', count: assets?.counts?.storyboards || 0, color: 'text-blue-400' },
+              { label: '物品', count: assets?.counts?.items || 0, color: 'text-success-strong' },
+              { label: '场景', count: assets?.counts?.scenes || 0, color: 'text-warning-strong' },
+              { label: '分镜', count: assets?.counts?.storyboards || 0, color: 'text-info-strong' },
             ].map((stat) => (
-              <div key={stat.label} className="bg-white rounded-lg p-4 border border-gray-200">
+              <div key={stat.label} className="bg-surface rounded-lg p-4 border border-line">
                 <div className={`text-2xl font-bold ${stat.color}`}>{stat.count}</div>
-                <div className="text-sm text-gray-500">{stat.label}</div>
+                <div className="text-sm text-ink-2">{stat.label}</div>
               </div>
             ))}
           </div>
 
           {/* Tab Navigation */}
-          <div className="flex flex-wrap gap-2 border-b border-gray-200 pb-4">
+          <div className="flex flex-wrap gap-2 border-b border-line pb-4">
             {tabs.map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${FOCUS_RING} ${
                   activeTab === tab.id
                     ? 'bg-brand-subtle text-brand'
                     : 'text-ink-2 hover:bg-surface-2 hover:text-ink-1'
@@ -189,9 +200,9 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
           <button
             onClick={() => setChatOpen(true)}
             title="展开 AI总控"
-            className="sticky top-0 shrink-0 w-11 h-[calc(100vh-7rem)] min-h-[420px] flex flex-col items-center gap-3 py-4 rounded-xl border border-gray-200 bg-white text-gray-500 hover:text-brand hover:border-brand transition-colors"
+            className={`sticky top-0 shrink-0 w-11 h-[calc(100vh-7rem)] min-h-[420px] flex flex-col items-center gap-3 py-4 rounded-xl border border-line bg-surface text-ink-2 hover:text-brand hover:border-brand transition-colors ${FOCUS_RING}`}
           >
-            <span className="w-7 h-7 rounded-lg bg-brand-subtle flex items-center justify-center text-sm">💬</span>
+            <span className="w-7 h-7 rounded-lg bg-brand-subtle flex items-center justify-center"><MessageSquare className="h-4 w-4" /></span>
             <span className="text-xs tracking-wide" style={{ writingMode: 'vertical-rl' }}>AI总控</span>
           </button>
         )}
@@ -312,10 +323,10 @@ function OverviewTab({
     setDetailError('');
   };
 
-  const groups: { key: 'characters' | 'items' | 'scenes'; label: string; icon: string; type: 'character' | 'item' | 'scene' }[] = [
-    { key: 'characters', label: '角色', icon: '👤', type: 'character' },
-    { key: 'items', label: '物品', icon: '📦', type: 'item' },
-    { key: 'scenes', label: '场景', icon: '🏞️', type: 'scene' },
+  const groups: { key: 'characters' | 'items' | 'scenes'; label: string; icon: React.ReactNode; type: 'character' | 'item' | 'scene' }[] = [
+    { key: 'characters', label: '角色', icon: <User className="h-4 w-4" />, type: 'character' },
+    { key: 'items', label: '物品', icon: <Box className="h-4 w-4" />, type: 'item' },
+    { key: 'scenes', label: '场景', icon: <Mountain className="h-4 w-4" />, type: 'scene' },
   ];
 
   const total = groups.reduce((n, g) => n + (assets?.gallery?.[g.key]?.length || 0), 0);
@@ -324,41 +335,38 @@ function OverviewTab({
   if (selectedEpisode !== null && episodeDetail && !detailError) {
     return (
       <div className="space-y-4">
-        <button
-          onClick={goBack}
-          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 transition-colors"
-        >
+        <Button variant="ghost" onClick={goBack}>
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
           </svg>
           返回列表
-        </button>
+        </Button>
 
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
+        <div className="bg-surface rounded-lg border border-line p-6">
           <div className="flex items-start justify-between">
             <div>
-              <h3 className="text-xl font-bold text-gray-900">
+              <h3 className="text-xl font-bold text-ink-1">
                 第 {episodeDetail.episode_no} 集
-                {episodeDetail.title && <span className="ml-2 text-lg font-normal text-gray-500">{episodeDetail.title}</span>}
+                {episodeDetail.title && <span className="ml-2 text-lg font-normal text-ink-2">{episodeDetail.title}</span>}
               </h3>
               {episodeDetail.chapter_title && (
-                <p className="text-sm text-gray-500 mt-1">章节：{episodeDetail.chapter_title}</p>
+                <p className="text-sm text-ink-2 mt-1">章节：{episodeDetail.chapter_title}</p>
               )}
             </div>
-            <span className={`px-3 py-1 rounded-full text-xs font-medium ${
-              episodeDetail.status === 'done' ? 'bg-green-100 text-green-700' :
-              episodeDetail.status === 'producing' ? 'bg-blue-100 text-blue-700' :
-              episodeDetail.status === 'failed' ? 'bg-red-100 text-red-700' :
-              'bg-gray-100 text-gray-700'
+            <span className={`px-3 py-1 rounded-full text-xs font-medium inline-flex items-center gap-1 ${
+              episodeDetail.status === 'done' ? 'bg-success-subtle text-success-strong' :
+              episodeDetail.status === 'producing' ? 'bg-info-subtle text-info-strong' :
+              episodeDetail.status === 'failed' ? 'bg-danger-subtle text-danger-strong' :
+              'bg-surface-2 text-ink-1'
             }`}>
-              {episodeDetail.status === 'done' ? '✓ 完成' :
+              {episodeDetail.status === 'done' ? (<><Check className="h-3.5 w-3.5" /> 完成</>) :
                episodeDetail.status === 'producing' ? '▶ 生产中' :
-               episodeDetail.status === 'failed' ? '✗ 失败' :
+               episodeDetail.status === 'failed' ? (<><X className="h-3.5 w-3.5" /> 失败</>) :
                '○ 待生产'}
             </span>
           </div>
 
-          <div className="mt-4 flex items-center gap-4 text-sm text-gray-500">
+          <div className="mt-4 flex items-center gap-4 text-sm text-ink-2">
             <span>镜头进度：{episodeDetail.completed_shots} / {episodeDetail.shot_count}</span>
             {episodeDetail.created_at && (
               <span>创建时间：{episodeDetail.created_at.split('T')[0]}</span>
@@ -366,12 +374,12 @@ function OverviewTab({
           </div>
 
           {episodeDetail.shot_count > 0 && (
-            <div className="mt-3 w-full bg-gray-200 rounded-full h-2">
+            <div className="mt-3 w-full bg-line rounded-full h-2">
               <div
                 className={`h-2 rounded-full transition-all ${
-                  episodeDetail.status === 'done' ? 'bg-green-500' :
-                  episodeDetail.status === 'failed' ? 'bg-red-500' :
-                  'bg-blue-500'
+                  episodeDetail.status === 'done' ? 'bg-success' :
+                  episodeDetail.status === 'failed' ? 'bg-danger' :
+                  'bg-brand'
                 }`}
                 style={{ width: `${(episodeDetail.completed_shots / episodeDetail.shot_count) * 100}%` }}
               ></div>
@@ -379,8 +387,8 @@ function OverviewTab({
           )}
         </div>
 
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
-          <h4 className="font-semibold text-gray-900 mb-4">剧本内容</h4>
+        <div className="bg-surface rounded-lg border border-line p-6">
+          <h4 className="font-semibold text-ink-1 mb-4">剧本内容</h4>
 
           {(episodeDetail.shots && episodeDetail.shots.length > 0) ? (
             <div className="space-y-4">
@@ -391,30 +399,30 @@ function OverviewTab({
                       镜头 {shot.shot_id ?? idx + 1}
                     </span>
                     {shot.camera && (
-                      <span className="text-xs text-gray-500">{shot.camera}</span>
+                      <span className="text-xs text-ink-2">{shot.camera}</span>
                     )}
                     {shot.location && (
-                      <span className="text-xs text-gray-500">· {shot.location}</span>
+                      <span className="text-xs text-ink-2">· {shot.location}</span>
                     )}
                     {shot.duration != null && (
-                      <span className="text-xs text-gray-400">· {shot.duration}s</span>
+                      <span className="text-xs text-ink-3">· {shot.duration}s</span>
                     )}
                   </div>
                   {shot.description && (
-                    <p className="text-sm text-gray-700">{shot.description}</p>
+                    <p className="text-sm text-ink-1">{shot.description}</p>
                   )}
                   {shot.dialogue_text && (
-                    <p className="text-sm text-gray-800 mt-1 pl-2 border-l-2 border-gray-300">
+                    <p className="text-sm text-ink-1 mt-1 pl-2 border-l-2 border-line-strong">
                       {shot.dialogue_text}
                     </p>
                   )}
                   {shot.visual_detail && (
-                    <p className="text-xs text-gray-500 mt-1">
+                    <p className="text-xs text-ink-2 mt-1">
                       视觉描述：{shot.visual_detail}
                     </p>
                   )}
                   {shot.audio_cues && (
-                    <p className="text-xs text-gray-400 mt-1">
+                    <p className="text-xs text-ink-3 mt-1">
                       音效：{shot.audio_cues}
                     </p>
                   )}
@@ -422,7 +430,7 @@ function OverviewTab({
               ))}
             </div>
           ) : (
-            <p className="text-gray-500 text-sm">
+            <p className="text-ink-2 text-sm">
               本集剧本暂无镜头数据（可能尚未生成，或该集还在生产中）。
             </p>
           )}
@@ -434,12 +442,12 @@ function OverviewTab({
   if (detailError) {
     return (
       <div className="space-y-4">
-        <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
+        <div className="p-4 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong text-sm">
           {detailError}
         </div>
-        <button onClick={goBack} className="text-sm text-brand hover:underline">
+        <Button variant="link" className="text-sm" onClick={goBack}>
           返回列表
-        </button>
+        </Button>
       </div>
     );
   }
@@ -447,7 +455,7 @@ function OverviewTab({
   if (detailLoading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="text-gray-500">加载中...</div>
+        <div className="text-ink-2">加载中...</div>
       </div>
     );
   }
@@ -455,8 +463,10 @@ function OverviewTab({
   if (total === 0 && episodes.length === 0) {
     return (
       <div className="py-12">
-        <div className="text-center text-gray-500">
-          <div className="text-4xl mb-3">📁</div>
+        <div className="text-center text-ink-2">
+          <div className="mb-3 flex justify-center text-ink-3">
+            <FolderOpen className="h-9 w-9" />
+          </div>
           <p className="font-medium">暂无资产</p>
           <p className="text-sm mt-2">角色 / 物品 / 场景 会在生产流程中自动生成</p>
           <p className="text-sm mt-3 text-brand">
@@ -477,7 +487,7 @@ function OverviewTab({
             if (list.length === 0) return null;
             return (
               <div key={g.key}>
-                <h3 className="text-sm font-semibold text-gray-500 mb-3">
+                <h3 className="text-sm font-semibold text-ink-2 mb-3 flex items-center gap-1.5">
                   {g.icon} {g.label} · {list.length}
                 </h3>
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
@@ -498,30 +508,30 @@ function OverviewTab({
       )}
 
       {/* 剧本概览 */}
-      <div className="border-t border-gray-200 pt-8">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">
-          📝 剧本概览
+      <div className="border-t border-line pt-8">
+        <h3 className="text-lg font-semibold text-ink-1 mb-4 flex items-center gap-2">
+          <FileText className="h-5 w-5" /> 剧本概览
         </h3>
 
         {scriptLoading ? (
           <div className="flex items-center justify-center h-32">
-            <div className="text-gray-500">加载中...</div>
+            <div className="text-ink-2">加载中...</div>
           </div>
         ) : scriptError ? (
-          <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400">
+          <div className="p-4 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong">
             {scriptError}
           </div>
         ) : episodes.length === 0 ? (
-          <div className="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500">
+          <div className="bg-surface rounded-lg border border-line p-8 text-center text-ink-2">
             暂无剧集数据，请先启动自动生产
           </div>
         ) : (
           <>
             {/* 统计卡片 */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-              <div className="bg-white rounded-lg border border-gray-200 p-4">
-                <div className="text-2xl font-bold text-gray-900">{totalEpisodes}</div>
-                <div className="text-sm text-gray-500">总集数</div>
+              <div className="bg-surface rounded-lg border border-line p-4">
+                <div className="text-2xl font-bold text-ink-1">{totalEpisodes}</div>
+                <div className="text-sm text-ink-2">总集数</div>
               </div>
               {(() => {
                 const stats = episodes.reduce((acc: any, ep: any) => {
@@ -529,14 +539,14 @@ function OverviewTab({
                   return acc;
                 }, {} as Record<string, number>);
                 return [
-                  { label: '已完成', count: stats['done'] || 0, color: 'text-green-500' },
-                  { label: '生产中', count: stats['producing'] || 0, color: 'text-blue-500' },
-                  { label: '失败', count: stats['failed'] || 0, color: 'text-red-500' },
-                  { label: '待生产', count: stats['pending'] || 0, color: 'text-gray-500' },
+                  { label: '已完成', count: stats['done'] || 0, color: 'text-success-strong' },
+                  { label: '生产中', count: stats['producing'] || 0, color: 'text-info-strong' },
+                  { label: '失败', count: stats['failed'] || 0, color: 'text-danger-strong' },
+                  { label: '待生产', count: stats['pending'] || 0, color: 'text-ink-2' },
                 ].map(s => (
-                  <div key={s.label} className="bg-white rounded-lg border border-gray-200 p-4">
+                  <div key={s.label} className="bg-surface rounded-lg border border-line p-4">
                     <div className={`text-2xl font-bold ${s.color}`}>{s.count}</div>
-                    <div className="text-sm text-gray-500">{s.label}</div>
+                    <div className="text-sm text-ink-2">{s.label}</div>
                   </div>
                 ));
               })()}
@@ -544,14 +554,14 @@ function OverviewTab({
 
             {/* 进度条 */}
             {totalEpisodes > 0 && (
-              <div className="bg-white rounded-lg border border-gray-200 p-4 mb-4">
+              <div className="bg-surface rounded-lg border border-line p-4 mb-4">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm font-medium text-gray-700">整体进度</span>
-                  <span className="text-sm text-gray-500">{Math.round(((episodes.filter((e: any) => e.status === 'done').length) / totalEpisodes) * 100)}%</span>
+                  <span className="text-sm font-medium text-ink-1">整体进度</span>
+                  <span className="text-sm text-ink-2">{Math.round(((episodes.filter((e: any) => e.status === 'done').length) / totalEpisodes) * 100)}%</span>
                 </div>
-                <div className="w-full bg-gray-200 rounded-full h-2">
+                <div className="w-full bg-line rounded-full h-2">
                   <div
-                    className="bg-green-500 h-2 rounded-full transition-all"
+                    className="bg-success h-2 rounded-full transition-all"
                     style={{ width: `${((episodes.filter((e: any) => e.status === 'done').length) / totalEpisodes) * 100}%` }}
                   ></div>
                 </div>
@@ -559,18 +569,18 @@ function OverviewTab({
             )}
 
             {/* 剧集列表 */}
-            <div className="bg-white rounded-lg border border-gray-200">
-              <div className="p-4 border-b border-gray-200">
-                <h4 className="font-semibold text-gray-900">剧集列表</h4>
-                <p className="text-xs text-gray-500 mt-1">点击集数查看剧本详情</p>
+            <div className="bg-surface rounded-lg border border-line">
+              <div className="p-4 border-b border-line">
+                <h4 className="font-semibold text-ink-1">剧集列表</h4>
+                <p className="text-xs text-ink-2 mt-1">点击集数查看剧本详情</p>
               </div>
 
-              <div className="divide-y divide-gray-200">
+              <div className="divide-y divide-line">
                 {episodes.map((ep: any) => (
                   <button
                     key={ep.episode_no}
                     onClick={() => loadEpisodeDetail(ep.episode_no)}
-                    className="w-full p-4 hover:bg-gray-50 transition-colors text-left"
+                    className={`w-full p-4 hover:bg-surface-2 transition-colors text-left ${FOCUS_RING}`}
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">
@@ -578,11 +588,11 @@ function OverviewTab({
                           {ep.episode_no}
                         </span>
                         <div>
-                          <p className="font-medium text-gray-900">
+                          <p className="font-medium text-ink-1">
                             第 {ep.episode_no} 集
                             {ep.chapter_title && <span className="ml-2 text-sm text-brand">《{ep.chapter_title}》</span>}
                           </p>
-                          <p className="text-xs text-gray-500 mt-0.5">
+                          <p className="text-xs text-ink-2 mt-0.5">
                             章节 {ep.chapter_index ?? ep.episode_no}
                           </p>
                         </div>
@@ -590,39 +600,39 @@ function OverviewTab({
 
                       <div className="flex items-center gap-4">
                         <div className="text-right">
-                          <div className="text-sm text-gray-600">
+                          <div className="text-sm text-ink-2">
                             {ep.completed_shots} / {ep.shot_count} 镜头
                           </div>
                           {ep.created_at && (
-                            <div className="text-xs text-gray-400">{ep.created_at.split('T')[0]}</div>
+                            <div className="text-xs text-ink-3">{ep.created_at.split('T')[0]}</div>
                           )}
                         </div>
 
-                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                          ep.status === 'done' ? 'bg-green-100 text-green-700' :
-                          ep.status === 'producing' ? 'bg-blue-100 text-blue-700' :
-                          ep.status === 'failed' ? 'bg-red-100 text-red-700' :
-                          'bg-gray-100 text-gray-700'
+                        <span className={`px-2 py-1 rounded-full text-xs font-medium inline-flex items-center gap-1 ${
+                          ep.status === 'done' ? 'bg-success-subtle text-success-strong' :
+                          ep.status === 'producing' ? 'bg-info-subtle text-info-strong' :
+                          ep.status === 'failed' ? 'bg-danger-subtle text-danger-strong' :
+                          'bg-surface-2 text-ink-1'
                         }`}>
-                          {ep.status === 'done' ? '✓ 完成' :
+                          {ep.status === 'done' ? (<><Check className="h-3.5 w-3.5" /> 完成</>) :
                            ep.status === 'producing' ? '▶ 生产中' :
-                           ep.status === 'failed' ? '✗ 失败' :
+                           ep.status === 'failed' ? (<><X className="h-3.5 w-3.5" /> 失败</>) :
                            '○ 待生产'}
                         </span>
 
-                        <svg className="w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <svg className="w-5 h-5 text-ink-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                         </svg>
                       </div>
                     </div>
 
                     {ep.shot_count > 0 && (
-                      <div className="mt-3 w-full bg-gray-200 rounded-full h-1.5">
+                      <div className="mt-3 w-full bg-line rounded-full h-1.5">
                         <div
                           className={`h-1.5 rounded-full transition-all ${
-                            ep.status === 'done' ? 'bg-green-500' :
-                            ep.status === 'failed' ? 'bg-red-500' :
-                            'bg-blue-500'
+                            ep.status === 'done' ? 'bg-success' :
+                            ep.status === 'failed' ? 'bg-danger' :
+                            'bg-brand'
                           }`}
                           style={{ width: `${(ep.completed_shots / ep.shot_count) * 100}%` }}
                         ></div>
@@ -651,13 +661,13 @@ function AssetCard({
 }) {
   const imageUrl = assetSrc(item.thumb?.url || item.views?.[0]?.url);
   const [broken, setBroken] = useState(false);
-  const fallbackIcon = type === 'character' ? '👤' : type === 'item' ? '📦' : '🏞️';
+  const FallbackIcon = type === 'character' ? User : type === 'item' ? Box : Mountain;
 
   return (
     <button
       type="button"
       onClick={onClick}
-      className="text-left bg-white rounded-xl border border-gray-200 overflow-hidden hover:shadow-lg transition-shadow"
+      className={`text-left bg-surface rounded-xl border border-line overflow-hidden hover:shadow-lg transition-shadow ${FOCUS_RING}`}
     >
       <div className="aspect-video bg-surface-2 flex items-center justify-center overflow-hidden">
         {imageUrl && !broken ? (
@@ -669,13 +679,13 @@ function AssetCard({
             onError={() => setBroken(true)}
           />
         ) : (
-          <span className="text-4xl">{fallbackIcon}</span>
+          <FallbackIcon className="h-9 w-9 text-ink-3" />
         )}
       </div>
       <div className="p-3">
-        <h4 className="font-medium text-gray-900 text-sm truncate">{item.name}</h4>
-        <p className="text-xs text-gray-500 mt-1">
-          {item.category || (item.view_count ? `${item.view_count} 个视角` : fallbackIcon === '👤' ? '角色' : fallbackIcon === '📦' ? '物品' : '场景')}
+        <h4 className="font-medium text-ink-1 text-sm truncate">{item.name}</h4>
+        <p className="text-xs text-ink-2 mt-1">
+          {item.category || (item.view_count ? `${item.view_count} 个视角` : type === 'character' ? '角色' : type === 'item' ? '物品' : '场景')}
         </p>
       </div>
     </button>
@@ -773,7 +783,7 @@ function AssetPreviewModal({
                     aria-selected={i === active}
                     aria-label={g.view || `视角 ${i + 1}`}
                     onClick={() => setActive(i)}
-                    className={`h-14 w-20 overflow-hidden rounded border-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${
+                    className={`h-14 w-20 overflow-hidden rounded border-2 ${FOCUS_RING} ${
                       i === active ? 'border-brand' : 'border-transparent hover:border-line-strong'
                     }`}
                   >
@@ -830,9 +840,9 @@ function QcTab({ projectKey }: { projectKey: string }) {
   };
 
   const verdictBadge = (v: string) => {
-    if (v === 'pass') return 'bg-green-100 text-green-700';
-    if (v === 'fail') return 'bg-red-100 text-red-700';
-    return 'bg-gray-100 text-gray-700';
+    if (v === 'pass') return 'bg-success-subtle text-success-strong';
+    if (v === 'fail') return 'bg-danger-subtle text-danger-strong';
+    return 'bg-surface-2 text-ink-1';
   };
 
   if (loading) return <Loading />;
@@ -850,52 +860,52 @@ function QcTab({ projectKey }: { projectKey: string }) {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h3 className="text-lg font-semibold text-gray-900">功能质检</h3>
+        <h3 className="text-lg font-semibold text-ink-1">功能质检</h3>
         <Button size="sm" variant="secondary" onClick={load}>刷新</Button>
       </div>
 
       {notice && (
-        <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-green-600 text-sm">
+        <div className="p-3 bg-success/10 border border-success/30 rounded-lg text-success-strong text-sm">
           {notice}
         </div>
       )}
       {error && (
-        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">{error}</div>
+        <div className="p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong text-sm">{error}</div>
       )}
 
       {/* 质检引擎状态 */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
+      <div className="bg-surface rounded-lg border border-line p-4">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="font-medium text-gray-900">质检引擎</span>
+          <span className="font-medium text-ink-1">质检引擎</span>
           <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-            cfg.enabled ? 'bg-green-100 text-green-700'
-                        : 'bg-gray-100 text-gray-600'
+            cfg.enabled ? 'bg-success-subtle text-success-strong'
+                        : 'bg-surface-2 text-ink-2'
           }`}>
             {cfg.enabled ? '已启用' : '未启用'}
           </span>
           <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
             cfg.ready ? 'bg-brand-subtle text-brand-hover'
-                      : 'bg-yellow-100 text-yellow-700'
+                      : 'bg-warning-subtle text-warning-strong'
           }`}>
             {cfg.ready ? '就绪' : '未就绪'}
           </span>
         </div>
         <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
           <div>
-            <div className="text-gray-500 text-xs">模型</div>
-            <div className="text-gray-900 truncate">{cfg.effective_model || cfg.model || '—'}</div>
+            <div className="text-ink-2 text-xs">模型</div>
+            <div className="text-ink-1 truncate">{cfg.effective_model || cfg.model || '—'}</div>
           </div>
           <div>
-            <div className="text-gray-500 text-xs">通过分数线</div>
-            <div className="text-gray-900">{cfg.pass_score ?? '—'}</div>
+            <div className="text-ink-2 text-xs">通过分数线</div>
+            <div className="text-ink-1">{cfg.pass_score ?? '—'}</div>
           </div>
           <div>
-            <div className="text-gray-500 text-xs">接口地址</div>
-            <div className="text-gray-900 truncate">{cfg.effective_base_url || cfg.base_url || '—'}</div>
+            <div className="text-ink-2 text-xs">接口地址</div>
+            <div className="text-ink-1 truncate">{cfg.effective_base_url || cfg.base_url || '—'}</div>
           </div>
           <div>
-            <div className="text-gray-500 text-xs">API Key</div>
-            <div className="text-gray-900">{cfg.has_api_key ? (cfg.api_key_masked || '已配置') : '未配置'}</div>
+            <div className="text-ink-2 text-xs">API Key</div>
+            <div className="text-ink-1">{cfg.has_api_key ? (cfg.api_key_masked || '已配置') : '未配置'}</div>
           </div>
         </div>
         <div className="mt-3 flex flex-wrap gap-2 text-xs">
@@ -907,7 +917,7 @@ function QcTab({ projectKey }: { projectKey: string }) {
           ].map((k) => (
             <span key={k.label} className={`px-2 py-0.5 rounded ${
               k.on ? 'bg-brand-subtle text-brand'
-                   : 'bg-gray-100 text-gray-500'
+                   : 'bg-surface-2 text-ink-2'
             }`}>
               {k.label}质检 {k.on ? '开' : '关'}
             </span>
@@ -918,29 +928,29 @@ function QcTab({ projectKey }: { projectKey: string }) {
       {/* 统计 */}
       <div className="grid grid-cols-4 gap-4">
         {[
-          { label: '质检总数', value: stats.total, color: 'text-gray-900' },
-          { label: '通过', value: stats.passed, color: 'text-green-500' },
-          { label: '未通过', value: stats.failed, color: 'text-red-500' },
-          { label: '待重试', value: stats.retry_count, color: 'text-yellow-500' },
+          { label: '质检总数', value: stats.total, color: 'text-ink-1' },
+          { label: '通过', value: stats.passed, color: 'text-success-strong' },
+          { label: '未通过', value: stats.failed, color: 'text-danger-strong' },
+          { label: '待重试', value: stats.retry_count, color: 'text-warning-strong' },
         ].map((s) => (
-          <div key={s.label} className="bg-white rounded-lg border border-gray-200 p-4 text-center">
+          <div key={s.label} className="bg-surface rounded-lg border border-line p-4 text-center">
             <div className={`text-2xl font-bold ${s.color}`}>{s.value ?? 0}</div>
-            <div className="text-xs text-gray-500 mt-1">{s.label}</div>
+            <div className="text-xs text-ink-2 mt-1">{s.label}</div>
           </div>
         ))}
       </div>
 
       {/* 逐镜明细 */}
       {records.length === 0 ? (
-        <div className="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500">
+        <div className="bg-surface rounded-lg border border-line p-8 text-center text-ink-2">
           暂无质检记录。镜头在流水线跑到「质检」环节后会在此出现。
         </div>
       ) : (
-        <div className="bg-white rounded-lg border border-gray-200 divide-y divide-gray-200">
+        <div className="bg-surface rounded-lg border border-line divide-y divide-line">
           {records.map((r, i) => (
             <div key={`${r.shot_id}-${r.kind}-${i}`} className="p-3 flex items-center gap-3">
-              <span className="font-mono text-sm text-gray-900">{r.shot_id}</span>
-              <span className="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-600">
+              <span className="font-mono text-sm text-ink-1">{r.shot_id}</span>
+              <span className="text-xs px-2 py-0.5 rounded bg-surface-2 text-ink-2">
                 {KIND_LABEL[r.kind] || r.kind || '质检'}
               </span>
               <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${verdictBadge(r.verdict)}`}>
@@ -951,12 +961,12 @@ function QcTab({ projectKey }: { projectKey: string }) {
               {typeof r.score === 'number' && (
                 // ⚠️ 后端 score 是 **0~100**（实测区间 15~98），不是 0~1 的比例。
                 // 这里此前无条件 *100，会把 82 分显示成「8200」。
-                <span className="text-xs text-gray-500">
+                <span className="text-xs text-ink-2">
                   得分 {Math.round(r.score <= 1 ? r.score * 100 : r.score)}
                 </span>
               )}
               {r.timestamp && (
-                <span className="text-xs text-gray-400 ml-auto">{String(r.timestamp).replace('T', ' ').slice(0, 19)}</span>
+                <span className="text-xs text-ink-3 ml-auto">{String(r.timestamp).replace('T', ' ').slice(0, 19)}</span>
               )}
               {(r.kind === 'image' || r.kind === 'video') && (
                 <Button
@@ -983,10 +993,10 @@ function StoryboardHubTab({ projectKey }: { projectKey: string }) {
   const { t } = useApp();
   const [sub, setSub] = useState<'storyboard' | 'ninegrid' | 'keyframes'>('storyboard');
 
-  const subs: { id: 'storyboard' | 'ninegrid' | 'keyframes'; icon: string; label: string; hint: string }[] = [
-    { id: 'storyboard', icon: '🎬', label: t('wb.subStoryboard'), hint: '完整镜头列表' },
-    { id: 'ninegrid', icon: '🎯', label: t('wb.subNinegrid'), hint: '镜头构图草案' },
-    { id: 'keyframes', icon: '🖼️', label: t('wb.subKeyframes'), hint: '镜头首尾帧' },
+  const subs: { id: 'storyboard' | 'ninegrid' | 'keyframes'; icon: React.ReactNode; label: string; hint: string }[] = [
+    { id: 'storyboard', icon: <Clapperboard className="h-4 w-4" />, label: t('wb.subStoryboard'), hint: '完整镜头列表' },
+    { id: 'ninegrid', icon: <Target className="h-4 w-4" />, label: t('wb.subNinegrid'), hint: '镜头构图草案' },
+    { id: 'keyframes', icon: <ImageIcon className="h-4 w-4" />, label: t('wb.subKeyframes'), hint: '镜头首尾帧' },
   ];
 
   return (
@@ -998,10 +1008,10 @@ function StoryboardHubTab({ projectKey }: { projectKey: string }) {
             key={s.id}
             onClick={() => setSub(s.id)}
             title={s.hint}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-all ${
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-all ${FOCUS_RING} ${
               sub === s.id
                 ? 'bg-brand text-white shadow'
-                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                : 'bg-surface-2 text-ink-2 hover:bg-line hover:text-ink-1'
             }`}
           >
             <span>{s.icon}</span>
@@ -1066,25 +1076,25 @@ function KeyframesTab({ projectKey }: { projectKey: string }) {
         <Button size="sm" onClick={fetchPlan} disabled={loading}>刷新</Button>
       </div>
 
-      {error && <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400">{error}</div>}
+      {error && <div className="p-4 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong">{error}</div>}
 
       {plan && (
         <div className="grid grid-cols-4 gap-4">
-          <div className="bg-white rounded-lg border border-gray-200 p-4 text-center">
+          <div className="bg-surface rounded-lg border border-line p-4 text-center">
             <div className="text-3xl font-bold text-brand">{plan.shot_count}</div>
-            <div className="text-sm text-gray-500">总镜头数</div>
+            <div className="text-sm text-ink-2">总镜头数</div>
           </div>
-          <div className="bg-white rounded-lg border border-gray-200 p-4 text-center">
-            <div className="text-3xl font-bold text-green-400">{plan.start_frames_ready}</div>
-            <div className="text-sm text-gray-500">首帧就绪</div>
+          <div className="bg-surface rounded-lg border border-line p-4 text-center">
+            <div className="text-3xl font-bold text-success-strong">{plan.start_frames_ready}</div>
+            <div className="text-sm text-ink-2">首帧就绪</div>
           </div>
-          <div className="bg-white rounded-lg border border-gray-200 p-4 text-center">
-            <div className="text-3xl font-bold text-blue-400">{plan.end_frames_ready}</div>
-            <div className="text-sm text-gray-500">尾帧就绪</div>
+          <div className="bg-surface rounded-lg border border-line p-4 text-center">
+            <div className="text-3xl font-bold text-info-strong">{plan.end_frames_ready}</div>
+            <div className="text-sm text-ink-2">尾帧就绪</div>
           </div>
-          <div className="bg-white rounded-lg border border-gray-200 p-4 text-center">
-            <div className="text-3xl font-bold text-yellow-400">{plan.to_generate}</div>
-            <div className="text-sm text-gray-500">待生成</div>
+          <div className="bg-surface rounded-lg border border-line p-4 text-center">
+            <div className="text-3xl font-bold text-warning-strong">{plan.to_generate}</div>
+            <div className="text-sm text-ink-2">待生成</div>
           </div>
         </div>
       )}
@@ -1101,25 +1111,25 @@ function KeyframesTab({ projectKey }: { projectKey: string }) {
 
       {plan && (
         <div className="space-y-2">
-          <h4 className="font-semibold text-gray-700 mb-3">镜头列表</h4>
+          <h4 className="font-semibold text-ink-1 mb-3">镜头列表</h4>
           {plan.plan?.map((shot: any) => (
             <div
               key={shot.seq}
               className={`flex items-center gap-4 p-3 rounded-lg ${
-                shot.need_gen ? 'bg-yellow-500/10 border border-yellow-500/30' :
-                shot.has_end ? 'bg-green-500/10 border border-green-500/30' :
-                'bg-gray-50'
+                shot.need_gen ? 'bg-warning/10 border border-warning/30' :
+                shot.has_end ? 'bg-success/10 border border-success/30' :
+                'bg-surface-2'
               }`}
             >
-              <span className="w-12 font-mono text-gray-500">#{shot.seq}</span>
+              <span className="w-12 font-mono text-ink-2">#{shot.seq}</span>
               <span className="flex-1">{shot.status || shot.shot_id}</span>
               <div className="flex gap-2">
-                {shot.has_start && <span className="px-2 py-1 bg-green-500/20 text-green-400 rounded text-xs">首帧</span>}
-                {shot.has_end && <span className="px-2 py-1 bg-blue-500/20 text-blue-400 rounded text-xs">尾帧</span>}
-                {shot.need_gen && !shot.has_end && <span className="px-2 py-1 bg-yellow-500/20 text-yellow-400 rounded text-xs">待生成</span>}
+                {shot.has_start && <span className="px-2 py-1 bg-success/20 text-success-strong rounded text-xs">首帧</span>}
+                {shot.has_end && <span className="px-2 py-1 bg-info/20 text-info-strong rounded text-xs">尾帧</span>}
+                {shot.need_gen && !shot.has_end && <span className="px-2 py-1 bg-warning/20 text-warning-strong rounded text-xs">待生成</span>}
               </div>
               {shot.url && (
-                <a href={shot.url} target="_blank" rel="noopener noreferrer" className="text-brand hover:text-brand">查看</a>
+                <a href={shot.url} target="_blank" rel="noopener noreferrer" className={`text-brand hover:text-brand rounded-sm ${FOCUS_RING}`}>查看</a>
               )}
             </div>
           ))}
@@ -1220,37 +1230,39 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
       </div>
 
       {summary && (
-        <div className="flex flex-wrap gap-4 text-sm text-gray-600">
+        <div className="flex flex-wrap gap-4 text-sm text-ink-2">
           <span>共 {summary.shot_count} 镜</span>
           <span>分镜图 {summary.storyboard_ready ?? 0}</span>
           <span>视频 {summary.video_ready ?? 0}</span>
           <span>尾帧 {summary.keyframe_end_ready ?? 0}</span>
           {(summary.qc_blocked ?? 0) > 0 && (
-            <span className="text-amber-600">质检拦截 {summary.qc_blocked}</span>
+            <span className="text-warning-strong">质检拦截 {summary.qc_blocked}</span>
           )}
         </div>
       )}
 
       {notice && (
-        <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-green-600 text-sm">
+        <div className="p-3 bg-success/10 border border-success/30 rounded-lg text-success-strong text-sm">
           {notice}
         </div>
       )}
       {shotError && (
-        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
+        <div className="p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong text-sm">
           {shotError}
         </div>
       )}
 
       {error === 'no-data' && (
-        <div className="py-12 text-center text-gray-500">
-          <div className="text-4xl mb-3">🎬</div>
+        <div className="py-12 text-center text-ink-2">
+          <div className="mb-3 flex justify-center text-ink-3">
+            <Clapperboard className="h-9 w-9" />
+          </div>
           <p>暂无分镜数据，请先进行剧本生成</p>
         </div>
       )}
 
       {error && error !== 'no-data' && (
-        <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400">{error}</div>
+        <div className="p-4 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong">{error}</div>
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -1260,14 +1272,14 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
           const vidBusy = busy === `${card.shot_id}:video`;
           const mode = videoMode[sid] || 'reference';
           return (
-            <div key={card.seq} className="bg-white rounded-lg border border-gray-200 p-4 flex flex-col">
+            <div key={card.seq} className="bg-surface rounded-lg border border-line p-4 flex flex-col">
               <div className="flex items-center justify-between mb-2">
-                <span className="font-mono text-sm text-gray-500">#{card.seq}</span>
-                <span className="text-xs text-gray-500">{card.camera}</span>
+                <span className="font-mono text-sm text-ink-2">#{card.seq}</span>
+                <span className="text-xs text-ink-2">{card.camera}</span>
               </div>
 
               <div className="flex gap-3 mb-2">
-                <div className="w-24 h-24 shrink-0 rounded bg-gray-100 border border-gray-200 overflow-hidden flex items-center justify-center text-xs text-gray-400">
+                <div className="w-24 h-24 shrink-0 rounded bg-surface-2 border border-line overflow-hidden flex items-center justify-center text-xs text-ink-3">
                   {card.storyboard?.exists && card.storyboard?.url ? (
                     <img src={card.storyboard.url} alt={`镜头 ${card.seq} 分镜图`} className="w-full h-full object-cover" />
                   ) : (
@@ -1275,15 +1287,15 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
                   )}
                 </div>
                 <div className="min-w-0 flex-1 text-xs space-y-1">
-                  <p className="text-gray-700 line-clamp-3">{card.description}</p>
+                  <p className="text-ink-1 line-clamp-3">{card.description}</p>
                   {card.dialogue_text && (
-                    <p className="text-gray-500 italic line-clamp-2">{card.dialogue_text}</p>
+                    <p className="text-ink-2 italic line-clamp-2">{card.dialogue_text}</p>
                   )}
-                  <p className={card.video?.exists ? 'text-green-600' : 'text-amber-600'}>
+                  <p className={card.video?.exists ? 'text-success-strong' : 'text-warning-strong'}>
                     视频：{card.video?.exists ? '已生成' : '未生成'}
                   </p>
                   {card.consistency?.score != null && (
-                    <p className="text-gray-500">一致性：{card.consistency.score}</p>
+                    <p className="text-ink-2">一致性：{card.consistency.score}</p>
                   )}
                 </div>
               </div>
@@ -1294,7 +1306,7 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
                     href={card.video.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-xs text-brand hover:text-brand"
+                    className={`text-xs text-brand hover:text-brand rounded-sm ${FOCUS_RING}`}
                   >
                     查看视频
                   </a>
@@ -1304,7 +1316,7 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
                   onChange={(e) =>
                     setVideoMode((prev) => ({ ...prev, [sid]: e.target.value as 'reference' | 'keyframe' }))
                   }
-                  className="text-xs rounded border border-gray-300 bg-white text-gray-700 px-1 py-1"
+                  className={`text-xs rounded border border-line bg-surface text-ink-1 px-1 py-1 ${FOCUS_RING}`}
                   title="reference：用分镜图+主角锚点生成；keyframe：用首尾帧插值（需已有尾帧）"
                 >
                   <option value="reference">分镜图驱动</option>
@@ -1519,8 +1531,8 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="text-lg font-semibold text-gray-900">{t('upscale.title')}</h3>
-          <p className="text-sm text-gray-500 mt-0.5">{t('upscale.subtitle')}</p>
+          <h3 className="text-lg font-semibold text-ink-1">{t('upscale.title')}</h3>
+          <p className="text-sm text-ink-2 mt-0.5">{t('upscale.subtitle')}</p>
         </div>
         <Button size="sm" variant="secondary" onClick={load} disabled={loading || busy}>
           {t('common.refresh')}
@@ -1531,8 +1543,8 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
       <div
         className={`p-3 rounded-lg border text-sm ${
           ready
-            ? 'bg-green-50 border-green-200 text-green-700'
-            : 'bg-amber-50 border-amber-200 text-amber-700'
+            ? 'bg-success-subtle border-success/30 text-success-strong'
+            : 'bg-warning-subtle border-warning/30 text-warning-strong'
         }`}
       >
         <div className="flex items-center justify-between gap-3">
@@ -1548,10 +1560,10 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
         </div>
         {env && (
           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs">
-            <span>{t('upscale.comfyOnline')}: {env.comfy_online ? '✓' : '✗'}</span>
-            <span>{t('upscale.modelReady')}: {env.model_ready ? '✓' : '✗'}</span>
-            <span>{t('upscale.teReady')}: {env.te_ready ? '✓' : '✗'}</span>
-            <span>{t('upscale.legacyReady')}: {env.legacy_ready ? '✓' : '✗'}</span>
+            <span className="inline-flex items-center gap-1">{t('upscale.comfyOnline')}: {env.comfy_online ? <Check className="h-3.5 w-3.5 text-success" /> : <X className="h-3.5 w-3.5 text-danger" />}</span>
+            <span className="inline-flex items-center gap-1">{t('upscale.modelReady')}: {env.model_ready ? <Check className="h-3.5 w-3.5 text-success" /> : <X className="h-3.5 w-3.5 text-danger" />}</span>
+            <span className="inline-flex items-center gap-1">{t('upscale.teReady')}: {env.te_ready ? <Check className="h-3.5 w-3.5 text-success" /> : <X className="h-3.5 w-3.5 text-danger" />}</span>
+            <span className="inline-flex items-center gap-1">{t('upscale.legacyReady')}: {env.legacy_ready ? <Check className="h-3.5 w-3.5 text-success" /> : <X className="h-3.5 w-3.5 text-danger" />}</span>
           </div>
         )}
         {!ready && (env?.reasons?.length ?? 0) > 0 && (
@@ -1570,18 +1582,18 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
           必须给一个真正的关闭入口（之前 enable_upscale 不在 PLAN_DEFAULTS 里，
           接口会把该字段过滤掉，等于关不掉）。 */}
       {planOn !== null && (
-        <div className="bg-white rounded-lg border border-gray-200 p-4">
+        <div className="bg-surface rounded-lg border border-line p-4">
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
-              <p className="text-sm font-medium text-gray-900">
+              <p className="text-sm font-medium text-ink-1">
                 {t('upscale.planToggle')}
               </p>
-              <p className="text-xs text-gray-500 mt-1">
+              <p className="text-xs text-ink-2 mt-1">
                 {t('upscale.planToggleHint')}
               </p>
             </div>
             <div className="flex items-center gap-3 shrink-0">
-              <span className={`text-xs font-medium ${planOn ? 'text-green-600' : 'text-gray-500'}`}>
+              <span className={`text-xs font-medium ${planOn ? 'text-success-strong' : 'text-ink-2'}`}>
                 {planOn ? t('upscale.on') : t('upscale.off')}
               </span>
               <button
@@ -1589,12 +1601,12 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
                 aria-checked={planOn}
                 disabled={savingPlan}
                 onClick={() => savePlan({ enable_upscale: !planOn })}
-                className={`relative w-11 h-6 rounded-full transition-colors disabled:opacity-50 ${
-                  planOn ? 'bg-brand' : 'bg-gray-300'
+                className={`relative w-11 h-6 rounded-full transition-colors disabled:opacity-50 ${FOCUS_RING} ${
+                  planOn ? 'bg-brand' : 'bg-line-strong'
                 }`}
               >
                 <span
-                  className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                  className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-surface shadow transition-transform ${
                     planOn ? 'translate-x-5' : ''
                   }`}
                 />
@@ -1603,55 +1615,57 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
           </div>
 
           {/* 自动生产的超分倍率（与手工超分独立配置） */}
-          <div className="mt-3 pt-3 border-t border-gray-100 flex items-center gap-3">
-            <span className="text-xs text-gray-600">{t('upscale.planScale')}</span>
+          <div className="mt-3 pt-3 border-t border-line flex items-center gap-3">
+            <span className="text-xs text-ink-2">{t('upscale.planScale')}</span>
             <div className="flex gap-2">
               {([2, 3, 4] as const).map((n) => (
                 <button
                   key={n}
                   disabled={savingPlan || !planOn}
                   onClick={() => savePlan({ upscale_scale: n })}
-                  className={`px-3 py-1 rounded-md text-xs font-medium transition-all disabled:opacity-50 ${
+                  className={`px-3 py-1 rounded-md text-xs font-medium transition-all disabled:opacity-50 ${FOCUS_RING} ${
                     planScale === n
                       ? 'bg-brand text-white'
-                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                      : 'bg-surface-2 text-ink-2 hover:bg-line hover:text-ink-1'
                   }`}
                 >
                   {t('upscale.scaleTimes', { n })}
                 </button>
               ))}
             </div>
-            <span className="text-xs text-gray-400">{t('upscale.planScaleHint')}</span>
+            <span className="text-xs text-ink-3">{t('upscale.planScaleHint')}</span>
           </div>
         </div>
       )}
 
       {error && (
-        <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+        <div className="p-3 bg-danger-subtle border border-danger/30 rounded-lg text-sm text-danger-strong">
           {error}
         </div>
       )}
 
       {/* 选择源 + 倍率 + 发起 */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4 space-y-4">
+      <div className="bg-surface rounded-lg border border-line p-4 space-y-4">
         {sources.length === 0 ? (
           <div className="text-center py-8">
-            <div className="text-4xl mb-3">🔍</div>
-            <h4 className="text-base font-medium text-gray-900 mb-1">{t('upscale.sourceEmpty')}</h4>
-            <p className="text-sm text-gray-500">{t('upscale.sourceEmptyTip')}</p>
+            <div className="mb-3 flex justify-center text-ink-3">
+              <ZoomIn className="h-9 w-9" />
+            </div>
+            <h4 className="text-base font-medium text-ink-1 mb-1">{t('upscale.sourceEmpty')}</h4>
+            <p className="text-sm text-ink-2">{t('upscale.sourceEmptyTip')}</p>
           </div>
         ) : (
           <>
             <div className="grid md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1.5">
+                <label className="block text-xs font-medium text-ink-2 mb-1.5">
                   {t('upscale.selectSource')}
                 </label>
                 <select
                   value={selected}
                   onChange={(e) => { setSelected(e.target.value); setPlaying(null); }}
                   disabled={busy}
-                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg bg-white text-gray-900"
+                  className={`w-full px-3 py-2 text-sm border border-line rounded-lg bg-surface text-ink-1 ${FOCUS_RING}`}
                 >
                   {Array.from(new Set(visibleSources.map((s) => s.kind))).map((kind) => (
                     <optgroup key={kind} label={kind}>
@@ -1664,26 +1678,26 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
                   ))}
                 </select>
                 {/* ComfyUI 侧是全局素材池（不分项目），默认折叠避免淹没本项目成片 */}
-                <label className="mt-2 flex items-center gap-2 text-xs text-gray-500 cursor-pointer">
+                <label className="mt-2 flex items-center gap-2 text-xs text-ink-2 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={showComfy}
                     onChange={(e) => setShowComfy(e.target.checked)}
-                    className="rounded border-gray-300"
+                    className={`rounded border-line accent-brand ${FOCUS_RING}`}
                   />
                   {t('upscale.showComfy', {
                     n: sources.length - sources.filter((s) => !s.kind.startsWith('ComfyUI')).length,
                   })}
                 </label>
                 {source && (
-                  <p className="text-xs text-gray-500 mt-1.5">
+                  <p className="text-xs text-ink-2 mt-1.5">
                     {source.mtime} · {source.size_mb} MB
                   </p>
                 )}
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1.5">
+                <label className="block text-xs font-medium text-ink-2 mb-1.5">
                   {t('upscale.scale')}
                 </label>
                 <div className="flex gap-2">
@@ -1692,17 +1706,17 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
                       key={n}
                       onClick={() => setScale(n)}
                       disabled={busy}
-                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${FOCUS_RING} ${
                         scale === n
                           ? 'bg-brand text-white shadow-lg'
-                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200 hover:text-gray-900'
+                          : 'bg-surface-2 text-ink-2 hover:bg-line hover:text-ink-1'
                       }`}
                     >
                       {t('upscale.scaleTimes', { n })}
                     </button>
                   ))}
                 </div>
-                <p className="text-xs text-gray-500 mt-1.5">
+                <p className="text-xs text-ink-2 mt-1.5">
                   {t('upscale.scaleHint')}
                 </p>
               </div>
@@ -1726,7 +1740,7 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
                 </Button>
               )}
               {!ready && (
-                <span className="text-xs text-amber-600 self-center">
+                <span className="text-xs text-warning-strong self-center">
                   {t('upscale.notReadyTip')}
                 </span>
               )}
@@ -1737,57 +1751,57 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
 
       {/* 任务进度 / 结果 */}
       {task && (
-        <div className="bg-white rounded-lg border border-gray-200 p-4 space-y-3">
+        <div className="bg-surface rounded-lg border border-line p-4 space-y-3">
           <div className="flex items-center justify-between gap-3">
-            <span className="font-semibold text-gray-900">{statusText()}</span>
-            <span className="text-xs text-gray-500">
+            <span className="font-semibold text-ink-1">{statusText()}</span>
+            <span className="text-xs text-ink-2">
               {t('upscale.progress')} {task.progress || 0}%
             </span>
           </div>
 
-          <div className="h-2 rounded-full bg-gray-100 overflow-hidden">
+          <div className="h-2 rounded-full bg-surface-2 overflow-hidden">
             <div
               className={`h-full transition-all ${
-                task.status === 'error' ? 'bg-red-500' : 'bg-brand'
+                task.status === 'error' ? 'bg-danger' : 'bg-brand'
               }`}
               style={{ width: `${Math.min(100, task.progress || 0)}%` }}
             />
           </div>
 
           {task.message && (
-            <p className="text-xs text-gray-500">{task.message}</p>
+            <p className="text-xs text-ink-2">{task.message}</p>
           )}
           {task.status === 'error' && task.error && (
-            <p className="text-xs text-red-600 break-all">{task.error}</p>
+            <p className="text-xs text-danger-strong break-all">{task.error}</p>
           )}
 
           {task.status === 'done' && res && (
-            <div className="pt-3 border-t border-gray-200 space-y-3">
+            <div className="pt-3 border-t border-line space-y-3">
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
                 <div>
-                  <div className="text-gray-500">{t('upscale.before')}</div>
-                  <div className="font-medium text-gray-900">{fmtResolution(res.before)}</div>
+                  <div className="text-ink-2">{t('upscale.before')}</div>
+                  <div className="font-medium text-ink-1">{fmtResolution(res.before)}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500">{t('upscale.after')}</div>
-                  <div className="font-medium text-gray-900">{fmtResolution(res.after)}</div>
+                  <div className="text-ink-2">{t('upscale.after')}</div>
+                  <div className="font-medium text-ink-1">{fmtResolution(res.after)}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500">{t('upscale.elapsed')}</div>
-                  <div className="font-medium text-gray-900">
+                  <div className="text-ink-2">{t('upscale.elapsed')}</div>
+                  <div className="font-medium text-ink-1">
                     {res.elapsed_sec != null ? `${res.elapsed_sec}s` : '—'}
                   </div>
                 </div>
                 <div>
-                  <div className="text-gray-500">{t('upscale.resolution')}</div>
-                  <div className="font-medium text-gray-900">
+                  <div className="text-ink-2">{t('upscale.resolution')}</div>
+                  <div className="font-medium text-ink-1">
                     {res.after?.size_mb != null ? `${res.after.size_mb} MB` : '—'}
                   </div>
                 </div>
               </div>
 
               {/* 音轨保留情况：无声超分是这里最容易踩的坑 */}
-              <p className={`text-xs ${res.after?.has_audio ? 'text-green-600' : 'text-amber-600'}`}>
+              <p className={`text-xs ${res.after?.has_audio ? 'text-success-strong' : 'text-warning-strong'}`}>
                 {res.after?.has_audio ? t('upscale.audioKept') : t('upscale.audioLost')}
               </p>
 
@@ -1797,11 +1811,11 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
                   <div className="flex gap-2">
                     <a
                       href={downloadUrl(res.output_url) || res.output_url}
-                      className="inline-flex items-center px-3 py-1.5 text-sm rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
+                      className={`inline-flex items-center px-3 py-1.5 text-sm rounded-lg border border-line text-ink-1 hover:bg-surface-2 transition-colors ${FOCUS_RING}`}
                     >
                       {t('common.download')}
                     </a>
-                    <span className="text-xs text-gray-500 self-center">
+                    <span className="text-xs text-ink-2 self-center">
                       {t('upscale.confirmClose')}
                     </span>
                   </div>
@@ -1814,19 +1828,19 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
 
       {/* 已生成的超分产物 */}
       {artifacts.length > 0 && (
-        <div className="bg-white rounded-lg border border-gray-200 p-4">
-          <h4 className="text-sm font-semibold text-gray-900 mb-3">
+        <div className="bg-surface rounded-lg border border-line p-4">
+          <h4 className="text-sm font-semibold text-ink-1 mb-3">
             {t('upscale.artifacts')}（{artifacts.length}）
           </h4>
           <div className="space-y-2">
             {artifacts.map((a) => (
               <div
                 key={a.name}
-                className="flex items-center justify-between gap-3 py-2 border-b border-gray-100 last:border-0"
+                className="flex items-center justify-between gap-3 py-2 border-b border-line last:border-0"
               >
                 <div className="min-w-0">
-                  <p className="text-sm text-gray-900 truncate">{a.name}</p>
-                  <p className="text-xs text-gray-500">{a.mtime} · {a.size_mb} MB</p>
+                  <p className="text-sm text-ink-1 truncate">{a.name}</p>
+                  <p className="text-xs text-ink-2">{a.mtime} · {a.size_mb} MB</p>
                 </div>
                 <div className="flex gap-2 shrink-0">
                   <Button
@@ -1839,7 +1853,7 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
                   {downloadUrl(a.url) && (
                     <a
                       href={downloadUrl(a.url)}
-                      className="inline-flex items-center px-3 py-1.5 text-sm rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
+                      className={`inline-flex items-center px-3 py-1.5 text-sm rounded-lg border border-line text-ink-1 hover:bg-surface-2 transition-colors ${FOCUS_RING}`}
                     >
                       {t('common.download')}
                     </a>
@@ -1963,27 +1977,27 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
     <aside
       // h-[calc(100vh-7rem)] = 视口高 −（顶栏 ~63px + main 上下 padding 48px），
       // 让面板与左列内容等高、上下贯通；sticky 使其随页面滚动保持停靠。
-      className="w-[340px] shrink-0 flex flex-col rounded-xl border border-gray-200 bg-white overflow-hidden sticky top-0 h-[calc(100vh-7rem)] min-h-[420px]"
+      className="flex w-full flex-col overflow-hidden rounded-xl border border-line bg-surface lg:sticky lg:top-0 lg:h-[calc(100vh-7rem)] lg:w-[340px] lg:shrink-0 min-h-[420px]"
     >
       {/* 头部：与工作台其他面板一致的白底 + 灰边 + indigo 强调 */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 shrink-0">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-line shrink-0">
         <div className="flex items-center gap-2 min-w-0">
-          <span className="w-7 h-7 rounded-lg bg-brand-subtle flex items-center justify-center text-sm shrink-0">
-            💬
+          <span className="w-7 h-7 rounded-lg bg-brand-subtle flex items-center justify-center shrink-0">
+            <MessageSquare className="h-4 w-4" />
           </span>
           <div className="min-w-0">
-            <h3 className="font-semibold text-gray-900 leading-tight">AI总控</h3>
+            <h3 className="font-semibold text-ink-1 leading-tight">AI总控</h3>
             <div className="flex items-center gap-1.5 mt-0.5">
-              <p className="text-[11px] text-gray-500 leading-tight">
+              <p className="text-[11px] text-ink-2 leading-tight">
                 {autoMode ? `自主执行 · ${toolCount || '…'} 个功能` : '仅对话'}
               </p>
               <button
                 onClick={() => setAutoMode(v => !v)}
                 title={autoMode ? '切回纯聊天（不执行动作）' : '切到自主执行（总控自己干活）'}
-                className={`text-[10px] leading-none px-1.5 py-0.5 rounded border transition-colors ${
+                className={`text-[10px] leading-none px-1.5 py-0.5 rounded border transition-colors ${FOCUS_RING} ${
                   autoMode
                     ? 'border-brand/30 text-brand bg-brand-subtle'
-                    : 'border-gray-300 text-gray-500'
+                    : 'border-line text-ink-2'
                 }`}
               >
                 {autoMode ? '自主' : '聊天'}
@@ -1996,10 +2010,10 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
             <button
               onClick={toggleKill}
               title={killOn ? '解除急停' : '急停：立即中止总控的一切动作'}
-              className={`p-1.5 rounded-lg transition-colors ${
+              className={`p-1.5 rounded-lg transition-colors ${FOCUS_RING} ${
                 killOn
-                  ? 'text-red-600 bg-red-50'
-                  : 'text-gray-500 hover:text-red-600 hover:bg-red-50'
+                  ? 'text-danger bg-danger-subtle'
+                  : 'text-ink-3 hover:text-danger hover:bg-danger-subtle'
               }`}
             >
               <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
@@ -2007,30 +2021,22 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
               </svg>
             </button>
           )}
-          <button
-            onClick={loadHistory}
-            title="刷新对话"
-            className="p-1.5 rounded-lg text-gray-500 hover:text-brand hover:bg-brand-subtle transition-colors"
-          >
+          <Button variant="ghost" size="sm" onClick={loadHistory} title="刷新对话">
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                 d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
-          </button>
-          <button
-            onClick={onClose}
-            title="收起面板"
-            className="p-1.5 rounded-lg text-gray-500 hover:text-brand hover:bg-brand-subtle transition-colors"
-          >
+          </Button>
+          <Button variant="ghost" size="sm" onClick={onClose} title="收起面板">
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
             </svg>
-          </button>
+          </Button>
         </div>
       </div>
 
       {error && (
-        <div className="mx-3 mt-3 p-2 bg-red-500/10 border border-red-500/30 rounded-lg text-red-500 text-xs shrink-0">
+        <div className="mx-3 mt-3 p-2 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong text-xs shrink-0">
           {error}
         </div>
       )}
@@ -2038,16 +2044,16 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
       {/* 消息区：浅色底以区别于面板头部/输入区，形成「对话」区域感。
           注意：空态与消息列表要二选一渲染 —— 若把滚动哨兵 <div> 和 h-full 的空态
           放在同一个 space-y-3 容器里，哨兵会额外吃到 12px margin 而撑出滚动条。 */}
-      <div className="flex-1 min-h-0 overflow-y-auto bg-gray-50">
+      <div className="flex-1 min-h-0 overflow-y-auto bg-surface-2">
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center px-4">
-            <div className="w-11 h-11 rounded-xl bg-white border border-gray-200 flex items-center justify-center text-lg mb-3">
-              💬
+            <div className="w-11 h-11 rounded-xl bg-surface border border-line flex items-center justify-center mb-3">
+              <MessageSquare className="h-5 w-5 text-ink-3" />
             </div>
-            <p className="text-sm text-gray-600">
+            <p className="text-sm text-ink-2">
               {autoMode ? '说一句话，总控自己决定并执行' : '和总控聊聊创作想法'}
             </p>
-            <p className="text-xs text-gray-500 mt-1 mb-4">
+            <p className="text-xs text-ink-2 mt-1 mb-4">
               {autoMode ? '无需确认，它会直接动手；点右上角方块可随时急停' : '当前只聊天，不会改动任何产物'}
             </p>
             <div className="w-full space-y-1.5">
@@ -2058,7 +2064,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
                 <button
                   key={ex}
                   onClick={() => setInput(ex)}
-                  className="w-full text-left text-xs px-3 py-2 rounded-lg bg-white border border-gray-200 text-gray-500 hover:border-brand hover:text-brand transition-colors"
+                  className={`w-full text-left text-xs px-3 py-2 rounded-lg bg-surface border border-line text-ink-2 hover:border-brand hover:text-brand transition-colors ${FOCUS_RING}`}
                 >
                   {ex}
                 </button>
@@ -2073,7 +2079,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
                 className={`px-3 py-2 rounded-lg text-sm ${
                   msg.role === 'user'
                     ? 'bg-brand text-white ml-6 rounded-br-sm'
-                    : 'bg-white border border-gray-200 text-gray-700 mr-6 rounded-bl-sm'
+                    : 'bg-surface border border-line text-ink-1 mr-6 rounded-bl-sm'
                 }`}
               >
                 <p className="whitespace-pre-wrap break-words">{msg.content}</p>
@@ -2081,22 +2087,26 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
             ))}
             {/* 自主执行过程：把总控「自己调了哪些功能、成功没有」透明地摊开 */}
             {run && (
-              <div className="mr-6 px-3 py-2 rounded-lg border border-gray-200 bg-white space-y-1.5">
-                <div className="flex items-center gap-2 text-xs text-gray-500">
+              <div className="mr-6 px-3 py-2 rounded-lg border border-line bg-surface space-y-1.5">
+                <div className="flex items-center gap-2 text-xs text-ink-2">
                   {run.status === 'running' ? (
                     <span className="w-3 h-3 border-2 border-brand/40 border-t-brand rounded-full animate-spin inline-block shrink-0" />
                   ) : (
-                    <span className="w-1.5 h-1.5 rounded-full bg-gray-400 inline-block shrink-0" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-ink-3 inline-block shrink-0" />
                   )}
                   总控执行中 · 已完成 {run.steps.length} 步
                 </div>
                 {run.steps.map((s: AgentStep, i: number) => (
                   <div key={i} className="flex items-start gap-1.5 text-[11px] leading-snug">
-                    <span className={`shrink-0 ${s.blocked ? 'text-amber-500' : s.ok ? 'text-green-500' : 'text-red-500'}`}>
-                      {s.blocked ? '⊘' : s.ok ? '✓' : '✕'}
+                    <span className={`shrink-0 flex items-center ${s.blocked ? 'text-warning-strong' : s.ok ? 'text-success-strong' : 'text-danger-strong'}`}>
+                      {s.blocked
+                        ? <AlertTriangle className="h-3.5 w-3.5" />
+                        : s.ok
+                          ? <Check className="h-3.5 w-3.5" />
+                          : <X className="h-3.5 w-3.5" />}
                     </span>
-                    <span className="font-mono text-gray-500 shrink-0">{s.tool}</span>
-                    <span className="text-gray-600 break-all">
+                    <span className="font-mono text-ink-2 shrink-0">{s.tool}</span>
+                    <span className="text-ink-2 break-all">
                       {s.summary}
                       {s.cached ? '（复用缓存）' : ''}
                     </span>
@@ -2105,7 +2115,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
               </div>
             )}
             {sending && !run && (
-              <div className="bg-white border border-gray-200 mr-6 px-3 py-2 rounded-lg text-sm text-gray-500 flex items-center gap-2">
+              <div className="bg-surface border border-line mr-6 px-3 py-2 rounded-lg text-sm text-ink-2 flex items-center gap-2">
                 <span className="w-3 h-3 border-2 border-brand/40 border-t-brand rounded-full animate-spin inline-block" />
                 思考中...
               </div>
@@ -2116,23 +2126,23 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
       </div>
 
       {/* 输入区 */}
-      <div className="p-3 border-t border-gray-200 shrink-0 bg-white">
+      <div className="p-3 border-t border-line shrink-0 bg-surface">
         <div className="flex gap-2">
-          <input
-            type="text"
+          <Input
             value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') sendMessage(); }}
+            onChange={setInput}
+            onEnter={sendMessage}
             placeholder="输入消息..."
-            className="flex-1 min-w-0 px-3 py-2 text-sm rounded-lg border border-gray-200 bg-white text-gray-900 placeholder-gray-400 focus:ring-2 focus:ring-brand/30 focus:border-brand outline-none transition-colors"
+            className="flex-1 min-w-0"
           />
-          <button
+          <Button
+            variant="brand"
             onClick={sendMessage}
             disabled={sending || !input.trim()}
-            className="px-3 py-2 rounded-lg text-sm font-medium bg-brand text-white hover:bg-brand-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
+            className="shrink-0"
           >
             发送
-          </button>
+          </Button>
         </div>
       </div>
     </aside>

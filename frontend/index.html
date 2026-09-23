@@ -21,13 +21,15 @@
         from { opacity: 0; transform: translateY(8px); }
         to { opacity: 1; }
       }
+      /* 首屏样式：index.css 尚未加载时用，token 由 :root 提供；
+         具体取值与 index.css 的滚动条规则保持一致，不再单独定义深色变体
+         （.dark 从未被注入，属于死链路）。 */
       ::-webkit-scrollbar { width: 6px; height: 6px; }
       ::-webkit-scrollbar-track { background: transparent; }
-      ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
-      .dark ::-webkit-scrollbar-thumb { background: #374151; }
+      ::-webkit-scrollbar-thumb { background: rgb(var(--brand) / 0.35); border-radius: 3px; }
     </style>
   </head>
-  <body class="bg-gray-50 dark:bg-gray-950">
+  <body class="bg-canvas text-ink-1">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

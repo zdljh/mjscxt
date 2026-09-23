@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useApp } from '@/context/AppContext';
 import { ttsApi, mixApi, qcApi } from '@/api/client';
 import { Button, Loading } from '@/components/ui';
+import { CheckCircle2, Lightbulb, Mic, Volume2, X } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 
 interface AudioTabProps {
@@ -218,10 +219,10 @@ export function AudioTab({ projectKey }: AudioTabProps) {
     }
   };
 
-  const steps = [
-    { id: 1, label: 'TTS 配音', icon: '🎙️' },
-    { id: 2, label: '音画混音', icon: '🔊' },
-    { id: 3, label: '音频质检', icon: '✅' },
+  const steps: { id: 1 | 2 | 3; label: string; icon: React.ReactNode }[] = [
+    { id: 1, label: 'TTS 配音', icon: <Mic className="h-4 w-4" /> },
+    { id: 2, label: '音画混音', icon: <Volume2 className="h-4 w-4" /> },
+    { id: 3, label: '音频质检', icon: <CheckCircle2 className="h-4 w-4" /> },
   ];
 
   return (
@@ -229,7 +230,8 @@ export function AudioTab({ projectKey }: AudioTabProps) {
       {/* 步骤导航 */}
       {/* 保留原生：步骤切换器是「选中态共用同一元素」的分段控件，
           Button 的 rounded-md / h-9 与这里的 rounded-lg 填充块不一致 */}
-      <div className="flex items-center gap-2">
+      {/* flex-wrap：375 视口下三个步骤按钮同排会被裁掉（实测末个按钮 right=389 > 375） */}
+      <div className="flex flex-wrap items-center gap-2">
         {steps.map((step, idx) => (
           <React.Fragment key={step.id}>
             <button
@@ -240,7 +242,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                   : 'bg-surface-2 text-ink-2 hover:bg-line'
               }`}
             >
-              <span className="text-lg">{step.icon}</span>
+              <span>{step.icon}</span>
               <span>{step.label}</span>
               {activeStep === step.id && (
                 <span className="ml-1 text-xs opacity-75">●</span>
@@ -258,7 +260,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
         <div className="space-y-4">
           <div className="bg-surface rounded-lg border border-line p-4">
             <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-              <span>🎙️</span> TTS 配音生成
+              <Mic className="h-5 w-5" /> TTS 配音生成
             </h3>
             
             {ttsEnv && (
@@ -267,8 +269,16 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                   ? 'bg-success/10 border border-success/30 text-success-strong'
                   : 'bg-danger/10 border border-danger/30 text-danger-strong'
               }`}>
-                <span className="font-medium">
-                  {ttsEnv.available ? '✅ TTS 环境可用' : '❌ TTS 环境不可用'}
+                <span className="font-medium inline-flex items-center gap-1.5">
+                  {ttsEnv.available ? (
+                    <>
+                      <CheckCircle2 className="h-4 w-4" /> TTS 环境可用
+                    </>
+                  ) : (
+                    <>
+                      <X className="h-4 w-4" /> TTS 环境不可用
+                    </>
+                  )}
                 </span>
                 {!ttsEnv.available && ttsEnv.reasons && (
                   <ul className="mt-2 text-sm list-disc list-inside">
@@ -358,7 +368,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
         <div className="space-y-4">
           <div className="bg-surface rounded-lg border border-line p-4">
             <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-              <span>🔊</span> 音画混音合成
+              <Volume2 className="h-5 w-5" /> 音画混音合成
             </h3>
 
             {mixPlan && (
@@ -460,7 +470,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
         <div className="space-y-4">
           <div className="bg-surface rounded-lg border border-line p-4">
             <h3 className="text-lg font-semibold mb-2 flex items-center gap-2">
-              <span>✅</span> 音频质检
+              <CheckCircle2 className="h-5 w-5" /> 音频质检
             </h3>
             <p className="text-sm text-ink-2 mb-4">
               两层判定：<b>客观层</b>用 ffmpeg 实测时长 / 平均电平 / 峰值 / 有声占比，
@@ -753,7 +763,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
 
       {/* 流程说明 */}
       <div className="bg-info-subtle border border-info/30 rounded-lg p-4">
-        <h4 className="font-medium text-info-strong mb-2">💡 工作流程说明</h4>
+        <h4 className="font-medium text-info-strong mb-2 flex items-center gap-1.5"><Lightbulb className="h-4 w-4" /> 工作流程说明</h4>
         <ol className="list-decimal list-inside space-y-1 text-sm text-info-strong">
           <li>先生成 TTS 配音（每集台词合成音频）</li>
           <li>再进行音画混音（将配音与视频片段合成）</li>

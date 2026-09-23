@@ -1,9 +1,10 @@
 import React from 'react';
 import { useApp } from '@/context/AppContext';
+import { Brain, FolderOpen, Settings } from '@/components/ui/icons';
 
 interface NavItem {
   id: string;
-  icon: string;
+  icon: React.ReactNode;
   label: string;
 }
 
@@ -16,9 +17,9 @@ const FOCUS_RING =
 // - AI 配置 / AI 记忆：与具体项目无关的全局设置
 // 单个项目的功能（关键帧/分镜/配音/混音/质检/导出/AI总控）都在项目工作台内部的标签页里。
 const navItems: NavItem[] = [
-  { id: 'projects', icon: '📁', label: 'project.title' },
-  { id: 'ai', icon: '⚙️', label: 'navAIConfig' },
-  { id: 'memory', icon: '🧠', label: 'navMemory' },
+  { id: 'projects', icon: <FolderOpen className="h-5 w-5" />, label: 'project.title' },
+  { id: 'ai', icon: <Settings className="h-5 w-5" />, label: 'navAIConfig' },
+  { id: 'memory', icon: <Brain className="h-5 w-5" />, label: 'navMemory' },
 ];
 
 export function Sidebar({
@@ -35,23 +36,25 @@ export function Sidebar({
   const { t } = useApp();
 
   return (
-    <aside className="relative z-sticky flex flex-col border-r border-line bg-surface transition-all duration-300"
-      style={{ width: collapsed ? '4rem' : '14rem' }}
+    <aside
+      className={`relative z-sticky flex flex-col border-r border-line bg-surface transition-all duration-300 ${
+        collapsed ? 'w-16' : 'w-16 md:w-56'
+      }`}
     >
-      {/* Toggle button */}
+      {/* Toggle button：窄屏下侧边栏恒为图标态（宽 4rem），折叠/展开无意义，故隐藏 */}
       <button
         onClick={onToggle}
         aria-label={collapsed ? '展开侧边栏' : '收起侧边栏'}
-        className={`m-2 self-end rounded-lg p-2 text-ink-2 transition-all duration-200 hover:bg-surface-2 hover:text-ink-1 ${FOCUS_RING}`}
+        className={`m-2 hidden self-end rounded-lg p-2 text-ink-2 transition-all duration-200 hover:bg-surface-2 hover:text-ink-1 md:block ${FOCUS_RING}`}
       >
         <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
         </svg>
       </button>
 
-      {/* Logo */}
+      {/* Logo：窄屏（图标态）不显示文字品牌块 */}
       {!collapsed && (
-        <div className="px-4 py-4 mb-2">
+        <div className="hidden px-4 py-4 mb-2 md:block">
           <div className="flex items-center gap-3">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand text-sm font-bold text-white">
               漫
@@ -72,6 +75,7 @@ export function Sidebar({
               key={item.id}
               onClick={() => onNavigate(item.id)}
               aria-current={isActive ? 'page' : undefined}
+              aria-label={t(item.label)}
               className={`mb-1 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 transition-all duration-200 group ${
                 isActive
                   ? 'bg-brand-subtle text-brand'
@@ -79,14 +83,14 @@ export function Sidebar({
               } ${FOCUS_RING}`}
               title={collapsed ? t(item.label) : undefined}
             >
-              <span className="flex-shrink-0 text-xl">{item.icon}</span>
+              <span className="flex-shrink-0">{item.icon}</span>
               {!collapsed && (
-                <span className="whitespace-nowrap text-sm font-medium">
+                <span className="hidden whitespace-nowrap text-sm font-medium md:inline">
                   {t(item.label)}
                 </span>
               )}
               {isActive && !collapsed && (
-                <div className="ml-auto h-1.5 w-1.5 animate-pulse rounded-full bg-brand" />
+                <div className="ml-auto hidden h-1.5 w-1.5 animate-pulse rounded-full bg-brand md:block" />
               )}
             </button>
           );
@@ -96,7 +100,7 @@ export function Sidebar({
       {/* Footer */}
       <div className="border-t border-line p-4">
         {!collapsed && (
-          <p className="text-center text-xs text-ink-3">
+          <p className="hidden text-center text-xs text-ink-3 md:block">
             v1.0.0 • AI Powered
           </p>
         )}

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useApp } from '@/context/AppContext';
 import { storyboardApi, projectsApi } from '@/api/client';
 import { Button, Select, Textarea } from '@/components/ui';
+import { Check, Palette } from '@/components/ui/icons';
 import type { Project } from '@/types';
 
 // 后端 NineGridStoryboard 返回的是「构图草案」：9 组机位/构图/景别文本，
@@ -175,8 +176,9 @@ export function GridPage({ projectKey }: { projectKey?: string } = {}) {
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-xs font-semibold text-ink-3">#{i + 1}</span>
                     {(isSelected || isPersisted) && (
-                      <span className="text-xs text-brand font-medium">
-                        {isPersisted ? '✓ 已选定' : '✓'}
+                      <span className="inline-flex items-center gap-1 text-xs text-brand font-medium">
+                        <Check className="h-3.5 w-3.5" />
+                        {isPersisted ? '已选定' : ''}
                       </span>
                     )}
                   </div>
@@ -213,7 +215,9 @@ export function GridPage({ projectKey }: { projectKey?: string } = {}) {
       ) : (
         !generating && (
           <div className="bg-surface rounded-xl border border-dashed border-line-strong p-8 text-center">
-            <div className="text-4xl mb-3">🎨</div>
+            <div className="mb-3 flex justify-center text-ink-3">
+              <Palette className="h-9 w-9" />
+            </div>
             <p className="text-ink-2 text-sm">{t('nineGrid.info')}</p>
           </div>
         )

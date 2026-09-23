@@ -421,7 +421,7 @@
     "sizeDelta": "体积变化",
     "resolution": "分辨率",
     "audioKept": "保留原音轨",
-    "audioLost": "⚠️ 未保留音轨",
+    "audioLost": "未保留音轨",
     "artifacts": "已有超分产物",
     "noArtifacts": "还没有超分产物",
     "submitFailed": "发起超分失败",

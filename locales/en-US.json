@@ -417,7 +417,7 @@
     "sizeDelta": "Size change",
     "resolution": "Resolution",
     "audioKept": "Source audio kept",
-    "audioLost": "⚠️ Audio not kept",
+    "audioLost": "Audio not kept",
     "artifacts": "Existing upscaled outputs",
     "noArtifacts": "No upscaled output yet",
     "submitFailed": "Failed to start upscaling",

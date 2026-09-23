@@ -215,3 +215,159 @@ export const X = (p: IconProps) => (
     <path d="M6 6l12 12M18 6 6 18" />
   </Svg>
 );
+
+// ==========================================================================
+// 第二批：emoji → 线性 SVG 全站替换（此前功能图标用 emoji，字号受系统字体
+// 影响、跨平台观感不一，且与线性图标集割裂）。命名与风格同上。
+// ==========================================================================
+
+/** 设置 / 配置 */
+export const Settings = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12.2 2h-.4a2 2 0 0 0-2 2v.2a2 2 0 0 1-1 1.7l-.4.3a2 2 0 0 1-2 0l-.2-.1a2 2 0 0 0-2.7.7l-.2.4a2 2 0 0 0 .7 2.7l.2.1a2 2 0 0 1 1 1.7v.5a2 2 0 0 1-1 1.7l-.2.1a2 2 0 0 0-.7 2.7l.2.4a2 2 0 0 0 2.7.7l.2-.1a2 2 0 0 1 2 0l.4.3a2 2 0 0 1 1 1.7V20a2 2 0 0 0 2 2h.4a2 2 0 0 0 2-2v-.2a2 2 0 0 1 1-1.7l.4-.3a2 2 0 0 1 2 0l.2.1a2 2 0 0 0 2.7-.7l.2-.4a2 2 0 0 0-.7-2.7l-.2-.1a2 2 0 0 1-1-1.7v-.5a2 2 0 0 1 1-1.7l.2-.1a2 2 0 0 0 .7-2.7l-.2-.4a2 2 0 0 0-2.7-.7l-.2.1a2 2 0 0 1-2 0l-.4-.3a2 2 0 0 1-1-1.7V4a2 2 0 0 0-2-2Z" />
+    <circle cx="12" cy="12" r="3" />
+  </Svg>
+);
+
+/** 物品 / 包裹 */
+export const Box = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M21 8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+    <path d="m3.3 7 8.7 5 8.7-5" />
+    <path d="M12 22V12" />
+  </Svg>
+);
+
+/** 风格 / 配色 */
+export const Palette = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 3a9 9 0 0 0 0 18c.9 0 1.5-.7 1.5-1.5 0-.4-.15-.75-.4-1.03-.25-.28-.35-.6-.35-.97 0-.83.67-1.5 1.5-1.5H16a5 5 0 0 0 5-5c0-4.42-4.03-8-9-8Z" />
+    <path d="M7.5 12h.01M10 7.8h.01M14.5 7.8h.01M17.5 11.5h.01" />
+  </Svg>
+);
+
+/** 关键帧 / 画面（避开 DOM 的 Image 命名空间） */
+export const ImageIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3" y="3" width="18" height="18" rx="2" />
+    <circle cx="9" cy="9" r="2" />
+    <path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21" />
+  </Svg>
+);
+
+/** 构图草案 / 靶心 */
+export const Target = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="9" />
+    <circle cx="12" cy="12" r="5" />
+    <circle cx="12" cy="12" r="1.2" />
+  </Svg>
+);
+
+/** 录音 / 配音 */
+export const Mic = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="9" y="2" width="6" height="13" rx="3" />
+    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+    <path d="M12 19v3" />
+  </Svg>
+);
+
+/** 音量 / 混音 */
+export const Volume2 = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M11 5 6 9H2v6h4l5 4z" />
+    <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+    <path d="M19 4.9a10 10 0 0 1 0 14.2" />
+  </Svg>
+);
+
+/** 文档 / 剧本 / 清单 */
+export const FileText = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z" />
+    <path d="M14 2v5h5" />
+    <path d="M16 13H8M16 17H8M10 9H8" />
+  </Svg>
+);
+
+/** 影片 / 工程文件 */
+export const Film = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="2" y="2" width="20" height="20" rx="2.2" />
+    <path d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 17h5M17 7h5" />
+  </Svg>
+);
+
+/** 对话 */
+export const MessageSquare = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+  </Svg>
+);
+
+/** 编辑 */
+export const Pencil = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M17 3a2.83 2.83 0 0 1 4 4L7.5 20.5 2 22l1.5-5.5z" />
+    <path d="m15 5 4 4" />
+  </Svg>
+);
+
+/** 删除 */
+export const Trash2 = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M3 6h18" />
+    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+    <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    <path d="M10 11v6M14 11v6" />
+  </Svg>
+);
+
+/** 提示 / 说明 */
+export const Lightbulb = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5a6 6 0 0 0-12 0c0 1 .2 2.3 1.5 3.5.8.8 1.3 1.5 1.5 2.5" />
+    <path d="M9 18h6M10 22h4" />
+  </Svg>
+);
+
+/** 对勾（状态标记） */
+export const Check = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M20 6 9 17l-5-5" />
+  </Svg>
+);
+
+/** 关系 / 链接 */
+export const Link2 = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M9 17H7A5 5 0 0 1 7 7h2" />
+    <path d="M15 7h2a5 5 0 0 1 0 10h-2" />
+    <path d="M8 12h8" />
+  </Svg>
+);
+
+/** 场景 / 山景 */
+export const Mountain = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m8 3 4 8 5-5 5 15H2L8 3z" />
+  </Svg>
+);
+
+/** 角色 / 用户 */
+export const User = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />
+    <circle cx="12" cy="7" r="4" />
+  </Svg>
+);
+
+/** 验收 */
+export const ClipboardCheck = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="8" y="2" width="8" height="4" rx="1" />
+    <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+    <path d="m9 14 2 2 4-4" />
+  </Svg>
+);

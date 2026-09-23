@@ -54,7 +54,7 @@ function AppContent() {
   const PageComponent = useMemo(() => SECTIONS[activeSection] || OverviewPage, [activeSection]);
 
   return (
-    <div className="flex h-screen bg-gray-50 text-gray-900">
+    <div className="flex h-screen bg-canvas text-ink-1">
       {/* Sidebar */}
       <Sidebar
         activeSection={activeSection}

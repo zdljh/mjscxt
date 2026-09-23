@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { relationsApi } from '@/api/client';
+import { Lightbulb, Link2, X } from '@/components/ui/icons';
 import type { Relation } from '@/types';
 
 // 关系类型颜色映射
@@ -247,7 +248,9 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
   if (nodes.length === 0) {
     return (
       <div className="text-center py-12">
-        <div className="text-5xl mb-4">🔗</div>
+        <div className="mb-4 flex justify-center text-ink-3">
+          <Link2 className="h-12 w-12" />
+        </div>
         <h4 className="text-lg font-medium text-ink-1 mb-1">暂无关系数据</h4>
         <p className="text-sm text-ink-2">请先在角色管理中创建角色关系</p>
       </div>
@@ -422,9 +425,10 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
               </div>
               <button
                 onClick={() => setSelectedNode(null)}
-                className="text-ink-3 hover:text-ink-2"
+                aria-label="关闭详情"
+                className="text-ink-3 hover:text-ink-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2"
               >
-                ✕
+                <X className="h-4 w-4" />
               </button>
             </div>
             
@@ -467,7 +471,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
 
       {/* 操作提示 */}
       <div className="flex flex-wrap items-center justify-between gap-1 text-xs text-ink-2">
-        <span>💡 拖拽节点调整布局 · 点击节点查看详情</span>
+        <span className="inline-flex items-center gap-1"><Lightbulb className="h-3.5 w-3.5" /> 拖拽节点调整布局 · 点击节点查看详情</span>
         <span>共 {nodes.length} 个角色 · {edges.length} 条关系</span>
       </div>
     </div>

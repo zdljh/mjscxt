@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useApp } from '@/context/AppContext';
 import { exportApi, autopilotApi } from '@/api/client';
 import { Button, Loading, Textarea } from '@/components/ui';
+import { ClipboardCheck, FileText, Film, FolderOpen } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 import type { Deliverable } from '@/types';
 
@@ -146,7 +147,7 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
       {/* 区域 1: 导出配置 */}
       <div className="bg-surface rounded-lg border border-line p-4">
         <h4 className="font-semibold text-ink-1 mb-3 flex items-center gap-2">
-          <span>🎬</span> 导出配置
+          <Film className="h-4 w-4" /> 导出配置
         </h4>
         
         <div className="flex gap-2 mb-4">
@@ -163,8 +164,8 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
 
         {/* 成片下载 */}
         <div className="mb-4">
-          <h5 className="text-sm font-medium text-ink-1 mb-2">
-            📁 成片清单 · {finals.length}
+          <h5 className="text-sm font-medium text-ink-1 mb-2 flex items-center gap-1.5">
+            <FolderOpen className="h-4 w-4" /> 成片清单 · {finals.length}
           </h5>
           {finals.length > 0 ? (
             <div className="space-y-2">
@@ -192,8 +193,8 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
 
         {/* 剪辑工程文件 */}
         <div>
-          <h5 className="text-sm font-medium text-ink-1 mb-2">
-            🎞️ 工程文件 · {exportFiles.filter(f => f.exists).length}
+          <h5 className="text-sm font-medium text-ink-1 mb-2 flex items-center gap-1.5">
+            <FileText className="h-4 w-4" /> 工程文件 · {exportFiles.filter(f => f.exists).length}
           </h5>
           {exportFiles.filter(f => f.exists).length > 0 ? (
             <div className="space-y-2">
@@ -222,7 +223,7 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
       {/* 区域 2: 成片验收 */}
       <div className="bg-surface rounded-lg border border-line p-4">
         <h4 className="font-semibold text-ink-1 mb-3 flex items-center gap-2">
-          <span>📦</span> 成片验收
+          <ClipboardCheck className="h-4 w-4" /> 成片验收
           <span className="ml-auto text-xs font-normal text-ink-2">
             待验收: {pending} / 共 {deliverables.length} 集
           </span>
@@ -230,7 +231,9 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
 
         {deliverables.length === 0 ? (
           <div className="text-center py-8">
-            <div className="text-4xl mb-3">📦</div>
+            <div className="mb-3 flex justify-center text-ink-3">
+              <ClipboardCheck className="h-10 w-10" />
+            </div>
             <p className="text-sm text-ink-2">暂无成片，请先运行自动生产</p>
             <p className="text-xs text-brand mt-2">
               请通过右侧「AI总控」下达生产指令，AI会先与您沟通生产风格

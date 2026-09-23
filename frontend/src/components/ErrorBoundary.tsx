@@ -1,5 +1,6 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
 import { Button } from '@/components/ui';
+import { AlertTriangle } from '@/components/ui/icons';
 
 interface Props {
   children: ReactNode;
@@ -36,7 +37,9 @@ export class ErrorBoundary extends Component<Props, State> {
       return (
         <div className="min-h-screen flex items-center justify-center bg-surface-2">
           <div className="text-center p-8 bg-surface rounded-lg shadow-lg max-w-md mx-4">
-            <div className="text-6xl mb-4">⚠️</div>
+            <div className="mb-4 flex justify-center">
+              <AlertTriangle className="h-16 w-16 text-danger" />
+            </div>
             <h2 className="text-xl font-bold text-ink-1 mb-2">
               页面出错了
             </h2>

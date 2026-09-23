@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '@/context/AppContext';
 import { projectsApi, novelsApi } from '@/api/client';
 import { Button, Input, Loading, Modal, Badge, ConfirmDialog, Select } from '@/components/ui';
+import { AlertTriangle, Clapperboard, FileText, FolderOpen, Pencil, Plus, Trash2 } from '@/components/ui/icons';
 import type { Project, Novel } from '@/types';
 
 type NovelSource = 'upload' | 'existing';
@@ -225,8 +226,9 @@ export function ProjectsPage() {
           <h2 className="text-2xl font-bold text-ink-1">{t('project.title')}</h2>
           <p className="text-sm text-ink-2 mt-1">{t('project.chooseOrUpload')}</p>
         </div>
-        <Button onClick={openModal}>
-          <span className="mr-2">+</span>
+        {/* whitespace-nowrap + shrink-0：375 视口下按钮文字会被挤成两行 */}
+        <Button onClick={openModal} className="shrink-0 whitespace-nowrap">
+          <Plus className="h-4 w-4" />
           {t('project.createNew')}
         </Button>
       </div>
@@ -239,7 +241,9 @@ export function ProjectsPage() {
 
       {projects.length === 0 ? (
         <div className="text-center py-12">
-          <div className="text-4xl mb-4">📁</div>
+          <div className="mb-4 flex justify-center text-ink-3">
+            <FolderOpen className="h-9 w-9" />
+          </div>
           <h3 className="text-lg font-medium text-ink-1 mb-2">{t('project.noProjects')}</h3>
           <p className="text-sm text-ink-2 mb-4">{t('project.noProjectsHint')}</p>
           <Button onClick={openModal} className="mt-2">
@@ -254,11 +258,19 @@ export function ProjectsPage() {
               className="group bg-surface rounded-xl border border-line p-4 hover:shadow-lg transition-shadow"
             >
               <div
-                className="cursor-pointer"
+                role="button"
+                tabIndex={0}
+                className="cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2"
                 onClick={() => { window.location.hash = `/?p=${encodeURIComponent(proj.dir_key || proj.id)}`; }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    window.location.hash = `/?p=${encodeURIComponent(proj.dir_key || proj.id)}`;
+                  }
+                }}
               >
                 <div className="aspect-video bg-surface-2 rounded-lg mb-4 flex items-center justify-center group-hover:scale-105 transition-transform">
-                  <span className="text-4xl">🎬</span>
+                  <Clapperboard className="h-10 w-10 text-ink-3" />
                 </div>
                 <h3 className="font-semibold text-ink-1 mb-1">{proj.name}</h3>
                 <p className="text-sm text-ink-2 mb-3">
@@ -283,14 +295,14 @@ export function ProjectsPage() {
                     setEditError('');
                   }}
                 >
-                  ✏️ 编辑
+                  <Pencil className="h-4 w-4" /> 编辑
                 </Button>
                 <Button
                   variant="danger"
                   size="sm"
                   onClick={() => openDeleteModal(proj)}
                 >
-                  🗑️ 删除
+                  <Trash2 className="h-4 w-4" /> 删除
                 </Button>
               </div>
             </div>
@@ -354,7 +366,9 @@ export function ProjectsPage() {
                     : 'border-line-strong hover:border-brand'
                 }`}
               >
-                <div className="text-3xl mb-2">📄</div>
+                <div className="mb-2 flex justify-center text-ink-3">
+                  <FileText className="h-8 w-8" />
+                </div>
                 <p className="text-sm font-medium text-ink-1">
                   {pendingFile ? pendingFile.name : t('upload.uploadText')}
                 </p>
@@ -453,8 +467,9 @@ export function ProjectsPage() {
             <p className="text-ink-1">
               确定要删除项目《<span className="font-semibold">{deletingProject?.name}</span>》吗？
             </p>
-            <p className="mt-2 text-sm text-danger-strong">
-              ⚠️ 此操作会将项目及其所有产物移入回收站，可从磁盘还原。
+            <p className="mt-2 flex items-start gap-1.5 text-sm text-danger-strong">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              此操作会将项目及其所有产物移入回收站，可从磁盘还原。
             </p>
             {deleteError && (
               <p className="mt-3 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger-strong">

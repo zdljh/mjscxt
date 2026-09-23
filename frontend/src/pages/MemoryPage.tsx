@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useApp } from '@/context/AppContext';
 import { memoryApi, projectsApi } from '@/api/client';
 import { Card, Button, Loading, EmptyState, Badge, ConfirmDialog, Input, Select } from '@/components/ui';
+import { BookOpen, Brain } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 import type { Memory, MemoryType, MemoryStats, PromptLesson, LessonPage, Project } from '@/types';
 
@@ -346,7 +347,7 @@ export function MemoryPage() {
 
         {lessons.length === 0 && !lessonLoading ? (
           <EmptyState
-            icon="📚"
+            icon={<BookOpen className="h-10 w-10" />}
             title="暂无质检教训"
             description="质检不达标时系统会自动沉淀教训，并在重试前召回改写提示词。可在 AI 设置中开启图片质检以让资产/分镜也产生教训。"
           />
@@ -360,8 +361,9 @@ export function MemoryPage() {
               const terms = l.terms || [];
               return (
                 <div key={key} className="p-4 bg-surface-2 border border-line rounded-lg">
-                  <div className="flex items-start justify-between gap-2 mb-2">
-                    <div className="flex items-center gap-2 flex-wrap">
+                  {/* ⚠️ 必须允许换行：375 视口下左侧徽标 + 右侧时间/操作在同排会溢出视口 */}
+                  <div className="flex flex-wrap items-start justify-between gap-2 mb-2">
+                    <div className="flex items-center gap-2 flex-wrap min-w-0">
                       <Badge variant="warning">{LESSON_KIND_LABEL[l.kind || ''] || '未知'}</Badge>
                       {l.project ? (
                         <span className="text-xs text-ink-2">{l.project}</span>
@@ -375,7 +377,7 @@ export function MemoryPage() {
                         被召回 {useCount} 次
                       </span>
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="text-xs text-ink-3 whitespace-nowrap">
                         {l.ts ? new Date(l.ts).toLocaleString() : ''}
                       </span>
@@ -481,7 +483,7 @@ export function MemoryPage() {
       {/* Memories list */}
       <Card title={t('memory.listTitle')}>
         {memories.length === 0 ? (
-          <EmptyState icon="🧠" title={t('memory.noMemories')} description={t('memory.noMemoriesDesc')} />
+          <EmptyState icon={<Brain className="h-10 w-10" />} title={t('memory.noMemories')} description={t('memory.noMemoriesDesc')} />
         ) : (
           <div className="space-y-3">
             {memories.slice(0, 20).map((mem) => (
