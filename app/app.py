@@ -700,6 +700,70 @@ def api_project_config(pid):
                     "project_record": project_store.get_project(rec["id"])})
 
 
+# ===== 项目封面（项目中心卡片对外展示的第一张图） =====
+
+def _project_cover_path(dir_key: str) -> str:
+    return os.path.join(project_store.paths(dir_key)["root"], "cover.png")
+
+
+def _generate_project_cover(rec: dict, seed=None) -> str:
+    """生成项目封面并落到项目根目录 cover.png，返回落盘绝对路径。
+
+    走场景生图链路（16:9 横版，与项目卡片 aspect-video 一致）：场景模板自带
+    去人 + 去水印 + 负向冲突清理，比裸 t2i 稳；封面要的是氛围主视觉而非人像
+    （项目刚建时角色资产多半还没生成，也避开人物一致性问题）。
+    """
+    dir_key = rec["dir_key"]
+    cfg = project_store.read_config(dir_key)
+    style = str(cfg.get("style") or "").strip()
+    name = str(rec.get("name") or "").strip()
+    prompt = (f"漫剧主视觉封面插画，《{name}》主题氛围场景，戏剧性光影，电影感构图，"
+              f"景深层次丰富，高细节，画面中不出现任何文字")
+    size = style_kit.aspect_size((16, 9)) or (960, 544)
+    outs = comfyui_client.generate_scene_base(
+        prompt, seed=seed, style=style, size=size,
+        filename_prefix=f"comic_drama/{dir_key}_cover")
+    if not outs:
+        raise RuntimeError("ComfyUI 未返回任何图片")
+    cover = _project_cover_path(dir_key)
+    os.makedirs(os.path.dirname(cover), exist_ok=True)
+    shutil.move(outs[0], cover)   # G8② 同款：move 而非 copy，ComfyUI output 不留副本
+    return cover
+
+
+@app.route('/api/projects/<path:pid>/cover')
+def api_project_cover(pid):
+    """项目封面图（无封面 404，前端回落占位图标）"""
+    rec = project_store.get_project(pid)
+    if not rec:
+        return jsonify({"error": "项目不存在", "ref": pid}), 404
+    cover = _project_cover_path(rec["dir_key"])
+    if not os.path.isfile(cover):
+        abort(404)
+    return send_file(cover, conditional=True)
+
+
+@app.route('/api/projects/<path:pid>/cover/generate', methods=['POST'])
+def api_project_cover_generate(pid):
+    """生成项目封面（同步阻塞，单图 t2i 约 10~60s）。
+
+    故意不设 AI/总控确认门禁：封面属装饰性产物（与分镜图同理不挂 LLM 门禁），
+    且项目刚建时总控设定往往还没敲定，门禁会把「建完项目就想给个封面」拦死。
+    body 可选 {"seed": int}（换一张）。
+    """
+    rec = project_store.get_project(pid)
+    if not rec:
+        return jsonify({"error": "项目不存在", "ref": pid}), 404
+    data = request.json or {}
+    try:
+        cover = _generate_project_cover(rec, seed=data.get('seed'))
+    except Exception as e:  # noqa: BLE001
+        app.logger.error(f"封面生成失败 {rec['dir_key']}: {e}")
+        return jsonify({"success": False, "error": f"封面生成失败：{e}"}), 500
+    return jsonify({"success": True, "cover_path": cover,
+                    "cover_url": f"/api/projects/{rec['dir_key']}/cover?t={int(time.time())}"})
+
+
 @app.route('/api/projects/<path:pid>/delete', methods=['POST'])
 def api_project_delete(pid):
     data = request.json or {}

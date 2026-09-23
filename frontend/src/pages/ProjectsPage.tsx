@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '@/context/AppContext';
 import { projectsApi, novelsApi } from '@/api/client';
 import { Button, Input, Modal, Badge, ConfirmDialog, Select, Skeleton, EmptyState, ErrorState } from '@/components/ui';
-import { AlertTriangle, Clapperboard, FileText, FolderOpen, Pencil, Plus, Trash2 } from '@/components/ui/icons';
+import { AlertTriangle, Clapperboard, FileText, FolderOpen, ImageIcon, Pencil, Plus, Trash2 } from '@/components/ui/icons';
+import { useToast } from '@/components/ui/toast';
 import type { Project, Novel } from '@/types';
 
 type NovelSource = 'upload' | 'existing';
@@ -47,6 +48,7 @@ const ACCEPT_EXTS = '.txt,.docx,.pdf,.epub,.md';
 
 export function ProjectsPage() {
   const { t } = useApp();
+  const toast = useToast();
   const [projects, setProjects] = useState<Project[]>([]);
   const [novels, setNovels] = useState<Novel[]>([]);
   const [loading, setLoading] = useState(true);
@@ -78,6 +80,10 @@ export function ProjectsPage() {
   const [deletingProject, setDeletingProject] = useState<Project | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState('');
+
+  // --- 项目封面（生成中按项目 id 记忆；coverUrls 存生成后的缓存击穿 URL） ---
+  const [coverBusy, setCoverBusy] = useState('');
+  const [coverUrls, setCoverUrls] = useState<Record<string, string>>({});
 
   const reload = async () => {
     const [p, n] = await Promise.all([
@@ -260,6 +266,23 @@ export function ProjectsPage() {
     }
   };
 
+  // --- 项目封面 ---
+  const handleGenCover = async (proj: Project) => {
+    const key = proj.dir_key || proj.id;
+    setCoverBusy(proj.id);
+    try {
+      const res = await projectsApi.generateCover(key);
+      // 带时间戳击穿浏览器缓存，旧封面立即被替换
+      setCoverUrls(prev => ({ ...prev, [proj.id]: res?.cover_url || `${projectsApi.coverUrl(key)}?t=${Date.now()}` }));
+      await reload();
+      toast.success(t('project.coverDone'));
+    } catch (e) {
+      toast.error(`${t('project.coverFailed')}: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setCoverBusy('');
+    }
+  };
+
   // 加载态：沿用真实内容的外层与卡片网格列数，避免骨架 → 内容的布局跳变
   if (loading) {
     return (
@@ -347,8 +370,32 @@ export function ProjectsPage() {
                   }
                 }}
               >
-                <div className="aspect-video bg-surface-2 rounded-lg mb-4 flex items-center justify-center group-hover:scale-105 transition-transform">
-                  <Clapperboard className="h-10 w-10 text-ink-3" />
+                <div className="relative aspect-video bg-surface-2 rounded-lg mb-4 flex items-center justify-center overflow-hidden group-hover:scale-105 transition-transform">
+                  {(() => {
+                    const key = proj.dir_key || proj.id;
+                    const coverSrc = coverUrls[proj.id]
+                      || (proj.has_cover ? projectsApi.coverUrl(key) : '');
+                    const hasCover = Boolean(coverSrc);
+                    return (
+                      <>
+                        {hasCover
+                          ? <img src={coverSrc} alt={proj.name} className="h-full w-full object-cover" />
+                          : <Clapperboard className="h-10 w-10 text-ink-3" />}
+                        {/* 生成/换封面：stopPropagation 防止触发整卡跳工作台 */}
+                        <button
+                          type="button"
+                          disabled={coverBusy === proj.id}
+                          onClick={(e) => { e.stopPropagation(); handleGenCover(proj); }}
+                          className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-md bg-black/45 px-2 py-1 text-xs font-medium text-white hover:bg-black/65 disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+                        >
+                          <ImageIcon className="h-3.5 w-3.5" />
+                          {coverBusy === proj.id
+                            ? t('project.coverGenerating')
+                            : hasCover ? t('project.coverRedo') : t('project.coverGen')}
+                        </button>
+                      </>
+                    );
+                  })()}
                 </div>
                 <h3 className="font-semibold text-ink-1 mb-1">{proj.name}</h3>
                 <p className="text-sm text-ink-2 mb-3">

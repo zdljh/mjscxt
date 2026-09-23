@@ -23,6 +23,7 @@ export interface Project {
   episode_count: number;
   episode_duration_sec: number;
   from_migration?: boolean;
+  has_cover?: boolean;
   id: string;
   name: string;
   note?: string;

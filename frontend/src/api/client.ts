@@ -89,6 +89,12 @@ export const projectsApi = {
       method: 'POST',
       body: JSON.stringify({ name }),
     }),
+  coverUrl: (id: string) => `${API_BASE}/projects/${id}/cover`,
+  generateCover: (id: string, seed?: number) =>
+    request<{ success: boolean; cover_path: string; cover_url: string }>(`/projects/${id}/cover/generate`, {
+      method: 'POST',
+      body: JSON.stringify(seed != null ? { seed } : {}),
+    }),
 };
 
 // --- Novels ---

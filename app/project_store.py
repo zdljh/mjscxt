@@ -787,6 +787,8 @@ def summarize(ref: str, with_stats: bool = True) -> dict | None:
     out = dict(rec)
     out["config"] = read_config(rec["dir_key"])
     out["paths"] = paths(rec["dir_key"])
+    # 封面标记：项目根目录 cover.png 是否存在（供前端卡片决定出图还是占位图标）
+    out["has_cover"] = os.path.isfile(os.path.join(out["paths"]["root"], "cover.png"))
     out["stats"] = project_stats(rec["dir_key"]) if with_stats else {}
     return out
 
