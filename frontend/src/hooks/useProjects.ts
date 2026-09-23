@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { projectsApi } from '@/api/client';
+import { useApp } from '@/context/AppContext';
 import type { Project } from '@/types';
 
 /**
@@ -8,6 +9,7 @@ import type { Project } from '@/types';
  *        useEffect(() => { loadProjects(); }, []);
  */
 export function useProjects() {
+  const { t } = useApp();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -19,7 +21,7 @@ export function useProjects() {
       const d = await projectsApi.list();
       setProjects((d as any).projects || []);
     } catch (e) {
-      setError(e instanceof Error ? e.message : '加载项目失败');
+      setError(e instanceof Error ? e.message : t('project.loadFailed'));
       console.error('useProjects load error:', e);
     } finally {
       setLoading(false);

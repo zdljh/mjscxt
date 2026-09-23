@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { t } from '@/i18n';
 
 /**
  * 全局轻提示（Toast）
@@ -140,40 +141,40 @@ export function ToastProvider({ children, max = 5 }: { children: React.ReactNode
     <div
       className="fixed top-4 right-4 z-toast flex flex-col gap-2 w-[min(92vw,22rem)] pointer-events-none"
       role="region"
-      aria-label="通知"
+      aria-label={t('toast.regionLabel')}
     >
-      {items.map((t) => {
-        const s = STYLES[t.type];
+      {items.map((item) => {
+        const s = STYLES[item.type];
         return (
           <div
-            key={t.id}
+            key={item.id}
             className={`pointer-events-auto flex items-start gap-3 rounded-xl border px-4 py-3 shadow-lg backdrop-blur-sm animate-toast-in ${s.wrap}`}
-            role={t.type === 'error' ? 'alert' : 'status'}
-            aria-live={t.type === 'error' ? 'assertive' : 'polite'}
+            role={item.type === 'error' ? 'alert' : 'status'}
+            aria-live={item.type === 'error' ? 'assertive' : 'polite'}
           >
             <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full ${s.icon}`}>
               <svg className="h-3 w-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
                 <path strokeLinecap="round" strokeLinejoin="round" d={s.glyph} />
               </svg>
             </span>
-            <p className="flex-1 text-sm leading-5 break-words">{t.message}</p>
+            <p className="flex-1 text-sm leading-5 break-words">{item.message}</p>
             {/* 保留原生：行内链接按钮跟随 toast 的 currentColor 变色，
                 Button 的 link 变体会强制 text-brand，在 warning/danger 底上失去对比度 */}
-            {t.action && (
+            {item.action && (
               <button
                 type="button"
-                onClick={() => { t.action?.onClick(); dismiss(t.id); }}
+                onClick={() => { item.action?.onClick(); dismiss(item.id); }}
                 className="shrink-0 text-sm font-medium underline underline-offset-2 opacity-80 hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
               >
-                {t.action.label}
+                {item.action.label}
               </button>
             )}
             {/* 保留原生：图标关闭键靠 h-4/w-4 + tiny padding 贴合 20px 行高，
                 Button 的最小尺寸是 h-8 + px-3，会把 toast 撑高 */}
             <button
               type="button"
-              onClick={() => dismiss(t.id)}
-              aria-label="关闭通知"
+              onClick={() => dismiss(item.id)}
+              aria-label={t('toast.closeLabel')}
               className="shrink-0 opacity-50 hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
             >
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>

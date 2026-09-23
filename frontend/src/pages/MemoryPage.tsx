@@ -7,20 +7,20 @@ import { useToast } from '@/components/ui/toast';
 import type { Memory, MemoryType, MemoryStats, PromptLesson, LessonPage, Project } from '@/types';
 
 /**
- * 教训类型 → 人话（避免界面出现原始 kind 值）。
+ * 教训类型 → i18n 键（避免界面出现原始 kind 值）。
  * ⚠️ 与 ProjectWorkbenchPage 里的 KIND_LABEL 是两份独立的映射（那份管「质检品类」，
- * 这份管「教训环节」），7 类中文标签按设计文档 §7 第 7 条单一事实源对齐：
+ * 这份管「教训环节」），7 类标签按设计文档 §7 第 7 条单一事实源对齐：
  *   asset=资产 / storyboard=分镜 / video=视频 / keyframe=尾帧 /
  *   audio=配音 / script=剧本 / prompt=提示词预检
  */
 const LESSON_KIND_LABEL: Record<string, string> = {
-  asset: '资产',
-  storyboard: '分镜',
-  video: '视频',
-  keyframe: '尾帧',
-  audio: '配音',
-  script: '剧本',
-  prompt: '提示词预检',
+  asset: 'memory.lessonKind.asset',
+  storyboard: 'memory.lessonKind.storyboard',
+  video: 'memory.lessonKind.video',
+  keyframe: 'memory.lessonKind.keyframe',
+  audio: 'memory.lessonKind.audio',
+  script: 'memory.lessonKind.script',
+  prompt: 'memory.lessonKind.prompt',
 };
 
 /** 7 类环节（与后端 kind 枚举单一事实源一致，固定顺序渲染 chips） */
@@ -30,21 +30,29 @@ const LESSON_KINDS: string[] = ['asset', 'storyboard', 'video', 'keyframe', 'aud
 const PAGE_SIZE = 20;
 
 /** 从 lesson 的 context/category/priority 里拼出「命中来源」的可读文案 */
-function lessonSourceLabel(l: PromptLesson): string {
+function lessonSourceLabel(
+  l: PromptLesson,
+  t: (key: string, params?: Record<string, string | number>) => string,
+): string {
   const ctx = l.context && typeof l.context === 'object' ? l.context : {};
   const keys = Object.keys(ctx);
   if (keys.length > 0) {
     return keys.map((k) => `${k}=${String((ctx as Record<string, unknown>)[k])}`).join('，');
   }
   const parts: string[] = [];
-  if (l.category) parts.push(`类别:${l.category}`);
-  if (l.priority) parts.push(`优先级:${l.priority}`);
+  if (l.category) parts.push(t('memory.categoryLabel', { value: l.category }));
+  if (l.priority) parts.push(t('memory.priorityLabel', { value: l.priority }));
   return parts.length > 0 ? parts.join('，') : '—';
 }
 
 export function MemoryPage() {
   const { t } = useApp();
   const toast = useToast();
+  /** 教训环节 kind → 本地化标签；未知 kind 回退为通用「未知」 */
+  const lessonKindLabel = (kind?: string): string => {
+    const key = LESSON_KIND_LABEL[kind || ''];
+    return key ? t(key) : t('common.unknown');
+  };
   const [memories, setMemories] = useState<Memory[]>([]);
   const [stats, setStats] = useState<MemoryStats>({
     total: 0, lessons: 0, successes: 0, insights: 0, promptLessons: 0,
@@ -194,7 +202,7 @@ export function MemoryPage() {
       setLessons(prev => [...prev, ...page.lessons]);
       setLessonOffset(prev => prev + page.lessons.length);
     } catch (e) {
-      toast.error(`加载更多失败：${e instanceof Error ? e.message : '未知错误'}`);
+      toast.error(t('memory.loadMoreFailed', { msg: e instanceof Error ? e.message : t('error.unknown') }));
     } finally {
       setLessonLoading(false);
     }
@@ -205,12 +213,12 @@ export function MemoryPage() {
     setDeleting(true);
     try {
       await memoryApi.deleteLesson(deleteTarget.lesson_id);
-      toast.success('已删除该教训');
+      toast.success(t('memory.lessonDeleted'));
       setDeleteTarget(null);
       setReloadTick(x => x + 1);
       loadLessonStats();
     } catch (e) {
-      toast.error(`删除失败：${e instanceof Error ? e.message : '未知错误'}`);
+      toast.error(t('memory.deleteFailed', { msg: e instanceof Error ? e.message : t('error.unknown') }));
     } finally {
       setDeleting(false);
     }
@@ -222,12 +230,12 @@ export function MemoryPage() {
     setClearingKind(true);
     try {
       await memoryApi.clearLessons(kind);
-      toast.success(`已清空「${LESSON_KIND_LABEL[kind] || kind}」环节教训`);
+      toast.success(t('memory.clearedKind', { kind: lessonKindLabel(kind) }));
       setClearKindOpen(false);
       setReloadTick(x => x + 1);
       loadLessonStats();
     } catch (e) {
-      toast.error(`清空失败：${e instanceof Error ? e.message : '未知错误'}`);
+      toast.error(t('memory.clearKindFailed', { msg: e instanceof Error ? e.message : t('error.unknown') }));
     } finally {
       setClearingKind(false);
     }
@@ -242,10 +250,10 @@ export function MemoryPage() {
       const [list, s] = await Promise.all([memoryApi.list(), memoryApi.stats()]);
       setMemories(list);
       setStats(s);
-      toast.success('已清理 30 天前的记忆条目');
+      toast.success(t('memory.clearedOld'));
     } catch (e) {
       console.error('Failed to clear', e);
-      toast.error(`清理失败：${e instanceof Error ? e.message : '未知错误'}`);
+      toast.error(t('memory.clearOldFailed', { msg: e instanceof Error ? e.message : t('error.unknown') }));
     } finally {
       setClearingOld(false);
       setClearOldOpen(false);
@@ -315,12 +323,12 @@ export function MemoryPage() {
         <StatCard label={t('memory.total')} value={stats.total} color="blue" />
         <StatCard label={t('memory.lessons')} value={stats.lessons} color="yellow" />
         <StatCard label={t('memory.successes')} value={stats.successes} color="green" />
-        <StatCard label="质检教训库" value={stats.promptLessons ?? 0} color="purple" />
-        <StatCard label="死教训数" value={lessonStats.dead_lessons} color="gray" />
+        <StatCard label={t('memory.promptLessons')} value={stats.promptLessons ?? 0} color="purple" />
+        <StatCard label={t('memory.deadLessons')} value={lessonStats.dead_lessons} color="gray" />
       </div>
 
       {/* 质检教训库：生成链路自动沉淀，驱动「不达标 → 改提示词重生成」 */}
-      <Card title="质检教训库（自动学习）">
+      <Card title={t('memory.promptLessonsTitle')}>
         {/* 环节 chips 多选（7 类） */}
         {/* 保留原生：胶囊筛选 chip（rounded-full），Button 的 rounded-md 会改掉形状 */}
         <div className="flex flex-wrap items-center gap-2 mb-3">
@@ -332,7 +340,7 @@ export function MemoryPage() {
                 : 'bg-surface-2 text-ink-2 border-line hover:bg-line'
             }`}
           >
-            全部
+            {t('common.all')}
           </button>
           {LESSON_KINDS.map((k) => {
             const active = lessonKinds.includes(k);
@@ -346,7 +354,7 @@ export function MemoryPage() {
                     : 'bg-surface-2 text-ink-2 border-line hover:bg-line'
                 }`}
               >
-                {LESSON_KIND_LABEL[k]}
+                {lessonKindLabel(k)}
               </button>
             );
           })}
@@ -358,7 +366,7 @@ export function MemoryPage() {
             value={lessonProject}
             onChange={setLessonProject}
             options={[
-              { value: '', label: '全部项目' },
+              { value: '', label: t('memory.allProjects') },
               // ⚠️ 按 name 去重：Select 内部用 value 当 React key，同名项目会产生重复 key
               ...Array.from(new Map(projects.map((p) => [p.name, p])).values())
                 .map((p) => ({ value: p.name, label: p.name })),
@@ -368,29 +376,29 @@ export function MemoryPage() {
             type="date"
             value={lessonSince}
             onChange={setLessonSince}
-            placeholder="起始日期"
+            placeholder={t('memory.dateFrom')}
           />
           <Input
             type="date"
             value={lessonUntil}
             onChange={setLessonUntil}
-            placeholder="结束日期"
+            placeholder={t('memory.dateTo')}
           />
           <Input
             value={lessonSearch}
             onChange={setLessonSearch}
             onEnter={() => setLessonQ(lessonSearch.trim())}
-            placeholder="关键词检索（回车触发）"
+            placeholder={t('memory.searchPlaceholder')}
           />
         </div>
 
         {/* 汇总 + 清空本环节 */}
         <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
           <div className="text-xs text-ink-2">
-            当前命中 {lessonPage.filtered} 条
-            {lessonPage.filtered !== lessonPage.total ? `（全库 ${lessonPage.total} 条）` : ''}
-            {' · '}死教训 {lessonPage.dead_lessons} 条
-            {' · '}累计被召回 {lessonStats.used_total} 次
+            {t('memory.hitCount', { n: lessonPage.filtered })}
+            {lessonPage.filtered !== lessonPage.total ? t('memory.totalInLibrary', { n: lessonPage.total }) : ''}
+            {' · '}{t('memory.deadLessonsCount', { n: lessonPage.dead_lessons })}
+            {' · '}{t('memory.recallTotal', { n: lessonStats.used_total })}
           </div>
           <Button
             variant="danger"
@@ -398,25 +406,25 @@ export function MemoryPage() {
             disabled={lessonKinds.length !== 1}
             onClick={() => setClearKindOpen(true)}
             title={lessonKinds.length === 1
-              ? `清空「${LESSON_KIND_LABEL[lessonKinds[0]]}」环节`
-              : '请先只选择一个环节'}
+              ? t('memory.clearKindTitle', { kind: lessonKindLabel(lessonKinds[0]) })
+              : t('memory.selectOneKind')}
           >
-            清空本环节
+            {t('memory.clearKind')}
           </Button>
         </div>
 
         {lessonError ? (
           /* 硬失败：教训库零数据且加载出错 → 区块错误态 + 重试（不再冒充「暂无质检教训」） */
           <ErrorState
-            title="质检教训加载失败"
+            title={t('memory.lessonsLoadFailed')}
             description={lessonError}
             onRetry={() => setReloadTick((x) => x + 1)}
           />
         ) : lessons.length === 0 && !lessonLoading ? (
           <EmptyState
             icon={<BookOpen className="h-10 w-10" />}
-            title="暂无质检教训"
-            description="质检不达标时系统会自动沉淀教训，并在重试前召回改写提示词。可在 AI 设置中开启图片质检以让资产/分镜也产生教训。"
+            title={t('memory.noLessons')}
+            description={t('memory.noLessonsDesc')}
           />
         ) : (
           <div className="space-y-3">
@@ -431,7 +439,7 @@ export function MemoryPage() {
                   {/* ⚠️ 必须允许换行：375 视口下左侧徽标 + 右侧时间/操作在同排会溢出视口 */}
                   <div className="flex flex-wrap items-start justify-between gap-2 mb-2">
                     <div className="flex items-center gap-2 flex-wrap min-w-0">
-                      <Badge variant="warning">{LESSON_KIND_LABEL[l.kind || ''] || '未知'}</Badge>
+                      <Badge variant="warning">{lessonKindLabel(l.kind)}</Badge>
                       {l.project ? (
                         <span className="text-xs text-ink-2">{l.project}</span>
                       ) : null}
@@ -441,7 +449,7 @@ export function MemoryPage() {
                           ? 'bg-line text-ink-2'
                           : 'bg-brand-subtle text-brand-hover'
                       }`}>
-                        被召回 {useCount} 次
+                        {t('memory.recallCount', { n: useCount })}
                       </span>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
@@ -453,7 +461,7 @@ export function MemoryPage() {
                         className="text-xs whitespace-nowrap"
                         onClick={() => toggleExpand(key)}
                       >
-                        {isExpanded ? '收起' : '详情'}
+                        {isExpanded ? t('common.collapse') : t('common.details')}
                       </Button>
                       {/* text-danger 覆盖 link 变体的 text-brand：
                           Tailwind 按 theme.colors 键序产出，danger 在 brand 之后，同属性后者胜出 */}
@@ -462,7 +470,7 @@ export function MemoryPage() {
                         className="text-xs whitespace-nowrap text-danger hover:text-danger-strong"
                         onClick={() => setDeleteTarget(l)}
                       >
-                        删除
+                        {t('common.delete')}
                       </Button>
                     </div>
                   </div>
@@ -479,14 +487,14 @@ export function MemoryPage() {
                   {isExpanded && (
                     <div className="mt-3 pt-3 border-t border-line space-y-3">
                       <div>
-                        <div className="text-xs font-medium text-ink-2 mb-1">提示词原文</div>
+                        <div className="text-xs font-medium text-ink-2 mb-1">{t('memory.promptOriginal')}</div>
                         <pre className="text-xs text-ink-1 bg-surface border border-line rounded p-2 whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
                           {l.prompt || '—'}
                         </pre>
                       </div>
                       {issues.length > 0 && (
                         <div>
-                          <div className="text-xs font-medium text-ink-2 mb-1">问题清单</div>
+                          <div className="text-xs font-medium text-ink-2 mb-1">{t('memory.issues')}</div>
                           <ul className="list-disc list-inside space-y-1">
                             {issues.map((iss, j) => (
                               <li key={j} className="text-sm text-ink-1">{iss}</li>
@@ -496,7 +504,7 @@ export function MemoryPage() {
                       )}
                       {terms.length > 0 && (
                         <div>
-                          <div className="text-xs font-medium text-ink-2 mb-1">关键词</div>
+                          <div className="text-xs font-medium text-ink-2 mb-1">{t('memory.terms')}</div>
                           <div className="flex flex-wrap gap-2">
                             {terms.map((term) => (
                               <span key={term} className="text-xs px-2 py-0.5 bg-line rounded text-ink-2">
@@ -508,12 +516,12 @@ export function MemoryPage() {
                       )}
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
                         <div>
-                          <span className="text-ink-2">得分：</span>
+                          <span className="text-ink-2">{t('memory.scoreLabel')}</span>
                           <span className="text-ink-1">{typeof l.score === 'number' ? l.score : '—'}</span>
                         </div>
                         <div>
-                          <span className="text-ink-2">命中来源：</span>
-                          <span className="text-ink-1">{lessonSourceLabel(l)}</span>
+                          <span className="text-ink-2">{t('memory.matchSource')}</span>
+                          <span className="text-ink-1">{lessonSourceLabel(l, t)}</span>
                         </div>
                       </div>
                     </div>
@@ -522,11 +530,11 @@ export function MemoryPage() {
               );
             })}
 
-            {lessonLoading && <Loading size="sm" label="加载中…" />}
+            {lessonLoading && <Loading size="sm" label={t('memory.loading')} />}
             {lessons.length < lessonPage.filtered && (
               <div className="flex justify-center pt-2">
                 <Button variant="secondary" size="sm" onClick={handleLoadMore} loading={lessonLoading}>
-                  加载更多（已显示 {lessons.length}/{lessonPage.filtered}）
+                  {t('memory.loadMoreCount', { shown: lessons.length, total: lessonPage.filtered })}
                 </Button>
               </div>
             )}
@@ -585,7 +593,7 @@ export function MemoryPage() {
         title={t('memory.clearOld')}
         danger
         loading={clearingOld}
-        message={`将删除 30 天前的记忆条目。此操作不可撤销。`}
+        message={t('memory.clearOldConfirm')}
       />
 
       {/* 删除单条教训 */}
@@ -593,11 +601,11 @@ export function MemoryPage() {
         isOpen={!!deleteTarget}
         onClose={() => (deleting ? undefined : setDeleteTarget(null))}
         onConfirm={handleDeleteLesson}
-        title="删除教训"
+        title={t('memory.deleteLessonTitle')}
         danger
         loading={deleting}
         message={deleteTarget
-          ? `确定删除这条「${LESSON_KIND_LABEL[deleteTarget.kind || ''] || '未知'}」教训吗？此操作不可撤销。`
+          ? t('memory.deleteLessonConfirm', { kind: lessonKindLabel(deleteTarget.kind) })
           : ''}
       />
 
@@ -606,11 +614,11 @@ export function MemoryPage() {
         isOpen={clearKindOpen}
         onClose={() => (clearingKind ? undefined : setClearKindOpen(false))}
         onConfirm={handleClearLessons}
-        title="清空本环节"
+        title={t('memory.clearKind')}
         danger
         loading={clearingKind}
         message={lessonKinds.length === 1
-          ? `将删除「${LESSON_KIND_LABEL[lessonKinds[0]]}」环节的全部 ${lessonPage.by_kind[lessonKinds[0]] ?? 0} 条教训。此操作不可撤销。`
+          ? t('memory.clearKindConfirm', { kind: lessonKindLabel(lessonKinds[0]), n: lessonPage.by_kind[lessonKinds[0]] ?? 0 })
           : ''}
       />
     </div>

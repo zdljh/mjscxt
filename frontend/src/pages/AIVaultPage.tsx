@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useApp } from '@/context/AppContext';
 import { aiConfigApi, watermarkApi } from '@/api/client';
 import { Badge, Button, Card, ConfirmDialog, Input, Select, Skeleton } from '@/components/ui';
 import { AlertTriangle, Brain, CheckCircle2, Network, Search, X } from '@/components/ui/icons';
@@ -23,12 +24,12 @@ const EMPTY_MODULE: ModuleState = {
 /** 思考档位下拉的兜底选项（后端会下发 reasoning_effort_options，拿不到时用这份） */
 const FALLBACK_REASONING_OPTIONS = ['', 'low', 'high', 'max'];
 
-/** 档位的中文说明（键为后端下发的原始值） */
-const REASONING_EFFORT_LABELS: Record<string, string> = {
-  '': '默认（不注入该参数，由服务端决定）',
-  low: 'low · 思考最少，省 token 最快',
-  high: 'high · 思考较充分',
-  max: 'max · 思考最充分，最贵最慢',
+/** 档位说明的 i18n 键（键为后端下发的原始值） */
+const REASONING_EFFORT_LABEL_KEYS: Record<string, string> = {
+  '': 'vault.reasoning.default',
+  low: 'vault.reasoning.low',
+  high: 'vault.reasoning.high',
+  max: 'vault.reasoning.max',
 };
 
 interface SystemSettings {
@@ -44,8 +45,8 @@ interface SystemSettings {
 */
 const MODULE_CONFIG: Record<ModuleKey, {
   icon: React.ComponentType<IconProps>;
-  title: string;
-  desc: string;
+  titleKey: string;
+  descKey: string;
   placeholderUrl: string;
   placeholderModel: string;
   probe?: string;
@@ -53,16 +54,16 @@ const MODULE_CONFIG: Record<ModuleKey, {
 }> = {
   text: {
     icon: Brain,
-    title: '文本分析模型（= LLM 引擎）',
-    desc: '就是 LLM 引擎：小说转剧本、章节转剧本、提示词分析等纯文本任务都用它',
+    titleKey: 'vault.module.text.title',
+    descKey: 'vault.module.text.desc',
     placeholderUrl: 'https://api.deepseek.com/v1',
     placeholderModel: 'deepseek-chat',
     tone: 'bg-brand-subtle text-brand',
   },
   qc: {
     icon: Search,
-    title: '质检模型',
-    desc: '负责分镜图片和视频的视觉质量检查（需支持图像输入）',
+    titleKey: 'vault.module.qc.title',
+    descKey: 'vault.module.qc.desc',
     placeholderUrl: 'https://api.openai.com/v1',
     placeholderModel: 'gpt-4o-mini',
     probe: 'vision',
@@ -70,8 +71,8 @@ const MODULE_CONFIG: Record<ModuleKey, {
   },
   chat: {
     icon: Network,
-    title: '对话总控模型',
-    desc: 'AI 创作总控：通过多轮对话确定漫剧风格、题材、画风等设定',
+    titleKey: 'vault.module.chat.title',
+    descKey: 'vault.module.chat.desc',
     placeholderUrl: 'https://api.deepseek.com/v1',
     placeholderModel: 'deepseek-chat',
     tone: 'bg-success-subtle text-success-strong',
@@ -79,6 +80,7 @@ const MODULE_CONFIG: Record<ModuleKey, {
 };
 
 export function AIVaultPage() {
+  const { t } = useApp();
   // AI 模块配置状态
   const [config, setConfig] = useState<Record<ModuleKey, ModuleState>>({
     text: { ...EMPTY_MODULE },
@@ -171,11 +173,11 @@ export function AIVaultPage() {
   const handleSave = async (module: ModuleKey) => {
     const state = config[module];
     if (!state.base_url.trim() || !state.model.trim()) {
-      showMessage('error', `请填写 ${MODULE_CONFIG[module].title} 的 base_url 和 model`);
+      showMessage('error', t('vault.err.requireUrlModel', { module: t(MODULE_CONFIG[module].titleKey) }));
       return;
     }
     if (!state.has_api_key && !state.api_key.trim()) {
-      showMessage('error', `请填写 ${MODULE_CONFIG[module].title} 的 api_key`);
+      showMessage('error', t('vault.err.requireApiKey', { module: t(MODULE_CONFIG[module].titleKey) }));
       return;
     }
 
@@ -189,7 +191,7 @@ export function AIVaultPage() {
         state.reasoning_effort
       );
       if (result.success) {
-        showMessage('success', result.message || `${MODULE_CONFIG[module].title} 配置已保存`);
+        showMessage('success', result.message || t('vault.msg.saved', { module: t(MODULE_CONFIG[module].titleKey) }));
         setConfig(prev => ({
           ...prev,
           [module]: {
@@ -200,10 +202,10 @@ export function AIVaultPage() {
           },
         }));
       } else {
-        showMessage('error', '保存失败');
+        showMessage('error', t('settings.saveFailed'));
       }
     } catch (err) {
-      showMessage('error', `保存失败: ${err instanceof Error ? err.message : '未知错误'}`);
+      showMessage('error', t('vault.saveFailedDetail', { err: err instanceof Error ? err.message : t('error.unknown') }));
     } finally {
       setSaving(null);
     }
@@ -212,7 +214,7 @@ export function AIVaultPage() {
   const handleTest = async (module: ModuleKey) => {
     const state = config[module];
     if (!state.base_url.trim() || !state.model.trim()) {
-      showMessage('error', `请先填写 ${MODULE_CONFIG[module].title} 的 base_url 和 model`);
+      showMessage('error', t('vault.err.requireUrlModelFirst', { module: t(MODULE_CONFIG[module].titleKey) }));
       return;
     }
 
@@ -237,18 +239,21 @@ export function AIVaultPage() {
         showMessage(
           partial ? 'error' : 'success',
           partial
-            ? `${MODULE_CONFIG[module].title} 链路可达，但模型未返回正文（多为思考占用额度），请查看提示`
-            : `${MODULE_CONFIG[module].title} 连接测试成功${typeof ms === 'number' ? ` (${ms}ms)` : ''}`
+            ? t('vault.msg.partialReachable', { module: t(MODULE_CONFIG[module].titleKey) })
+            : t('vault.msg.testOk', {
+                module: t(MODULE_CONFIG[module].titleKey),
+                ms: typeof ms === 'number' ? ` (${ms}ms)` : '',
+              })
         );
       } else {
-        showMessage('error', result.error || result.guide || '连接测试失败');
+        showMessage('error', result.error || result.guide || t('vault.connTestFailed'));
       }
     } catch (err) {
       setTestResult(prev => ({
         ...prev,
-        [module]: { success: false, module, probe: 'text', error: err instanceof Error ? err.message : '未知错误' }
+        [module]: { success: false, module, probe: 'text', error: err instanceof Error ? err.message : t('error.unknown') }
       }));
-      showMessage('error', `测试失败: ${err instanceof Error ? err.message : '未知错误'}`);
+      showMessage('error', t('vault.testFailedDetail', { err: err instanceof Error ? err.message : t('error.unknown') }));
     } finally {
       setTesting(null);
     }
@@ -272,7 +277,7 @@ export function AIVaultPage() {
         showMessage('success', result.message);
       }
     } catch (err) {
-      showMessage('error', '清空失败');
+      showMessage('error', t('vault.clearFailed'));
     } finally {
       setClearing(false);
       setClearTarget(null);
@@ -295,9 +300,9 @@ export function AIVaultPage() {
         enabled: sysSettings.watermark_enabled,
         text: sysSettings.watermark_text,
       });
-      showMessage('success', '水印设置已保存');
+      showMessage('success', t('vault.watermarkSaved'));
     } catch (err) {
-      showMessage('error', `保存失败: ${err instanceof Error ? err.message : '未知错误'}`);
+      showMessage('error', t('vault.saveFailedDetail', { err: err instanceof Error ? err.message : t('error.unknown') }));
     } finally {
       setSysSaving(false);
     }
@@ -311,7 +316,7 @@ export function AIVaultPage() {
     // 骨架沿用真实内容的外层（max-w-5xl 居中 + space-y-6）：
     // 标题行 → 系统设置卡 → 三张 AI 模块配置卡，避免「转圈 → 长页面」的跳变
     return (
-      <div className="space-y-6 max-w-5xl mx-auto" role="status" aria-live="polite" aria-label="加载配置中...">
+      <div className="space-y-6 max-w-5xl mx-auto" role="status" aria-live="polite" aria-label={t('vault.loadingConfig')}>
         <div className="space-y-2">
           <Skeleton className="h-7 w-40" />
           <Skeleton className="h-4 w-64" />
@@ -331,9 +336,9 @@ export function AIVaultPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold text-ink-1">AI 配置中心</h2>
+          <h2 className="text-2xl font-bold text-ink-1">{t('vault.title')}</h2>
           <p className="text-sm text-ink-2 mt-1">
-            配置各环节的 AI 模型接口与系统参数
+            {t('vault.subtitle')}
           </p>
         </div>
         {message && (
@@ -350,7 +355,7 @@ export function AIVaultPage() {
       {/* ===== 系统设置区 ===== */}
       <Card bodyClassName="p-6 space-y-4">
         <h3 className="text-lg font-semibold text-ink-1 flex items-center gap-2">
-          系统设置
+          {t('vault.systemSettings')}
         </h3>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -360,14 +365,14 @@ export function AIVaultPage() {
               但保存后不生效——典型的「改了也没用」控件，故改为如实展示。 */}
           <div className="md:col-span-2">
             <Input
-              label="ComfyUI 地址"
-              value={sysSettings.comfyui_url || '（未获取到）'}
+              label={t('settings.comfyui.url')}
+              value={sysSettings.comfyui_url || t('vault.comfyuiNotFetched')}
               onChange={() => undefined}
               disabled
               className="font-mono text-sm"
             />
             <p className="text-xs text-ink-2 mt-1">
-              由环境变量 <code className="font-mono">COMFYUI_URL</code> 决定，需修改环境变量后重启服务
+              {t('vault.comfyuiEnvLead')}<code className="font-mono">COMFYUI_URL</code>{t('vault.comfyuiEnvTail')}
             </p>
           </div>
         </div>
@@ -381,15 +386,15 @@ export function AIVaultPage() {
               onChange={e => updateSysField('watermark_enabled', e.target.checked)}
               className="w-5 h-5 rounded border-line-strong text-brand focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2"
             />
-            <span className="text-ink-2 font-medium">启用视频水印</span>
+            <span className="text-ink-2 font-medium">{t('vault.watermarkEnabled')}</span>
           </div>
           {sysSettings.watermark_enabled && (
             <div>
               <Input
-                label="水印文字"
+                label={t('settings.watermark.text')}
                 value={sysSettings.watermark_text}
                 onChange={v => updateSysField('watermark_text', v)}
-                placeholder="输入水印文字"
+                placeholder={t('vault.watermarkPlaceholder')}
                 className="text-sm"
               />
             </div>
@@ -402,7 +407,7 @@ export function AIVaultPage() {
             onClick={handleSysSave}
             loading={sysSaving}
           >
-            保存水印设置
+            {t('vault.saveWatermark')}
           </Button>
         </div>
       </Card>
@@ -425,21 +430,21 @@ export function AIVaultPage() {
                   </div>
                   <div>
                     <h3 className="text-lg font-semibold text-ink-1">
-                      {meta.title}
+                      {t(meta.titleKey)}
                     </h3>
-                    <p className="text-xs text-ink-2">{meta.desc}</p>
+                    <p className="text-xs text-ink-2">{t(meta.descKey)}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
                   <Badge variant={isConfigured ? 'success' : 'default'}>
-                    {isConfigured ? '已配置' : '未配置'}
+                    {isConfigured ? t('vault.configured') : t('vault.notConfigured')}
                   </Badge>
                   <button
                     type="button"
                     onClick={() => handleClear(moduleKey)}
                     className="rounded-md p-2 text-ink-3 transition-colors hover:bg-surface-2 hover:text-danger focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2"
-                    title="清空配置"
-                    aria-label="清空配置"
+                    title={t('vault.clearConfig')}
+                    aria-label={t('vault.clearConfig')}
                   >
                     <X className="h-4 w-4" />
                   </button>
@@ -476,28 +481,27 @@ export function AIVaultPage() {
                     className="font-mono text-sm"
                   />
                   {state.has_api_key && (
-                    <p className="text-xs text-ink-3 mt-1">密钥已保存，留空则保持原值</p>
+                    <p className="text-xs text-ink-3 mt-1">{t('vault.keySavedHint')}</p>
                   )}
                 </div>
                 {/* 思考档位：只对「思考不可关闭」的模型（如 GLM-5.3-Flash）有意义。
                     可关思考的模型（Qwen/vLLM 系）用 enable_thinking=false，不在这里调。 */}
                 <div className="md:col-span-2">
                   <Select
-                    label="思考档位（可选）"
+                    label={t('vault.reasoningLabel')}
                     value={state.reasoning_effort}
                     onChange={v => updateField(moduleKey, 'reasoning_effort', v)}
-                    options={reOptions.map(opt => ({
-                      value: opt,
-                      label: REASONING_EFFORT_LABELS[opt] || opt,
-                    }))}
+                    options={reOptions.map(opt => {
+                      const labelKey = REASONING_EFFORT_LABEL_KEYS[opt];
+                      return { value: opt, label: labelKey ? t(labelKey) : opt };
+                    })}
                   />
                   <p className="text-xs text-ink-3 mt-1">
-                    仅「思考不可关闭」的模型需要设置（如 GLM-5.3-Flash，它没有关闭思考的开关，
-                    只能调档）。留空 = 不注入该参数、由服务端取默认档；
+                    {t('vault.reasoningHintLead')}
                     <span className="text-warning-strong">
-                      档位越高越贵（默认档通常是最贵的 max）
+                      {t('vault.reasoningHintWarn')}
                     </span>
-                    ，长 JSON 任务建议 low。
+                    {t('vault.reasoningHintTail')}
                   </p>
                 </div>
               </div>
@@ -510,7 +514,7 @@ export function AIVaultPage() {
                   loading={testing === moduleKey}
                   disabled={!state.base_url || !state.model}
                 >
-                  测试连接
+                  {t('vault.testConnection')}
                 </Button>
                 <Button
                   variant="brand"
@@ -518,7 +522,7 @@ export function AIVaultPage() {
                   loading={saving === moduleKey}
                   disabled={!state.base_url || !state.model}
                 >
-                  保存配置
+                  {t('vault.saveConfig')}
                 </Button>
               </div>
 
@@ -539,7 +543,7 @@ export function AIVaultPage() {
                     <div className="flex items-center gap-2 flex-wrap">
                       <ResultIcon className="h-4 w-4 shrink-0" />
                       <span className="font-medium">
-                        {partial ? '链路可达（未返回正文）' : result.success ? '测试成功' : '测试失败'}
+                        {partial ? t('vault.verdictReachableNoContent') : result.success ? t('vault.testSuccess') : t('vault.testFailed')}
                       </span>
                       {typeof ms === 'number' && (
                         <span className="text-xs opacity-75">({ms}ms)</span>
@@ -548,15 +552,15 @@ export function AIVaultPage() {
                         <span className="text-xs opacity-75">max_tokens={result.max_tokens}</span>
                       )}
                       {result.disable_thinking === false && (
-                        <span className="text-xs opacity-75">思考：开</span>
+                        <span className="text-xs opacity-75">{t('vault.thinkingOn')}</span>
                       )}
-                      {result.vision === false && <span className="text-xs opacity-75">不支持图像</span>}
+                      {result.vision === false && <span className="text-xs opacity-75">{t('vault.noVision')}</span>}
                       {result.vision === null && result.uncertain && (
-                        <span className="text-xs opacity-75">视觉能力未确认</span>
+                        <span className="text-xs opacity-75">{t('vault.visionUnconfirmed')}</span>
                       )}
                     </div>
                     {result.reply ? (
-                      <p className="mt-1 text-xs opacity-75 break-all">模型回复：{result.reply}</p>
+                      <p className="mt-1 text-xs opacity-75 break-all">{t('vault.modelReply', { reply: result.reply })}</p>
                     ) : null}
                     {result.hint && <p className="mt-1 text-xs opacity-75">{result.hint}</p>}
                     {!result.success && result.error && (
@@ -574,14 +578,14 @@ export function AIVaultPage() {
       </div>
 
       {/* Info Card */}
-      <Card title="配置说明" bodyClassName="p-4">
+      <Card title={t('vault.infoTitle')} bodyClassName="p-4">
         <ul className="text-sm text-ink-2 space-y-1 list-disc list-inside">
-          <li>三个 AI 模块完全独立：文本分析、质检、对话总控各有自己的接口配置</li>
-          <li>「文本分析模型」就是 LLM 引擎（小说转剧本、提示词分析等纯文本任务都用它），无需另行配置</li>
-          <li>质检模型需要支持图像输入（如 GPT-4o、Qwen-VL、GLM-4V）</li>
-          <li>ComfyUI 地址由环境变量 COMFYUI_URL 决定，页面上只做只读展示</li>
-          <li>API Key 加密存储，不会在界面明文显示</li>
-          <li>建议先点「测试连接」确认接口可用后再保存</li>
+          <li>{t('vault.infoIndependent')}</li>
+          <li>{t('vault.infoTextModel')}</li>
+          <li>{t('vault.infoQcModel')}</li>
+          <li>{t('vault.infoComfyui')}</li>
+          <li>{t('vault.infoApiKey')}</li>
+          <li>{t('vault.infoTestFirst')}</li>
         </ul>
       </Card>
 
@@ -589,13 +593,13 @@ export function AIVaultPage() {
         isOpen={clearTarget !== null}
         onClose={() => (clearing ? undefined : setClearTarget(null))}
         onConfirm={doClear}
-        title="清空配置"
+        title={t('vault.clearConfig')}
         danger
         loading={clearing}
-        confirmText="清空"
+        confirmText={t('vault.clear')}
         message={
           clearTarget
-            ? `确定要清空「${MODULE_CONFIG[clearTarget].title}」的接口配置吗？该模块的 base_url、模型与 API Key 都会被移除，需要重新填写。`
+            ? t('vault.clearMessage', { module: t(MODULE_CONFIG[clearTarget].titleKey) })
             : null
         }
       />

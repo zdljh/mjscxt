@@ -1,6 +1,8 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
 import { useModalBehavior } from '@/hooks/useModalBehavior';
+// 模块级 t：本文件是无 context 耦合的共享组件库，默认文案走 i18n，不引入 useApp()
+import { t } from '@/i18n';
 
 // ==========================================================================
 // 全站唯一组件出口
@@ -85,7 +87,7 @@ export function EmptyState({
 
 /** 错误态：给出错误码 + 原因 + 重试，而不是一句「加载失败」 */
 export function ErrorState({
-  title = '加载失败',
+  title = t('common.loadFailed'),
   description,
   code,
   onRetry,
@@ -110,7 +112,7 @@ export function ErrorState({
           onClick={onRetry}
           className={`mt-1 inline-flex h-9 items-center rounded-md border border-line bg-surface px-4 text-sm font-medium text-ink-1 transition-colors hover:bg-surface-2 ${FOCUS_RING}`}
         >
-          重试
+          {t('common.retry')}
         </button>
       )}
     </div>
@@ -143,13 +145,14 @@ const STATUS_STYLE: Record<ProductionStatus, string> = {
   attention: 'bg-state-attention-subtle text-state-attention-strong',
 };
 
-const STATUS_LABEL: Record<ProductionStatus, string> = {
-  pending: '待办',
-  running: '进行中',
-  done: '已完成',
-  failed: '失败',
-  skipped: '已跳过',
-  attention: '需人工',
+/** 枚举 → i18n key（模块顶层不调 t()，渲染时再取文案） */
+const STATUS_LABEL_KEY: Record<ProductionStatus, string> = {
+  pending: 'state.pending',
+  running: 'state.running',
+  done: 'state.done',
+  failed: 'state.failed',
+  skipped: 'state.skipped',
+  attention: 'state.attention',
 };
 
 /**
@@ -180,7 +183,7 @@ export function StateBadge({
           <path d="M12 3.6 22 20.4H2L12 3.6Z" />
         </svg>
       )}
-      {label ?? STATUS_LABEL[status]}
+      {label ?? t(STATUS_LABEL_KEY[status])}
     </>
   );
 
@@ -503,7 +506,7 @@ export function Modal({
             type="button"
             onClick={onClose}
             disabled={preventClose}
-            aria-label="关闭"
+            aria-label={t('common.close')}
             className={`shrink-0 rounded-md p-1 text-ink-3 transition-colors hover:bg-surface-2 hover:text-ink-1 disabled:opacity-40 ${FOCUS_RING}`}
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -535,8 +538,8 @@ export function ConfirmDialog({
   onConfirm,
   title,
   message,
-  confirmText = '确定',
-  cancelText = '取消',
+  confirmText = t('common.ok'),
+  cancelText = t('common.cancel'),
   danger = false,
   loading = false,
 }: {

@@ -214,7 +214,7 @@ export function ProjectsPage() {
       await reload();
       closeEditModal();
     } catch (e) {
-      setEditError(e instanceof Error ? e.message : '保存失败');
+      setEditError(e instanceof Error ? e.message : t('project.saveFailed'));
     } finally {
       setSavingEdit(false);
     }
@@ -240,7 +240,7 @@ export function ProjectsPage() {
       await reload();
       closeDeleteModal();
     } catch (e) {
-      setDeleteError(e instanceof Error ? e.message : '删除失败');
+      setDeleteError(e instanceof Error ? e.message : t('project.deleteFailed'));
     } finally {
       setDeleting(false);
     }
@@ -338,7 +338,7 @@ export function ProjectsPage() {
                 </div>
                 <h3 className="font-semibold text-ink-1 mb-1">{proj.name}</h3>
                 <p className="text-sm text-ink-2 mb-3">
-                  风格: {proj.config?.style || '—'}
+                  {t('project.style')}: {proj.config?.style || '—'}
                 </p>
                 <div className="flex items-center justify-between text-sm">
                   <Badge variant="info">{proj.episode_count} {t('ep.suffix')}</Badge>
@@ -359,14 +359,14 @@ export function ProjectsPage() {
                     setEditError('');
                   }}
                 >
-                  <Pencil className="h-4 w-4" /> 编辑
+                  <Pencil className="h-4 w-4" /> {t('project.edit')}
                 </Button>
                 <Button
                   variant="danger"
                   size="sm"
                   onClick={() => openDeleteModal(proj)}
                 >
-                  <Trash2 className="h-4 w-4" /> 删除
+                  <Trash2 className="h-4 w-4" /> {t('project.delete')}
                 </Button>
               </div>
             </div>
@@ -489,7 +489,7 @@ export function ProjectsPage() {
                     { value: '', label: t('project.selectNovelPlaceholder') },
                     ...novels.map((n) => ({
                       value: n.novel_id,
-                      label: `${n.name}（${n.chapter_count} 章）`,
+                      label: t('project.novelOption', { name: n.name, n: n.chapter_count }),
                     })),
                   ]}
                 />
@@ -516,11 +516,11 @@ export function ProjectsPage() {
 
       {/* 编辑项目弹窗 */}
       {editingProject && (
-        <Modal isOpen={!!editingProject} onClose={closeEditModal} title="编辑项目"
+        <Modal isOpen={!!editingProject} onClose={closeEditModal} title={t('project.editTitle')}
           closeOnBackdrop={false} closeOnEsc={false} preventClose={savingEdit}>
           <div className="space-y-4">
             <div>
-              <Input value={editName} onChange={setEditName} label="项目名称" />
+              <Input value={editName} onChange={setEditName} label={t('project.name')} />
             </div>
             {editError && (
               <div className="p-3 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong text-sm">
@@ -529,10 +529,10 @@ export function ProjectsPage() {
             )}
             <div className="flex gap-3 pt-2">
               <Button variant="secondary" onClick={closeEditModal} disabled={savingEdit}>
-                取消
+                {t('common.cancel')}
               </Button>
               <Button onClick={handleSaveEdit} disabled={savingEdit}>
-                {savingEdit ? '保存中...' : '保存'}
+                {savingEdit ? t('common.saving') : t('common.save')}
               </Button>
             </div>
           </div>
@@ -544,18 +544,18 @@ export function ProjectsPage() {
         isOpen={!!deletingProject}
         onClose={closeDeleteModal}
         onConfirm={handleDelete}
-        title="删除项目"
+        title={t('project.deleteTitle')}
         danger
         loading={deleting}
-        confirmText="确认删除"
+        confirmText={t('project.confirmDelete')}
         message={
           <>
             <p className="text-ink-1">
-              确定要删除项目《<span className="font-semibold">{deletingProject?.name}</span>》吗？
+              {t('project.deleteConfirmPrefix')}<span className="font-semibold">{deletingProject?.name}</span>{t('project.deleteConfirmSuffix')}
             </p>
             <p className="mt-2 flex items-start gap-1.5 text-sm text-danger-strong">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-              此操作会将项目及其所有产物移入回收站，可从磁盘还原。
+              {t('project.deleteWarning')}
             </p>
             {deleteError && (
               <p className="mt-3 rounded-lg border border-danger/30 bg-danger-subtle p-3 text-sm text-danger-strong">

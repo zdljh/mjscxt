@@ -19,17 +19,18 @@ const RELATION_COLORS: Record<string, string> = {
   master: 'rgb(var(--state-failed-strong))', // 深红 - 主仆
 };
 
-const RELATION_LABELS: Record<string, string> = {
-  family: '亲属',
-  friend: '朋友',
-  enemy: '敌人',
-  romance: '恋人',
-  mentor: '师徒',
-  colleague: '同事',
-  rival: '对手',
-  ally: '盟友',
-  stranger: '陌生人',
-  master: '主仆',
+/** 关系类型 → i18n key（模块顶层不能调 t()，文案在组件内取） */
+const RELATION_LABEL_KEYS: Record<string, string> = {
+  family: 'relation.types.family',
+  friend: 'relation.types.friend',
+  enemy: 'relation.types.enemy',
+  romance: 'relation.types.romance',
+  mentor: 'relation.types.mentor',
+  colleague: 'relation.types.colleague',
+  rival: 'relation.types.rival',
+  ally: 'relation.types.ally',
+  stranger: 'relation.types.stranger',
+  master: 'relation.types.master',
 };
 
 interface GraphNode {
@@ -85,7 +86,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
         setEdges(graphData.edges || []);
       })
       .catch(err => {
-        setError(err instanceof Error ? err.message : '加载关系图失败');
+        setError(err instanceof Error ? err.message : t('relation.loadGraphFailed'));
       })
       .finally(() => {
         setLoading(false);
@@ -273,12 +274,12 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
   return (
     <div className="space-y-4 min-w-0">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="text-lg font-semibold text-ink-1">角色关系图谱</h3>
+        <h3 className="text-lg font-semibold text-ink-1">{t('relation.title')}</h3>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-          {Object.entries(RELATION_LABELS).slice(0, 5).map(([type, label]) => (
+          {Object.entries(RELATION_LABEL_KEYS).slice(0, 5).map(([type, labelKey]) => (
             <span key={type} className="flex items-center gap-1">
               <span className="w-3 h-3 rounded-full" style={{ backgroundColor: RELATION_COLORS[type] }}></span>
-              {label}
+              {t(labelKey)}
             </span>
           ))}
         </div>
@@ -349,7 +350,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
                       fill="white"
                       fontSize="10"
                     >
-                      {RELATION_LABELS[edge.type] || edge.type}
+                      {t(RELATION_LABEL_KEYS[edge.type] || edge.type)}
                     </text>
                   </g>
                 )}
@@ -438,7 +439,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
               </div>
               <button
                 onClick={() => setSelectedNode(null)}
-                aria-label="关闭详情"
+                aria-label={t('relation.closeDetails')}
                 className="text-ink-3 hover:text-ink-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2"
               >
                 <X className="h-4 w-4" />
@@ -447,7 +448,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
             
             <div className="space-y-2">
               <p className="text-xs text-ink-2">
-                关系数: {edges.filter(e => e.source === selectedNode.id || e.target === selectedNode.id).length}
+                {t('relation.relationCount', { n: edges.filter(e => e.source === selectedNode.id || e.target === selectedNode.id).length })}
               </p>
               
               {/* 关联关系列表 */}
@@ -471,7 +472,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
                         ></span>
                         <span className="text-ink-2">{otherNode.name}</span>
                         <span className="text-ink-3 ml-auto">
-                          {RELATION_LABELS[edge.type] || edge.type}
+                          {t(RELATION_LABEL_KEYS[edge.type] || edge.type)}
                         </span>
                       </div>
                     );
@@ -484,8 +485,8 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
 
       {/* 操作提示 */}
       <div className="flex flex-wrap items-center justify-between gap-1 text-xs text-ink-2">
-        <span className="inline-flex items-center gap-1"><Lightbulb className="h-3.5 w-3.5" /> 拖拽节点调整布局 · 点击节点查看详情</span>
-        <span>共 {nodes.length} 个角色 · {edges.length} 条关系</span>
+        <span className="inline-flex items-center gap-1"><Lightbulb className="h-3.5 w-3.5" /> {t('relation.dragHint')}</span>
+        <span>{t('relation.stats', { nodes: nodes.length, edges: edges.length })}</span>
       </div>
     </div>
   );

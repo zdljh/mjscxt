@@ -76,7 +76,7 @@ export function GridPage({ projectKey }: { projectKey?: string } = {}) {
       });
       setSelectedCell(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '生成失败');
+      setError(err instanceof Error ? err.message : t('nineGrid.generateFailed'));
     } finally {
       setGenerating(false);
     }
@@ -90,12 +90,13 @@ export function GridPage({ projectKey }: { projectKey?: string } = {}) {
       await storyboardApi.selectNineGridShot(nineGrid.grid_id, project, selectedCell);
       setNineGrid((prev) => (prev ? { ...prev, selected_index: selectedCell } : prev));
       setNotice(
-        `${t('nineGrid.confirmSuccess')}（第 ${selectedCell + 1} 格 · ${
-          nineGrid.shots[selectedCell]?.composition || ''
-        }）`
+        `${t('nineGrid.confirmSuccess')}${t('nineGrid.confirmDetail', {
+          n: selectedCell + 1,
+          composition: nineGrid.shots[selectedCell]?.composition || '',
+        })}`
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : '选择失败');
+      setError(err instanceof Error ? err.message : t('nineGrid.selectFailed'));
     } finally {
       setSaving(false);
     }
@@ -196,17 +197,17 @@ export function GridPage({ projectKey }: { projectKey?: string } = {}) {
                     {(isSelected || isPersisted) && (
                       <span className="inline-flex items-center gap-1 text-xs text-brand font-medium">
                         <Check className="h-3.5 w-3.5" />
-                        {isPersisted ? '已选定' : ''}
+                        {isPersisted ? t('nineGrid.selected') : ''}
                       </span>
                     )}
                   </div>
                   {shot ? (
                     <div className="space-y-1">
                       <p className="text-sm font-medium text-ink-1">
-                        {shot.composition || `格 ${i + 1}`}
+                        {shot.composition || t('nineGrid.cellN', { n: i + 1 })}
                       </p>
                       <p className="text-xs text-ink-2">
-                        {[shot.camera_angle, shot.zoom_level ? `变焦 ${shot.zoom_level}` : '']
+                        {[shot.camera_angle, shot.zoom_level ? t('nineGrid.zoom', { level: shot.zoom_level }) : '']
                           .filter(Boolean)
                           .join(' · ')}
                       </p>
@@ -233,7 +234,7 @@ export function GridPage({ projectKey }: { projectKey?: string } = {}) {
       ) : (
         <EmptyState
           icon={<Palette className="h-10 w-10" />}
-          title="暂无九宫格分镜"
+          title={t('nineGrid.noResult')}
           description={t('nineGrid.info')}
         />
       )}

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useApp } from '@/context/AppContext';
 
 interface ServiceStatus {
   flask: 'ok' | 'error' | 'checking';
@@ -7,6 +8,7 @@ interface ServiceStatus {
 }
 
 export function ServiceMonitor() {
+  const { t } = useApp();
   const [status, setStatus] = useState<ServiceStatus>({
     flask: 'checking',
     comfyui: 'unknown',
@@ -54,7 +56,7 @@ export function ServiceMonitor() {
       }`}>
         <span className="w-2 h-2 rounded-full bg-surface animate-pulse"></span>
         <span className="text-sm font-medium">
-          {status.flask === 'error' ? '服务连接失败' : '检查中...'}
+          {status.flask === 'error' ? t('common.serviceConnectFailed') : t('common.checking')}
         </span>
         {/* 保留原生：该按钮叠在 danger/warning 实色横幅上，
             ghost 变体的 text-ink-2 / hover:bg-surface-2 会在实色底上失去对比度 */}
@@ -62,7 +64,7 @@ export function ServiceMonitor() {
           onClick={() => window.location.reload()}
           className="ml-2 px-2 py-1 bg-surface/20 rounded hover:bg-surface/30 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
         >
-          重试
+          {t('common.retry')}
         </button>
       </div>
     </div>

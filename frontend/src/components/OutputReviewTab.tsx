@@ -46,7 +46,7 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
       setDeliverables(deliverRes?.items || []);
       setPending(deliverRes?.pending || 0);
     } catch (e) {
-      setError(e instanceof Error ? e.message : '加载失败');
+      setError(e instanceof Error ? e.message : t('common.loadFailed'));
     } finally {
       setLoading(false);
     }
@@ -62,14 +62,14 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
       const data = await exportApi.generate(projectKey, ['fcpml', 'edl', 'json']);
       setExportFiles(data.files || []);
       if (typeof data.shot_count === 'number' && data.shot_count === 0) {
-        setNotice('导出文件已生成，但本项目还没有分镜／视频，导出内容为空');
+        setNotice(t('deliver.exportNoShots'));
       } else if (typeof data.shot_count === 'number') {
-        setNotice(`导出文件已生成，共 ${data.shot_count} 个镜头（约 ${data.total_sec ?? 0} 秒）`);
+        setNotice(t('deliver.exportGeneratedShots', { count: data.shot_count, sec: data.total_sec ?? 0 }));
       } else {
-        setNotice('导出文件已生成');
+        setNotice(t('deliver.exportGenerated'));
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : '生成失败');
+      setError(e instanceof Error ? e.message : t('deliver.exportFailed'));
     } finally {
       setGenerating(false);
     }
@@ -146,9 +146,9 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
       {/* 页面标题 */}
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-lg font-semibold text-ink-1">输出与验收</h3>
+          <h3 className="text-lg font-semibold text-ink-1">{t('wb.output')}</h3>
           <p className="text-sm text-ink-2 mt-0.5">
-            导出工程文件 & 验收成片
+            {t('deliver.exportSubtitle')}
           </p>
         </div>
         <Button size="sm" variant="secondary" onClick={loadAll} disabled={loading || busy !== null}>
@@ -165,12 +165,12 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
       {/* 区域 1: 导出配置 */}
       <div className="bg-surface rounded-lg border border-line p-4">
         <h4 className="font-semibold text-ink-1 mb-3 flex items-center gap-2">
-          <Film className="h-4 w-4" /> 导出配置
+          <Film className="h-4 w-4" /> {t('deliver.exportConfig')}
         </h4>
         
         <div className="flex gap-2 mb-4">
           <Button onClick={handleGenerate} disabled={generating}>
-            {generating ? '生成中...' : '生成导出文件'}
+            {generating ? t('common.generating') : t('export.generate')}
           </Button>
         </div>
 
@@ -183,7 +183,7 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
         {/* 成片下载 */}
         <div className="mb-4">
           <h5 className="text-sm font-medium text-ink-1 mb-2 flex items-center gap-1.5">
-            <FolderOpen className="h-4 w-4" /> 成片清单 · {finals.length}
+            <FolderOpen className="h-4 w-4" /> {t('deliver.finalList', { n: finals.length })}
           </h5>
           {finals.length > 0 ? (
             <div className="space-y-2">
@@ -195,24 +195,24 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
                   </div>
                   <div className="flex gap-2 shrink-0">
                     <Button size="sm" variant="secondary" onClick={() => window.open(item.url, '_blank')}>
-                      预览
+                      {t('common.preview')}
                     </Button>
                     <Button size="sm" onClick={() => triggerDownload(`${item.url}?download=1`, item.name)}>
-                      下载
+                      {t('common.download')}
                     </Button>
                   </div>
                 </div>
               ))}
             </div>
           ) : (
-            <p className="text-sm text-ink-2 py-2">暂无成片，请先完成视频生成</p>
+            <p className="text-sm text-ink-2 py-2">{t('deliver.noFinalHint')}</p>
           )}
         </div>
 
         {/* 剪辑工程文件 */}
         <div>
           <h5 className="text-sm font-medium text-ink-1 mb-2 flex items-center gap-1.5">
-            <FileText className="h-4 w-4" /> 工程文件 · {exportFiles.filter(f => f.exists).length}
+            <FileText className="h-4 w-4" /> {t('deliver.projectFiles', { n: exportFiles.filter(f => f.exists).length })}
           </h5>
           {exportFiles.filter(f => f.exists).length > 0 ? (
             <div className="space-y-2">
@@ -227,13 +227,13 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
                     variant="secondary"
                     onClick={() => triggerDownload(`/api/export/${encodeURIComponent(projectKey)}/${file.format}`, file.filename)}
                   >
-                    下载
+                    {t('common.download')}
                   </Button>
                 </div>
               ))}
             </div>
           ) : (
-            <p className="text-sm text-ink-2 py-2">暂无导出文件</p>
+            <p className="text-sm text-ink-2 py-2">{t('deliver.noExportFiles')}</p>
           )}
         </div>
       </div>
@@ -241,9 +241,9 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
       {/* 区域 2: 成片验收 */}
       <div className="bg-surface rounded-lg border border-line p-4">
         <h4 className="font-semibold text-ink-1 mb-3 flex items-center gap-2">
-          <ClipboardCheck className="h-4 w-4" /> 成片验收
+          <ClipboardCheck className="h-4 w-4" /> {t('deliver.finalReview')}
           <span className="ml-auto text-xs font-normal text-ink-2">
-            待验收: {pending} / 共 {deliverables.length} 集
+            {t('deliver.pendingOf', { pending, total: deliverables.length })}
           </span>
         </h4>
 
@@ -258,8 +258,8 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
           ) : (
             <EmptyState
               icon={<ClipboardCheck className="h-10 w-10" />}
-              title="暂无成片，请先运行自动生产"
-              description="请通过右侧「AI总控」下达生产指令，AI会先与您沟通生产风格"
+              title={t('deliver.noDeliverables')}
+              description={t('deliver.noDeliverablesHint')}
             />
           )
         ) : (
@@ -277,7 +277,7 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-semibold text-ink-1">
-                          第 {d.episode_no} 集
+                          {t('deliver.episodeNo', { n: d.episode_no })}
                         </span>
                         {d.meta?.title && (
                           <span className="text-sm text-ink-2">{d.meta.title}</span>
@@ -285,23 +285,23 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
                         <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${b.cls}`}>{b.text}</span>
                         {d.exists === false && (
                           <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-danger-subtle text-danger-strong">
-                            文件缺失
+                            {t('deliver.missing')}
                           </span>
                         )}
                         {d.meta?.stale && (
                           <span
                             className="px-2 py-0.5 rounded-full text-xs font-medium bg-warning-subtle text-warning-strong"
-                            title={d.meta.stale.reason || '成片已过期'}
+                            title={d.meta.stale.reason || t('deliver.stale')}
                           >
-                            成片已过期
+                            {t('deliver.stale')}
                           </span>
                         )}
                         {d.meta?.incomplete_shots && (
                           <span
                             className="px-2 py-0.5 rounded-full text-xs font-medium bg-warning-subtle text-warning-strong"
-                            title={d.meta?.warning || '镜头数不齐，成片可能不完整'}
+                            title={d.meta?.warning || t('deliver.incompleteTitle')}
                           >
-                            可能不完整 {d.meta?.shots_ready ?? '?'}/{d.meta?.shots_total ?? '?'}
+                            {t('deliver.incompleteShots', { ready: d.meta?.shots_ready ?? '?', total: d.meta?.shots_total ?? '?' })}
                           </span>
                         )}
                       </div>
@@ -313,11 +313,11 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
                       </p>
                       {d.meta?.stale && (
                         <p className="text-xs text-warning-strong mt-1">
-                          {d.meta.stale.reason || '同集镜头已重做'}
+                          {d.meta.stale.reason || t('deliver.staleReasonDefault')}
                           {d.meta.stale.detail?.shot_id != null && (
-                            <span>（涉及镜头 #{d.meta.stale.detail.shot_id}）</span>
+                            <span>{t('deliver.staleShotRef', { n: d.meta.stale.detail.shot_id })}</span>
                           )}
-                          ，请重新混音合成后再验收
+                          {t('deliver.staleRerenderHint')}
                         </p>
                       )}
                       {d.meta?.incomplete_shots && d.meta?.warning && (
@@ -327,7 +327,7 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
                       )}
                       {d.review === 'rejected' && d.review_note && (
                         <p className="text-xs text-ink-2 mt-1">
-                          打回原因: {d.review_note}
+                          {t('deliver.rejectNoteInline', { note: d.review_note })}
                         </p>
                       )}
                     </div>
@@ -340,13 +340,13 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
                             variant="secondary"
                             onClick={() => setPlaying(playing === d.filename ? null : d.filename)}
                           >
-                            {playing === d.filename ? '关闭' : '播放'}
+                            {playing === d.filename ? t('common.close') : t('common.play')}
                           </Button>
                           <a
                             href={`${d.url}?download=1`}
                             className="inline-flex items-center px-3 py-1.5 text-sm rounded-lg border border-line-strong text-ink-1 hover:bg-surface-2 transition-colors"
                           >
-                            下载
+                            {t('common.download')}
                           </a>
                         </>
                       )}
@@ -355,7 +355,7 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
                         onClick={() => review(d.episode_no, 'accepted')}
                         disabled={!canReview || d.review === 'accepted'}
                       >
-                        通过
+                        {t('deliver.approve')}
                       </Button>
                       <Button
                         size="sm"
@@ -366,7 +366,7 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
                         }}
                         disabled={!canReview || d.review === 'rejected'}
                       >
-                        打回
+                        {t('deliver.reject')}
                       </Button>
                     </div>
                   </div>
@@ -380,13 +380,13 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
                       <Textarea
                         value={reason}
                         onChange={setReason}
-                        label="打回原因"
+                        label={t('deliver.rejectReasonLabel')}
                         rows={2}
-                        placeholder="请输入打回原因..."
+                        placeholder={t('deliver.rejectReasonInput')}
                       />
                       <div className="flex gap-2">
                         <Button size="sm" onClick={() => review(d.episode_no, 'rejected', reason)} disabled={!canReview}>
-                          确认打回
+                          {t('deliver.confirmReject')}
                         </Button>
                         <Button
                           size="sm"
@@ -396,7 +396,7 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
                             setReason('');
                           }}
                         >
-                          取消
+                          {t('common.cancel')}
                         </Button>
                       </div>
                     </div>

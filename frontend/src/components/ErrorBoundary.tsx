@@ -1,6 +1,11 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
 import { Button } from '@/components/ui';
 import { AlertTriangle } from '@/components/ui/icons';
+import { t } from '@/i18n';
+
+// 本组件是 class 组件，不能用 useApp() hook，故使用模块级 t()。
+// 语言包由 AppProvider 在 App 层异步加载，ErrorBoundary 的渲染时机可能早于语言包就绪，
+// 此时 t() 会回落成 key 本身（i18n/index.ts 的既有设计），属预期行为、不是 bug。
 
 interface Props {
   children: ReactNode;
@@ -41,15 +46,15 @@ export class ErrorBoundary extends Component<Props, State> {
               <AlertTriangle className="h-16 w-16 text-danger" />
             </div>
             <h2 className="text-xl font-bold text-ink-1 mb-2">
-              页面出错了
+              {t('error.boundaryTitle')}
             </h2>
             <p className="text-ink-2 mb-4">
-              发生了意外错误，请尝试刷新页面
+              {t('error.boundaryDesc')}
             </p>
             {import.meta.env.DEV && this.state.error && (
               <details className="text-left text-sm text-ink-2 mb-4">
                 <summary className="cursor-pointer hover:text-ink-1">
-                  错误详情
+                  {t('error.boundaryDetails')}
                 </summary>
                 <pre className="mt-2 p-3 bg-surface-2 rounded overflow-auto text-xs">
                   {this.state.error.toString()}
@@ -58,7 +63,7 @@ export class ErrorBoundary extends Component<Props, State> {
             )}
             <div className="flex gap-3 justify-center">
               <Button variant="brand" onClick={() => window.location.reload()}>
-                刷新页面
+                {t('error.reload')}
               </Button>
               <Button
                 variant="secondary"
@@ -67,7 +72,7 @@ export class ErrorBoundary extends Component<Props, State> {
                   window.location.reload();
                 }}
               >
-                返回首页
+                {t('error.backHome')}
               </Button>
             </div>
           </div>

@@ -75,7 +75,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
       const data = await ttsApi.plan({ project_name: projectKey });
       setTtsPlan(data);
     } catch (e) {
-      setTtsError(e instanceof Error ? e.message : '获取配音计划失败');
+      setTtsError(e instanceof Error ? e.message : t('audio.ttsPlanFailed'));
     }
   };
 
@@ -85,7 +85,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
       const data = await mixApi.plan({ project_name: projectKey });
       setMixPlan(data);
     } catch (e) {
-      setMixError(e instanceof Error ? e.message : '获取混音计划失败');
+      setMixError(e instanceof Error ? e.message : t('audio.mixPlanFailed'));
     }
   };
 
@@ -115,7 +115,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
     setTtsQc(null);
     try {
       const result = await ttsApi.generate({ project_name: projectKey });
-      toast.success(`配音生成任务已启动：${result.task_id}`);
+      toast.success(t('audio.ttsStarted', { id: result.task_id }));
       // 轮询到终态：配音结果里带着「台词预检」与「配音质检」两组结论，
       // 不轮询就拿不到（此前只 toast 一句就结束，用户看不到质检发现的问题）
       for (let i = 0; i < 400; i += 1) {
@@ -134,14 +134,14 @@ export function AudioTab({ projectKey }: AudioTabProps) {
             status: task.status,
           });
           if (task.status === 'failed') {
-            setTtsError(task.error || task.message || '配音失败');
+            setTtsError(task.error || task.message || t('audio.ttsFailed'));
           }
           break;
         }
       }
       await loadTtsPlan();
     } catch (e) {
-      const msg = e instanceof Error ? e.message : '配音生成失败';
+      const msg = e instanceof Error ? e.message : t('audio.ttsGenerateFailed');
       setTtsError(msg);
       toast.error(msg);
     } finally {
@@ -161,7 +161,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
       });
       setQcResult(r);
     } catch (e) {
-      setQcError(e instanceof Error ? e.message : '音频质检失败');
+      setQcError(e instanceof Error ? e.message : t('audio.qcFailed'));
       setQcResult(null);
     } finally {
       setQcLoading(false);
@@ -179,9 +179,9 @@ export function AudioTab({ projectKey }: AudioTabProps) {
         audio_min_mean_db: Number(qcCfg.audio_min_mean_db),
         audio_max_drift: Number(qcCfg.audio_max_drift),
       } as any);
-      toast.success('音频质检配置已保存');
+      toast.success(t('audio.qcConfigSaved'));
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : '保存失败');
+      toast.error(e instanceof Error ? e.message : t('settings.saveFailed'));
     } finally {
       setQcSaving(false);
     }
@@ -196,7 +196,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
     setMixQc(null);
     try {
       const result = await mixApi.generate({ project_name: projectKey });
-      setMixTask({ phase: '任务已下发', progress: 0 });
+      setMixTask({ phase: t('audio.mixSubmitted'), progress: 0 });
       // 混音本身很快，但配音未就绪时可能排队；最多轮询 10 分钟
       for (let i = 0; i < 200; i += 1) {
         await new Promise((r) => setTimeout(r, 3000));
@@ -210,7 +210,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
         setMixTask({ phase: task?.phase, progress: task?.progress });
         if (task?.status === 'completed' || task?.status === 'failed') {
           if (task.status === 'failed') {
-            setMixError(task.message || '混音失败');
+            setMixError(task.message || t('audio.mixFailed'));
           } else {
             setMixDeliverable(task.deliverable || null);
             setMixQc(task.audio_qc || null);
@@ -219,18 +219,18 @@ export function AudioTab({ projectKey }: AudioTabProps) {
           return;
         }
       }
-      setMixError('混音任务轮询超时，请到「成品验收」页刷新查看结果');
+      setMixError(t('audio.mixTimeout'));
     } catch (e) {
-      setMixError(e instanceof Error ? e.message : '混音生成失败');
+      setMixError(e instanceof Error ? e.message : t('audio.mixGenerateFailed'));
     } finally {
       setMixGenerating(false);
     }
   };
 
   const steps: { id: 1 | 2 | 3; label: string; icon: React.ReactNode }[] = [
-    { id: 1, label: 'TTS 配音', icon: <Mic className="h-4 w-4" /> },
-    { id: 2, label: '音画混音', icon: <Volume2 className="h-4 w-4" /> },
-    { id: 3, label: '音频质检', icon: <CheckCircle2 className="h-4 w-4" /> },
+    { id: 1, label: t('tts.title'), icon: <Mic className="h-4 w-4" /> },
+    { id: 2, label: t('mix.title'), icon: <Volume2 className="h-4 w-4" /> },
+    { id: 3, label: t('audio.qcTitle'), icon: <CheckCircle2 className="h-4 w-4" /> },
   ];
 
   // 首屏加载态：与真实结构同形（步骤导航 + 卡片），避免高度跳变
@@ -283,7 +283,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
         <div className="space-y-4">
           <div className="bg-surface rounded-lg border border-line p-4">
             <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-              <Mic className="h-5 w-5" /> TTS 配音生成
+              <Mic className="h-5 w-5" />{t('audio.ttsTitle')}
             </h3>
             
             {ttsEnv && (
@@ -295,11 +295,11 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                 <span className="font-medium inline-flex items-center gap-1.5">
                   {ttsEnv.available ? (
                     <>
-                      <CheckCircle2 className="h-4 w-4" /> TTS 环境可用
+                      <CheckCircle2 className="h-4 w-4" />{t('tts.envAvailable')}
                     </>
                   ) : (
                     <>
-                      <X className="h-4 w-4" /> TTS 环境不可用
+                      <X className="h-4 w-4" />{t('tts.envUnavailable')}
                     </>
                   )}
                 </span>
@@ -315,23 +315,23 @@ export function AudioTab({ projectKey }: AudioTabProps) {
 
             {ttsPlan && (
               <div className="mb-4">
-                <h4 className="font-medium text-ink-1 mb-3">配音计划预览</h4>
+                <h4 className="font-medium text-ink-1 mb-3">{t('tts.planPreview')}</h4>
                 <div className="grid grid-cols-3 gap-4 mb-4">
                   <div className="bg-surface-2 rounded p-3 text-center">
                     <div className="text-2xl font-bold text-brand">
                       {ttsPlan.line_count ?? (ttsPlan.lines?.length ?? 0)}
                     </div>
-                    <div className="text-sm text-ink-2">总台词数</div>
+                    <div className="text-sm text-ink-2">{t('tts.totalLines')}</div>
                   </div>
                   <div className="bg-surface-2 rounded p-3 text-center">
                     <div className="text-2xl font-bold text-success-strong">
                       {ttsPlan.characters?.length || 0}
                     </div>
-                    <div className="text-sm text-ink-2">涉及角色</div>
+                    <div className="text-sm text-ink-2">{t('tts.characters')}</div>
                   </div>
                   <div className="bg-surface-2 rounded p-3 text-center">
                     <div className="text-2xl font-bold text-brand">{ttsPlan.episode}</div>
-                    <div className="text-sm text-ink-2">集数</div>
+                    <div className="text-sm text-ink-2">{t('tts.episode')}</div>
                   </div>
                 </div>
 
@@ -339,7 +339,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                     「一句也合不出来」，必须在这里就说清楚，而不是等用户白跑一轮 */}
                 {Array.isArray(ttsPlan.warnings) && ttsPlan.warnings.length > 0 && (
                   <div className="mb-4 p-3 rounded-lg bg-warning-subtle border border-warning/30 text-warning-strong text-xs space-y-1">
-                    <div className="font-medium">剧本体检提醒</div>
+                    <div className="font-medium">{t('audio.scriptCheck')}</div>
                     {ttsPlan.warnings.map((w: string, i: number) => (
                       <div key={i}>· {w}</div>
                     ))}
@@ -356,14 +356,14 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                       </div>
                     ))}
                     {ttsPlan.lines.length > 10 && (
-                      <div className="text-xs text-ink-3 text-center py-1">... 还有 {ttsPlan.lines.length - 10} 条台词</div>
+                      <div className="text-xs text-ink-3 text-center py-1">{t('audio.moreLines', { n: ttsPlan.lines.length - 10 })}</div>
                     )}
                   </div>
                 )}
 
                 {ttsPlan.lines && ttsPlan.lines.length === 0 && (
                   <div className="mb-4 p-3 rounded-lg bg-danger-subtle border border-danger/30 text-danger-strong text-xs">
-                    该集没有可朗读台词，无法生成配音。请先补台词或重新生成剧本。
+                    {t('audio.noLines')}
                   </div>
                 )}
 
@@ -372,7 +372,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                   disabled={ttsGenerating || !ttsEnv?.available}
                   className="w-full bg-success py-3 text-white hover:bg-success-strong"
                 >
-                  {ttsGenerating ? '生成中...' : '生成配音'}
+                  {ttsGenerating ? t('common.generating') : t('tts.generate')}
                 </Button>
               </div>
             )}
@@ -391,7 +391,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
         <div className="space-y-4">
           <div className="bg-surface rounded-lg border border-line p-4">
             <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-              <Volume2 className="h-5 w-5" /> 音画混音合成
+              <Volume2 className="h-5 w-5" />{t('audio.mixTitle')}
             </h3>
 
             {mixPlan && (
@@ -399,15 +399,15 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                 <div className="grid grid-cols-3 gap-4 mb-4">
                   <div className="bg-surface-2 rounded p-3 text-center">
                     <div className="text-2xl font-bold text-brand">{mixPlan.video_count ?? 0}</div>
-                    <div className="text-sm text-ink-2">视频片段</div>
+                    <div className="text-sm text-ink-2">{t('mix.videoCount')}</div>
                   </div>
                   <div className="bg-surface-2 rounded p-3 text-center">
                     <div className="text-2xl font-bold text-warning-strong">{mixPlan.audio_count ?? 0}</div>
-                    <div className="text-sm text-ink-2">音频片段</div>
+                    <div className="text-sm text-ink-2">{t('mix.audioCount')}</div>
                   </div>
                   <div className="bg-surface-2 rounded p-3 text-center">
                     <div className="text-2xl font-bold text-brand">{mixPlan.to_generate ?? 0}</div>
-                    <div className="text-sm text-ink-2">待合成</div>
+                    <div className="text-sm text-ink-2">{t('audio.pendingMix')}</div>
                   </div>
                 </div>
 
@@ -431,7 +431,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                   variant="brand"
                   className="w-full py-3"
                 >
-                  {mixGenerating ? '混音中...' : '开始混音'}
+                  {mixGenerating ? t('audio.mixing') : t('mix.generate')}
                 </Button>
 
                 {mixGenerating && mixTask?.phase && (
@@ -466,8 +466,8 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                 }`}
               >
                 {mixDeliverable.registered
-                  ? `带配音成片已生成，并自动加入「成品验收」第 ${mixDeliverable.episode_no} 集待验收`
-                  : `带配音成片已生成，但未进入验收队列：${mixDeliverable.reason || '原因未知'}`}
+                  ? t('audio.mixRegistered', { n: mixDeliverable.episode_no })
+                  : t('audio.mixNotRegistered', { reason: mixDeliverable.reason || t('audio.reasonUnknown') })}
               </div>
             )}
 
@@ -480,7 +480,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                     : 'bg-warning-subtle border-warning/30 text-warning-strong'
                 }`}
               >
-                成片音频质检：{mixQc.passed ? '通过' : '未通过'}
+                {t('audio.finalQcResult', { result: mixQc.passed ? t('qc.passed') : t('audio.mixQcNotPassed') })}
                 {mixQc.reason ? `（${mixQc.reason}）` : ''}
               </div>
             )}
@@ -493,23 +493,21 @@ export function AudioTab({ projectKey }: AudioTabProps) {
         <div className="space-y-4">
           <div className="bg-surface rounded-lg border border-line p-4">
             <h3 className="text-lg font-semibold mb-2 flex items-center gap-2">
-              <CheckCircle2 className="h-5 w-5" /> 音频质检
+              <CheckCircle2 className="h-5 w-5" />{t('audio.qcTitle')}
             </h3>
             <p className="text-sm text-ink-2 mb-4">
-              两层判定：<b>客观层</b>用 ffmpeg 实测时长 / 平均电平 / 峰值 / 有声占比，
-              零成本、毫秒级，挡「整段无声、削波、时长失控」；
-              <b>AI 层</b>把音频渲染成频谱图与波形图交给多模态模型判读内容问题。
+              {t('audio.qcDescIntro')}<b>{t('audio.layerObjective')}</b>{t('audio.qcDescObjective')}<b>{t('audio.layerAi')}</b>{t('audio.qcDescAi')}
             </p>
 
             {/* 检验对象 */}
             <div className="mb-4">
-              <div className="text-xs text-ink-2 mb-2">检验对象</div>
+              <div className="text-xs text-ink-2 mb-2">{t('audio.qcSource')}</div>
               {/* 保留原生：同上的分段单选（rounded 4px 与 Button 的 rounded-md 不一致） */}
               <div className="flex flex-wrap gap-2">
                 {([
-                  { id: 'mix', label: '带配音成片', hint: '整轨口径' },
-                  { id: 'merged', label: '整集音轨', hint: '整轨口径' },
-                  { id: 'line', label: '单句配音', hint: '单句口径' },
+                  { id: 'mix', label: t('audio.sourceMix'), hint: t('audio.scopeFullTrack') },
+                  { id: 'merged', label: t('audio.sourceMerged'), hint: t('audio.scopeFullTrack') },
+                  { id: 'line', label: t('audio.sourceLine'), hint: t('audio.scopeSingleLine') },
                 ] as const).map((s) => (
                   <button
                     key={s.id}
@@ -537,8 +535,8 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                   onChange={(e) => setQcWithAi(e.target.checked)}
                   className="rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
                 />
-                启用 AI 层（频谱图 + 波形图送多模态模型）
-                <span className="text-xs text-ink-3">关掉则只跑客观层，不消耗模型调用</span>
+                {t('audio.enableAiLayer')}
+                <span className="text-xs text-ink-3">{t('audio.aiLayerHint')}</span>
               </label>
               {qcCfg && (
                 <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -547,14 +545,14 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                       ? 'bg-success-subtle text-success-strong'
                       : 'bg-surface-2 text-ink-2'
                   }`}>
-                    客观层 {qcCfg.audio_qc_active ? '可用' : '已关闭'}
+                    {t('audio.layerObjective')} {qcCfg.audio_qc_active ? t('audio.available') : t('audio.disabled')}
                   </span>
                   <span className={`px-2 py-0.5 rounded ${
                     qcCfg.audio_ai_active
                       ? 'bg-brand-subtle text-brand-hover'
                       : 'bg-warning-subtle text-warning-strong'
                   }`}>
-                    AI 层 {qcCfg.audio_ai_active ? '可用' : '未配置质检接口'}
+                    {t('audio.layerAi')} {qcCfg.audio_ai_active ? t('audio.available') : t('audio.aiNotConfigured')}
                   </span>
                 </div>
               )}
@@ -566,38 +564,38 @@ export function AudioTab({ projectKey }: AudioTabProps) {
             {qcCfg && (
               <div className="mb-4 grid grid-cols-1 md:grid-cols-3 gap-3">
                 <div>
-                  <div className="text-xs text-ink-2 mb-1">有声占比下限</div>
+                  <div className="text-xs text-ink-2 mb-1">{t('audio.minSpeechRatio')}</div>
                   <input
                     type="number" step="0.05" min="0" max="1"
                     value={qcCfg.audio_min_speech_ratio ?? 0.5}
                     onChange={(e) => setQcCfg({ ...qcCfg, audio_min_speech_ratio: e.target.value })}
                     className="w-full px-2 py-1 text-sm rounded border border-line bg-surface text-ink-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
                   />
-                  <div className="text-xs text-ink-3 mt-1">低于此值提示「静音过多」</div>
+                  <div className="text-xs text-ink-3 mt-1">{t('audio.minSpeechRatioHint')}</div>
                 </div>
                 <div>
-                  <div className="text-xs text-ink-2 mb-1">平均电平下限（dB）</div>
+                  <div className="text-xs text-ink-2 mb-1">{t('audio.minMeanDb')}</div>
                   <input
                     type="number" step="1" min="-100" max="0"
                     value={qcCfg.audio_min_mean_db ?? -45}
                     onChange={(e) => setQcCfg({ ...qcCfg, audio_min_mean_db: e.target.value })}
                     className="w-full px-2 py-1 text-sm rounded border border-line bg-surface text-ink-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
                   />
-                  <div className="text-xs text-ink-3 mt-1">低于此值提示「音量偏小」</div>
+                  <div className="text-xs text-ink-3 mt-1">{t('audio.minMeanDbHint')}</div>
                 </div>
                 <div>
-                  <div className="text-xs text-ink-2 mb-1">时长偏差上限</div>
+                  <div className="text-xs text-ink-2 mb-1">{t('audio.maxDrift')}</div>
                   <input
                     type="number" step="0.05" min="0" max="5"
                     value={qcCfg.audio_max_drift ?? 0.5}
                     onChange={(e) => setQcCfg({ ...qcCfg, audio_max_drift: e.target.value })}
                     className="w-full px-2 py-1 text-sm rounded border border-line bg-surface text-ink-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
                   />
-                  <div className="text-xs text-ink-3 mt-1">实测与期望时长的比例偏差</div>
+                  <div className="text-xs text-ink-3 mt-1">{t('audio.maxDriftHint')}</div>
                 </div>
                 <div className="md:col-span-3">
                   <Button onClick={handleSaveQcThresholds} disabled={qcSaving} className="text-sm">
-                    {qcSaving ? '保存中...' : '保存音频质检配置'}
+                    {qcSaving ? t('audio.saving') : t('audio.saveQcConfig')}
                   </Button>
                 </div>
               </div>
@@ -609,7 +607,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
               variant="brand"
               className="w-full py-2"
             >
-              {qcLoading ? '质检中...' : '运行音频质检'}
+              {qcLoading ? t('audio.qcRunning') : t('audio.runQc')}
             </Button>
 
             {qcError && (
@@ -630,16 +628,16 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                       ? 'bg-success-subtle text-success-strong'
                       : 'bg-warning-subtle text-warning-strong'
                 }`}>
-                  {qcResult.blocked ? '关键缺陷' : qcResult.passed ? '通过' : '不通过'}
+                  {qcResult.blocked ? t('audio.criticalIssues') : qcResult.passed ? t('qc.passed') : t('audio.resultNotPassed')}
                 </span>
                 <span className="text-sm text-ink-2">
-                  评分 {qcResult.score ?? '—'}
+                  {t('audio.scoreLabel')} {qcResult.score ?? '—'}
                 </span>
                 <span className="text-xs text-ink-3">
-                  {qcResult.objective_only ? '仅客观层' : qcResult.ai_used ? '客观层 + AI 层' : '客观层'}
+                  {qcResult.objective_only ? t('audio.objectiveOnly') : qcResult.ai_used ? t('audio.objectivePlusAi') : t('audio.layerObjective')}
                 </span>
                 {qcResult.check_speech_ratio === false && (
-                  <span className="text-xs text-ink-3">（整轨口径：不做有声占比判定）</span>
+                  <span className="text-xs text-ink-3">{t('audio.fullTrackNote')}</span>
                 )}
               </div>
 
@@ -647,7 +645,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
 
               {qcResult.ai_skip_reason && (
                 <div className="mb-3 p-2 rounded bg-warning-subtle text-warning-strong text-xs">
-                  AI 层未参与：{qcResult.ai_skip_reason}
+                  {t('audio.aiSkipped', { reason: qcResult.ai_skip_reason })}
                 </div>
               )}
 
@@ -655,10 +653,10 @@ export function AudioTab({ projectKey }: AudioTabProps) {
               {qcResult.metrics && (
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
                   {[
-                    { k: '时长', v: qcResult.metrics.duration != null ? `${qcResult.metrics.duration}s` : '—' },
-                    { k: '有声占比', v: qcResult.metrics.speech_ratio != null ? `${(qcResult.metrics.speech_ratio * 100).toFixed(1)}%` : '—' },
-                    { k: '平均电平', v: qcResult.metrics.mean_db != null ? `${qcResult.metrics.mean_db} dB` : '—' },
-                    { k: '峰值电平', v: qcResult.metrics.max_db != null ? `${qcResult.metrics.max_db} dB` : '—' },
+                    { k: t('audio.metricDuration'), v: qcResult.metrics.duration != null ? `${qcResult.metrics.duration}s` : '—' },
+                    { k: t('audio.metricSpeechRatio'), v: qcResult.metrics.speech_ratio != null ? `${(qcResult.metrics.speech_ratio * 100).toFixed(1)}%` : '—' },
+                    { k: t('audio.metricMeanDb'), v: qcResult.metrics.mean_db != null ? `${qcResult.metrics.mean_db} dB` : '—' },
+                    { k: t('audio.metricMaxDb'), v: qcResult.metrics.max_db != null ? `${qcResult.metrics.max_db} dB` : '—' },
                   ].map((m) => (
                     <div key={m.k} className="bg-surface-2 rounded p-2 text-center">
                       <div className="text-sm font-semibold text-ink-1">{m.v}</div>
@@ -670,7 +668,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
 
               {Array.isArray(qcResult.critical_issues) && qcResult.critical_issues.length > 0 && (
                 <div className="mb-3">
-                  <div className="text-xs font-medium text-danger-strong mb-1">关键缺陷</div>
+                  <div className="text-xs font-medium text-danger-strong mb-1">{t('audio.criticalIssues')}</div>
                   <ul className="text-sm text-danger-strong space-y-0.5 list-disc list-inside">
                     {qcResult.critical_issues.map((x: string, i: number) => <li key={i}>{x}</li>)}
                   </ul>
@@ -678,7 +676,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
               )}
               {Array.isArray(qcResult.issues) && qcResult.issues.length > 0 && (
                 <div className="mb-3">
-                  <div className="text-xs font-medium text-warning-strong mb-1">可优化项</div>
+                  <div className="text-xs font-medium text-warning-strong mb-1">{t('audio.improvable')}</div>
                   <ul className="text-sm text-warning-strong space-y-0.5 list-disc list-inside">
                     {qcResult.issues.map((x: string, i: number) => <li key={i}>{x}</li>)}
                   </ul>
@@ -689,12 +687,12 @@ export function AudioTab({ projectKey }: AudioTabProps) {
               {Array.isArray(qcResult.visuals) && qcResult.visuals.length > 0 && (
                 <div className="space-y-2">
                   <div className="text-xs text-ink-2">
-                    送检图（第 1 张频谱图、第 2 张波形图）
+                    {t('audio.visualsNote')}
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                     {qcResult.visuals.map((src: string, i: number) => (
                       <div key={i} className="bg-black/5 rounded p-1">
-                        <img src={src} alt={i === 0 ? '频谱图' : '波形图'} className="w-full rounded" />
+                        <img src={src} alt={i === 0 ? t('audio.spectrogram') : t('audio.waveform')} className="w-full rounded" />
                       </div>
                     ))}
                   </div>
@@ -704,7 +702,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
               {qcResult.file_url && (
                 <audio controls src={qcResult.file_url} className="w-full mt-3" />
               )}
-              <div className="mt-2 text-xs text-ink-3 break-all">对象：{qcResult.path}</div>
+              <div className="mt-2 text-xs text-ink-3 break-all">{t('audio.target', { path: qcResult.path })}</div>
             </div>
           )}
 
@@ -712,11 +710,11 @@ export function AudioTab({ projectKey }: AudioTabProps) {
           {ttsQc?.audio_qc?.enabled && (
             <div className="bg-surface rounded-lg border border-line p-4">
               <h4 className="font-medium text-ink-1 mb-2">
-                上次配音的逐句质检
+                {t('audio.lastTtsQc')}
                 <span className="ml-2 text-xs font-normal text-ink-2">
-                  通过 {ttsQc.audio_qc.passed}/{ttsQc.audio_qc.checked}
-                  {ttsQc.audio_qc.retried ? `，重配 ${ttsQc.audio_qc.retried} 句` : ''}
-                  {ttsQc.audio_qc.recovered ? `，恢复 ${ttsQc.audio_qc.recovered} 句` : ''}
+                  {t('qc.passed')} {ttsQc.audio_qc.passed}/{ttsQc.audio_qc.checked}
+                  {ttsQc.audio_qc.retried ? t('audio.retriedLines', { n: ttsQc.audio_qc.retried }) : ''}
+                  {ttsQc.audio_qc.recovered ? t('audio.recoveredLines', { n: ttsQc.audio_qc.recovered }) : ''}
                 </span>
               </h4>
               {Array.isArray(ttsQc.audio_qc.problems) && ttsQc.audio_qc.problems.length > 0 ? (
@@ -732,7 +730,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                       {p.visuals && p.visuals.length > 0 && (
                         <div className="mt-2 grid grid-cols-2 gap-2">
                           {p.visuals.map((src: string, k: number) => (
-                            <img key={k} src={src} alt="质检图" className="w-full rounded bg-black/5" />
+                            <img key={k} src={src} alt={t('audio.qcImage')} className="w-full rounded bg-black/5" />
                           ))}
                         </div>
                       )}
@@ -740,7 +738,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                   ))}
                 </ul>
               ) : (
-                <div className="text-sm text-success-strong">逐句质检全部通过</div>
+                <div className="text-sm text-success-strong">{t('audio.allLinesPassed')}</div>
               )}
             </div>
           )}
@@ -749,10 +747,10 @@ export function AudioTab({ projectKey }: AudioTabProps) {
           {ttsQc?.prompt_qc?.enabled && (
             <div className="bg-surface rounded-lg border border-line p-4">
               <h4 className="font-medium text-ink-1 mb-2">
-                台词预检
+                {t('audio.promptQc')}
                 <span className="ml-2 text-xs font-normal text-ink-2">
-                  检查 {ttsQc.prompt_qc.checked} 句，已自愈 {ttsQc.prompt_qc.repaired_lines} 句
-                  {ttsQc.prompt_qc.blocked ? `，${ttsQc.prompt_qc.blocked} 句致命` : ''}
+                  {t('audio.promptQcSummary', { checked: ttsQc.prompt_qc.checked, repaired: ttsQc.prompt_qc.repaired_lines })}
+                  {ttsQc.prompt_qc.blocked ? t('audio.promptQcBlocked', { n: ttsQc.prompt_qc.blocked }) : ''}
                 </span>
               </h4>
               {Array.isArray(ttsQc.prompt_qc.problem_lines) && ttsQc.prompt_qc.problem_lines.length > 0 ? (
@@ -762,7 +760,7 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                       <span className="font-mono text-xs text-ink-3">#{p.shot_id ?? i + 1}</span>
                       {p.repairs && p.repairs.length > 0 && (
                         <span className="ml-2 text-success-strong">
-                          已自愈：{p.repairs.join('、')}
+                          {t('audio.repaired', { items: p.repairs.join('、') })}
                         </span>
                       )}
                       {Array.isArray(p.issues) && p.issues.length > 0 && (
@@ -771,13 +769,13 @@ export function AudioTab({ projectKey }: AudioTabProps) {
                         </div>
                       )}
                       {p.rebuild_hint && (
-                        <div className="text-xs text-ink-2 mt-0.5">建议：{p.rebuild_hint}</div>
+                        <div className="text-xs text-ink-2 mt-0.5">{t('audio.suggestion', { hint: p.rebuild_hint })}</div>
                       )}
                     </li>
                   ))}
                 </ul>
               ) : (
-                <div className="text-sm text-success-strong">台词预检全部通过</div>
+                <div className="text-sm text-success-strong">{t('audio.promptQcAllPassed')}</div>
               )}
             </div>
           )}
@@ -786,11 +784,11 @@ export function AudioTab({ projectKey }: AudioTabProps) {
 
       {/* 流程说明 */}
       <div className="bg-info-subtle border border-info/30 rounded-lg p-4">
-        <h4 className="font-medium text-info-strong mb-2 flex items-center gap-1.5"><Lightbulb className="h-4 w-4" /> 工作流程说明</h4>
+        <h4 className="font-medium text-info-strong mb-2 flex items-center gap-1.5"><Lightbulb className="h-4 w-4" />{t('audio.workflowTitle')}</h4>
         <ol className="list-decimal list-inside space-y-1 text-sm text-info-strong">
-          <li>先生成 TTS 配音（每集台词合成音频）</li>
-          <li>再进行音画混音（将配音与视频片段合成）</li>
-          <li>最后进行音频质检（确认音质达标）</li>
+          <li>{t('audio.workflowStep1')}</li>
+          <li>{t('audio.workflowStep2')}</li>
+          <li>{t('audio.workflowStep3')}</li>
         </ol>
       </div>
     </div>

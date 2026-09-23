@@ -44,7 +44,7 @@ export function Sidebar({
       {/* Toggle button：窄屏下侧边栏恒为图标态（宽 4rem），折叠/展开无意义，故隐藏 */}
       <button
         onClick={onToggle}
-        aria-label={collapsed ? '展开侧边栏' : '收起侧边栏'}
+        aria-label={collapsed ? t('nav.expandSidebar') : t('nav.collapseSidebar')}
         className={`m-2 hidden self-end rounded-lg p-2 text-ink-2 transition-all duration-200 hover:bg-surface-2 hover:text-ink-1 md:block ${FOCUS_RING}`}
       >
         <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -57,10 +57,10 @@ export function Sidebar({
         <div className="hidden px-4 py-4 mb-2 md:block">
           <div className="flex items-center gap-3">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand text-sm font-bold text-white">
-              漫
+              {t('brand.mark')}
             </div>
             <span className="text-sm font-semibold text-ink-1">
-              漫剧工坊
+              {t('brand.name')}
             </span>
           </div>
         </div>
