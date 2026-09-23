@@ -1354,24 +1354,39 @@ class ComfyUIClient:
         return results
 
     def _build_multiview_prompt(self, asset_type: str, base_desc: str, view: dict) -> str:
+        """构造多视角编辑提示词：**机位前置**，中英同口径，一致性要求降为从属。
+
+        ⚠️ 关于「多视角图机位不变」（2026-09-23 实测，勿重复踩坑）：
+            本函数**改不动模型输出的机位**。参考图编辑只复刻参考图里已可见的角度，
+            不会凭空补全没见过的面 —— 用正面基础图 + 明确「背面/俯视」指令，
+            输出仍是正面。已用 8 组对照实验排除措辞因素（换语言/语序/命令式 vs 编辑式、
+            断开 vae、覆写 cfg、跨对象对照），结论与机制见 config.MULTIVIEW_CONFIG 注释。
+            真要拿到多视角，得在**基础图**阶段带入角度。
+            本函数的作用是把机位说清楚、不再自相矛盾、不让「保持一致」压过机位要求，
+            对更强的模型保留正确口径。
+
+        角色多视图每张都要求「全身」构图（2026-09-19 实测：基础图出成半身/胸像，
+        视角图继承半身构图导致"三视图不是全身"。distance=full-body shot 不够，
+        必须显式写"从头到脚完整入画"，并排除半身/胸像/大头）。
+        """
+        # 中文机位：优先用配置里的 zh；缺省回落到 label + 英文方位（旧调用方可继续工作）
+        angle_zh = (view.get("zh") or "").strip() or \
+            f"本图是{view['label']}，相机方位：{view['azimuth']}，{view['elevation']}"
         camera_terms = f"{view['azimuth']}, {view['elevation']}, {view['distance']}"
         if asset_type == "character":
-            # 角色多视图每张都要求「全身」构图（2026-09-19 实测：基础图出成半身/胸像，
-            # 视角图继承半身构图导致"三视图不是全身"。distance=full-body shot 不够，
-            # 必须显式写"从头到脚完整入画"，并用负向措辞排除半身/胸像/大头）。
             return (
-                f"根据参考图生成同一角色的{view['label']}视图，"
-                f"保持人物的脸型、发型、服装、配饰与参考图完全一致，"
-                f"仅改变观察角度，人物身高比例与参考图一致。"
-                f"全身构图：画面完整呈现人物从头到脚，头顶与脚部不留裁切，"
+                f"【机位】{angle_zh}。"
+                f"画面完整呈现人物从头到脚，头顶与脚部不留裁切，"
                 f"不要半身像、不要胸像、不要大头特写、不要截断脚部。"
-                f"{camera_terms}。{base_desc}"
+                f"【一致性】只改变观察角度：脸型、发型、服装、配饰与参考图保持一致，"
+                f"人物身高比例不变。{camera_terms}。{base_desc}"
             )
         asset_word = "物品" if asset_type == "item" else "场景"
         return (
-            f"根据参考图生成同一{asset_word}的{view['label']}3D多视角图，"
-            f"保持{asset_word}的形状、材质、颜色与参考图完全一致，"
-            f"3D渲染视角转换。{camera_terms}。{base_desc}"
+            f"【机位】{angle_zh}。"
+            f"相机绕{asset_word}变换位置后重新取景，{asset_word}在画面中的朝向随视角改变。"
+            f"【一致性】{asset_word}的形状、材质、颜色、花纹与参考图一致。"
+            f"{camera_terms}。{base_desc}"
         )
 
     def _run_multiview_workflow(self, uploaded_image_name: str, prompt_zh: str,

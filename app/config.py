@@ -349,20 +349,58 @@ WORKFLOW_TEMPLATE = {
 KEYFRAME_CHAIN_MODE = _env("KEYFRAME_CHAIN_MODE", "auto").strip().lower() or "auto"
 
 # 多视角生成配置
+#
+# ⚠️ 实测结论（2026-09-23，8 组对照实验；详见 .workbuddy/memory/2026-09-23.md）
+#     QwenImage2.1 的参考图编辑**只复刻参考图里已可见的机位**，不会凭空补全没见过的面。
+#     用同一张「正面」基础图 + 明确指令（背面 / 俯视）去跑，输出仍然是正面：
+#       · 换语言（中/英）、换语序（机位前置/后置）、换命令式与编辑式措辞 —— 无效；
+#       · 断开 TextEncodeQwenImage21 的 vae（keep_vision 模式）—— 无效且身份漂移；
+#       · 覆写 cfg —— 直接 RuntimeError（该节点正向带参考图视觉 token、负向不带，长度不等）；
+#       · 跨对象对照：把参考图换成「俯视机位」的油纸伞，输出立刻跟着变俯视。
+#     机制：KSampler cfg=1.0 → comfy/samplers.py 的 sampling_function 在 cfg≈1 时
+#     `uncond_ = None`（负向根本不评估）→ 没有任何引导放大 → 参考图条件压过文字。
+#     ★ 想要真正的多视角，必须在**基础图**阶段就带入目标角度，别指望多视角这一步变魔术；
+#       也不要因为「多视角图看起来都一样」反复改下面的词（已试过 8 种，全部无效）。
+#
+#   下面各视角仍写全 label/zh/azimuth/elevation/distance（对更强的模型保留正确口径）；
+#   zh 供 _build_multiview_prompt 生成中文机位句，azimuth 等英文词用于英文机位句，
+#   **两者必须同口径**（历史 bug：top 的中文是「俯视」而 azimuth 却是 "front view"，自相矛盾）。
 MULTIVIEW_CONFIG = {
     # 角色多视图：正面 / 左侧面 / 右侧面 / 背面（三视图）
     "character_views": [
-        {"key": "front", "label": "正面全身", "azimuth": "front view", "elevation": "eye-level", "distance": "full-body shot"},
-        {"key": "left", "label": "左侧半侧面", "azimuth": "quarter view from left", "elevation": "eye-level", "distance": "full-body shot"},
-        {"key": "right", "label": "右侧半侧面", "azimuth": "quarter view from right", "elevation": "eye-level", "distance": "full-body shot"},
-        {"key": "back", "label": "背面全身", "azimuth": "back view", "elevation": "eye-level", "distance": "full-body shot"},
+        {"key": "front", "label": "正面全身",
+         "zh": "相机正对人物、镜头平视，看到完整正面",
+         "azimuth": "front view", "elevation": "eye-level", "distance": "full-body shot"},
+        {"key": "left", "label": "左侧半侧面",
+         "zh": "相机移到人物左侧约 45 度、镜头平视，同时看到左侧面与正面",
+         "azimuth": "three-quarter view from the left",
+         "elevation": "eye-level", "distance": "full-body shot"},
+        {"key": "right", "label": "右侧半侧面",
+         "zh": "相机移到人物右侧约 45 度、镜头平视，同时看到右侧面与正面",
+         "azimuth": "three-quarter view from the right",
+         "elevation": "eye-level", "distance": "full-body shot"},
+        {"key": "back", "label": "背面全身",
+         "zh": "相机转到人物正后方、镜头平视，只看到后脑、背部与后摆",
+         "azimuth": "back view", "elevation": "eye-level", "distance": "full-body shot"},
     ],
     # 物品/场景 3D 多视角：正面 / 左45° / 右45° / 俯视（3D环绕）
     "item_scene_views": [
-        {"key": "front", "label": "正面视角", "azimuth": "front view", "elevation": "eye-level", "distance": "medium shot"},
-        {"key": "left45", "label": "左前45°视角", "azimuth": "quarter view from left", "elevation": "eye-level", "distance": "medium shot"},
-        {"key": "right45", "label": "右前45°视角", "azimuth": "quarter view from right", "elevation": "eye-level", "distance": "medium shot"},
-        {"key": "top", "label": "俯视视角", "azimuth": "front view", "elevation": "high-angle shot", "distance": "wide shot"},
+        {"key": "front", "label": "正面视角",
+         "zh": "相机正对物件、镜头平视，看到完整正面",
+         "azimuth": "front view", "elevation": "eye-level", "distance": "medium shot"},
+        {"key": "left45", "label": "左前45°视角",
+         "zh": "相机移到物件左前方约 45 度、镜头平视，同时看到左侧面与正面",
+         "azimuth": "three-quarter view from the left",
+         "elevation": "eye-level", "distance": "medium shot"},
+        {"key": "right45", "label": "右前45°视角",
+         "zh": "相机移到物件右前方约 45 度、镜头平视，同时看到右侧面与正面",
+         "azimuth": "three-quarter view from the right",
+         "elevation": "eye-level", "distance": "medium shot"},
+        {"key": "top", "label": "俯视视角",
+         "zh": "相机升到物件正上方、镜头垂直向下俯拍，画面以顶面为主，物件下方与地面不可见",
+         # 历史 bug：这里曾是 "front view" —— 与中文「俯视」自相矛盾，已修正
+         "azimuth": "top-down view, bird's eye view",
+         "elevation": "high-angle shot", "distance": "wide shot"},
     ],
 }
 
