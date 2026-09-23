@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '@/context/AppContext';
 import { ttsApi, mixApi, qcApi } from '@/api/client';
-import { Button, Loading } from '@/components/ui';
+import { Button, Loading, Skeleton } from '@/components/ui';
 import { CheckCircle2, Lightbulb, Mic, Volume2, X } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 
@@ -13,6 +13,12 @@ export function AudioTab({ projectKey }: AudioTabProps) {
   const { t } = useApp();
   const toast = useToast();
   const [activeStep, setActiveStep] = useState<1 | 2 | 3>(1);
+  /**
+   * C4（2026-09-23 收口）：首屏 4 个 loader（env / 配音计划 / 混音计划 / 质检配置）
+   * 此前是 fire-and-forget —— 首屏一片空白且没有任何加载提示，用户无法区分
+   * 「正在加载」和「就是没数据」。
+   */
+  const [bootLoading, setBootLoading] = useState(true);
   
   // Step 1: TTS 配音
   const [ttsEnv, setTtsEnv] = useState<any>(null);
@@ -84,10 +90,12 @@ export function AudioTab({ projectKey }: AudioTabProps) {
   };
 
   useEffect(() => {
-    loadEnv();
-    loadTtsPlan();
-    loadMixPlan();
-    loadQcCfg();
+    let cancelled = false;
+    setBootLoading(true);
+    // C4：4 个 loader 各自内部已 catch（Promise.all 不会 reject），只需 finally 收尾
+    Promise.all([loadEnv(), loadTtsPlan(), loadMixPlan(), loadQcCfg()])
+      .finally(() => { if (!cancelled) setBootLoading(false); });
+    return () => { cancelled = true; };
   }, [projectKey]);
 
   // 读取质检配置（音频开关 + 客观层阈值）
@@ -224,6 +232,21 @@ export function AudioTab({ projectKey }: AudioTabProps) {
     { id: 2, label: '音画混音', icon: <Volume2 className="h-4 w-4" /> },
     { id: 3, label: '音频质检', icon: <CheckCircle2 className="h-4 w-4" /> },
   ];
+
+  // 首屏加载态：与真实结构同形（步骤导航 + 卡片），避免高度跳变
+  if (bootLoading) {
+    return (
+      <div className="space-y-6" role="status" aria-live="polite" aria-label={t('common.loading')}>
+        <div className="flex flex-wrap items-center gap-2">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <Skeleton key={i} className="h-10 w-32 rounded-lg" />
+          ))}
+        </div>
+        <Skeleton className="h-48 rounded-lg" />
+        <Skeleton className="h-32 rounded-lg" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

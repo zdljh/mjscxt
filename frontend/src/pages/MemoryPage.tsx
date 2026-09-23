@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useApp } from '@/context/AppContext';
 import { memoryApi, projectsApi } from '@/api/client';
-import { Card, Button, Loading, EmptyState, Badge, ConfirmDialog, Input, Select, Skeleton } from '@/components/ui';
+import { Card, Button, Loading, EmptyState, Badge, ConfirmDialog, Input, Select, Skeleton, ErrorState } from '@/components/ui';
 import { BookOpen, Brain } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 import type { Memory, MemoryType, MemoryStats, PromptLesson, LessonPage, Project } from '@/types';
@@ -50,6 +50,7 @@ export function MemoryPage() {
     total: 0, lessons: 0, successes: 0, insights: 0, promptLessons: 0,
   });
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [insights, setInsights] = useState<string[]>([]);
   const [insightsLoading, setInsightsLoading] = useState(false);
 
@@ -70,6 +71,12 @@ export function MemoryPage() {
   });
   const [lessonOffset, setLessonOffset] = useState(0);
   const [lessonLoading, setLessonLoading] = useState(false);
+  /**
+   * C3（2026-09-23 收口）：教训库加载失败的**真实原因**。
+   * 此前 `.catch` 把失败直接吞成 `lessons: []` → 用户看到的是「暂无质检教训」这句
+   * **业务空态文案**，而下拉/接口其实已经报错 —— 完全误导（既看不到错误也无法重试）。
+   */
+  const [lessonError, setLessonError] = useState('');
   const [lessonStats, setLessonStats] = useState({
     total: 0, by_kind: {} as Record<string, number>, dead_lessons: 0, used_total: 0,
   });
@@ -89,13 +96,30 @@ export function MemoryPage() {
     memoryApi.lessonStats().then(setLessonStats).catch(() => {});
   };
 
+  // C2（2026-09-23 收口）：原实现只有 `.finally` 没有 `.catch` —— memories/stats 任一
+  // 失败会**静默落到空态**（显示「暂无记忆」，用户以为真没数据，且没有重试入口）。
+  // 现捕获错误 → 整页错误态 + 可重试；取数抽成 reloadMain，「重试」才能真的重新取数。
+  const reloadMain = useCallback(async () => {
+    setLoading(true);
+    setLoadError('');
+    try {
+      const [list, d] = await Promise.all([
+        // memoryApi.list() 已统一拆封为 Memory[]，这里不要再读 .memories，
+        // 否则数组被当成信封对象解析，列表恒为空。
+        memoryApi.list(),
+        memoryApi.stats(),
+      ]);
+      setMemories(list);
+      setStats(d);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    Promise.all([
-      // memoryApi.list() 已统一拆封为 Memory[]，这里不要再读 .memories，
-      // 否则数组被当成信封对象解析，列表恒为空。
-      memoryApi.list().then(list => setMemories(list)),
-      memoryApi.stats().then(d => setStats(d)),
-    ]).finally(() => setLoading(false));
+    void reloadMain();
     setInsightsLoading(true);
     memoryApi.insights()
       .then(d => {
@@ -111,7 +135,7 @@ export function MemoryPage() {
       .catch(() => setProjects([]));
 
     loadLessonStats();
-  }, []);
+  }, [reloadMain]);
 
   // 教训库单独拉取：任一筛选条件变化 → 回到第一页全量刷新
   useEffect(() => {
@@ -128,12 +152,15 @@ export function MemoryPage() {
     })
       .then(page => {
         if (cancelled) return;
+        setLessonError('');
         setLessonPage(page);
         setLessons(page.lessons);
         setLessonOffset(page.lessons.length);
       })
-      .catch(() => {
+      .catch((e) => {
         if (cancelled) return;
+        // C3：不再把失败吞成空列表冒充「业务空态」，留下真实原因由界面呈现 + 可重试
+        setLessonError(e instanceof Error ? e.message : String(e));
         setLessonPage({ total: 0, filtered: 0, by_kind: {}, dead_lessons: 0, lessons: [] });
         setLessons([]);
         setLessonOffset(0);
@@ -233,6 +260,19 @@ export function MemoryPage() {
     const label = t(key);
     return label === key ? memTypeOf(mem) : label;
   };
+
+  // 硬失败：memories / stats 一次都没取到 → 整页错误态（绝不用空态冒充「没数据」）
+  if (loadError) {
+    return (
+      <div className="space-y-6 fade-in">
+        <ErrorState
+          title={t('project.loadingFailed')}
+          description={loadError}
+          onRetry={reloadMain}
+        />
+      </div>
+    );
+  }
 
   // 加载态：沿用统计卡 5 列 + 卡片区块的形态，避免整页转圈造成布局跳变
   if (loading) {
@@ -365,7 +405,14 @@ export function MemoryPage() {
           </Button>
         </div>
 
-        {lessons.length === 0 && !lessonLoading ? (
+        {lessonError ? (
+          /* 硬失败：教训库零数据且加载出错 → 区块错误态 + 重试（不再冒充「暂无质检教训」） */
+          <ErrorState
+            title="质检教训加载失败"
+            description={lessonError}
+            onRetry={() => setReloadTick((x) => x + 1)}
+          />
+        ) : lessons.length === 0 && !lessonLoading ? (
           <EmptyState
             icon={<BookOpen className="h-10 w-10" />}
             title="暂无质检教训"

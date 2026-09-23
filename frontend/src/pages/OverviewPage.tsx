@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useApp } from '@/context/AppContext';
-import { projectsApi, novelsApi, tasksApi } from '@/api/client';
-import { Card, EmptyState, Badge, Skeleton } from '@/components/ui';
+import { projectsApi, tasksApi } from '@/api/client';
+import { Card, EmptyState, Badge, Skeleton, ErrorState } from '@/components/ui';
 import { BarChart3, ClipboardList, Clapperboard, FolderOpen, Play, ZoomIn } from '@/components/ui/icons';
 import type { IconProps } from '@/components/ui/icons';
 import type { Project, Task } from '@/types';
@@ -31,13 +31,29 @@ export function OverviewPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
 
-  useEffect(() => {
-    Promise.all([
-      projectsApi.list().then(d => setProjects(d.projects || [])),
-      tasksApi.list().then(d => setTasks(d.items || [])),
-    ]).finally(() => setLoading(false));
+  // C1（2026-09-23 收口）：原实现只有 `.finally` 没有 `.catch` —— 两个接口任一失败会
+  // **静默落到空态**（用户看到「还没有项目 / 暂无任务」，误以为真没数据，且没有重试入口）。
+  // 现捕获错误 → 整页错误态 + 可重试；「重试必须能真正重新取数」，故取数抽成 reload。
+  const reload = useCallback(async () => {
+    setLoading(true);
+    setLoadError('');
+    try {
+      const [p, tk] = await Promise.all([
+        projectsApi.list().then(d => d.projects || []),
+        tasksApi.list().then(d => d.items || []),
+      ]);
+      setProjects(p);
+      setTasks(tk);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => { void reload(); }, [reload]);
 
   const stats = [
     { label: t('analytics.projects'), value: projects.length, icon: FolderOpen, color: 'blue' },
@@ -59,6 +75,18 @@ export function OverviewPage() {
         </div>
         <Skeleton className="h-44 rounded-lg" />
         <Skeleton className="h-44 rounded-lg" />
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="space-y-6 fade-in">
+        <ErrorState
+          title={t('project.loadingFailed')}
+          description={loadError}
+          onRetry={reload}
+        />
       </div>
     );
   }
