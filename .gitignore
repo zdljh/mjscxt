@@ -26,6 +26,10 @@ output/
 # 故明确不入库。若日后确需入库，须改「选择性忽略」：逐目录忽略 output/assets/ 等 +
 # `output/projects/*`（带 /* 而非 /）配 `!output/projects/index.json`，切勿整体 output/。
 temp/
+# 任务/凭证库的**权威路径**是 output/tasks.db（已被上方 `output/` 覆盖，不入库）。
+# 根目录若出现同名文件，是临时的 `sqlite3 tasks.db` 之类命令误建的空壳（无任何代码引用），
+# 一律不入库；排查见 `.workbuddy/memory/FRONTEND_NOTES.md`。
+/tasks.db
 
 # 小说原始文本与解析产物（含版权内容，不入库）
 novels/
