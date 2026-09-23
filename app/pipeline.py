@@ -191,6 +191,37 @@ def normalize_config(raw: dict, default_project_key: str = "") -> dict:
     return cfg
 
 
+def assert_mode_contract(cfg: dict) -> None:
+    """P0-6：「模式 × 后续步骤产物期望」一致性前置断言（纯读配置，不写盘、不发请求）。
+
+    把各步骤分支里隐含的产物契约显式化，让矛盾配置在进入步骤循环前就被拦住，
+    而不是等到视频/成片步骤运行中途才暴露：
+
+    - keyframe 模式尾帧是前置依赖（step_video 会因尾帧缺失抛「请先完成尾帧生成」）：
+      若该集启用了 video，则 keyframe 步骤必须启用（与 normalize_config 对合法模式的
+      强制收敛保持一致，此处兜底未走 normalize_config 的配置路径）；
+      若连 video 都没启用，则该模式本就无意义，提示先关闭或改为整集模式。
+    - episode 模式成片 = 整集视频（step_final 直接 copy2 整集片）：
+      启用成片合成（final）时必须同时启用视频生成（video），否则没有整集片可采。
+
+    断言失败抛 PipelineError（进入步骤循环前调用，属配置错误而非步骤运行时故障，
+    不触发步骤级重试）。
+    """
+    mode = cfg.get("video_mode") or "per_shot"
+    if mode not in ("per_shot", "episode", "keyframe"):
+        raise PipelineError(f"视频生成模式「{mode}」无法识别（仅支持 per_shot/episode/keyframe），请检查托管计划配置")
+    video_on = bool(cfg.get("enable_video"))
+    final_on = bool(cfg.get("enable_final"))
+    if mode == "keyframe":
+        if video_on and not bool(cfg.get("enable_keyframe")):
+            raise PipelineError("关键帧模式要求先生成尾帧，但尾帧步骤被禁用；请启用尾帧生成，或将视频生成模式改为 episode/per_shot")
+        if not video_on:
+            raise PipelineError("关键帧模式本意是逐镜视频，但视频生成步骤被禁用；请启用视频生成，或将视频生成模式改为 episode")
+    elif mode == "episode":
+        if final_on and not video_on:
+            raise PipelineError("整集模式的成片需要整集视频，但视频生成步骤被禁用；请启用视频生成，或关闭成片合成")
+
+
 # ===================== 异常 =====================
 
 
@@ -1322,6 +1353,12 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
     # 用户手动触发的生产（should_stop=None）不受任何影响。
     _cancel_token = cancellation.push(should_stop)
     try:
+        # P0-6：进入步骤循环前先做「模式 × 产物期望」一致性断言（配置矛盾时在这里
+        # fail-loud，不要拖到视频/成片步骤运行中途才暴露）。放在 try 内很关键：
+        # 断言抛 PipelineError 时 finally 仍会释放集级锁（见 _release_episode_lock），
+        # 否则「拿到锁后、配置矛盾」会让该集永久 busy；且异常被下方 except 接住
+        # 转成结构化 result，两个调用方（run-once / 托管）都拿到干净结果而非 500。
+        assert_mode_contract(config)
         for step in STEP_SEQUENCE:
             if should_stop and should_stop():
                 result.update({"status": "cancelled",

@@ -111,6 +111,21 @@ def paths(key: str) -> dict:
     }
 
 
+def is_path_inside_output(path: str) -> bool:
+    """P0-4：路径必须落在「项目输出目录（output/）」内才可信。
+
+    口径与 app.py 的 `_project_or_400` / `_serve_safe` 一致：
+    `abspath` 归一后前缀匹配 `root + os.sep`（Windows 下 `abspath` 两侧同时
+    归一化大小写，直接比较即可）。空路径 / 相对路径越界 / `..` 穿越一律 False。
+    index.json 的 `script_path` / `script_paths` 都该通过这个校验。
+    """
+    if not path or not str(path).strip():
+        return False
+    root = os.path.abspath(PROJECT_OUTPUT_DIR)
+    p = os.path.abspath(str(path))
+    return p.startswith(root + os.sep)
+
+
 def _last_good_bak(path: str) -> str:
     """数据文件「上一份可解析好版本」备份路径：``path + '.bak'``。
 
@@ -298,6 +313,18 @@ def load_index() -> dict:
     projects = data.get("projects")
     if not isinstance(projects, list):
         data["projects"] = []
+    # P0-4：越界剧本路径的只读标记（仅内存旁路字段，不写回 index.json、不清空原值）
+    # —— 下游消费方（如成片合成）按 `script_path_untrusted` 判断是否可信。
+    for rec in data.get("projects") or []:
+        if not isinstance(rec, dict):
+            continue
+        sp = rec.get("script_path")
+        if sp:
+            rec["script_path_untrusted"] = not is_path_inside_output(sp)
+        spls = rec.get("script_paths")
+        if isinstance(spls, list):
+            rec["script_paths_untrusted"] = [p for p in spls
+                                             if not is_path_inside_output(p)]
     return data
 
 
@@ -688,11 +715,20 @@ def script_stats(script_path: str) -> dict:
 
 
 @_locked
-def bind_script(ref: str, script_path: str, stats: dict = None) -> dict | None:
-    """把剧本归属到项目：登记 script_path / 分集清单 / 镜头数与总时长（不移动文件）"""
+def bind_script(ref: str, script_path: str, stats: dict = None) -> dict | None | bool:
+    """把剧本归属到项目：登记 script_path / 分集清单 / 镜头数与总时长（不移动文件）
+
+    P0-4：`script_path` 必须落在项目输出目录内（`is_path_inside_output`），
+    越界（如系统目录 / 项目外路径）**拒写**并 `logger.warning`，返回 `False`
+    让调用方知道被拒（不静默成功）；正常写入仍返回登记后的项目记录。
+    """
     rec = get_project(ref)
     if not rec or not script_path:
         return None
+    if not is_path_inside_output(script_path):
+        logger.warning("拒绝登记越界剧本路径（%s 不在项目输出目录内，项目 %s）：%r",
+                       "P0-4", rec.get("dir_key") or ref, script_path)
+        return False
     existing = list(rec.get("script_paths") or [])
     if script_path not in existing:
         existing.append(script_path)
@@ -1048,8 +1084,8 @@ def migrate_legacy(force: bool = False) -> dict:
         if not rec:
             continue
         st = script_stats(sp)
-        bind_script(rec["id"], sp, st)
-        bound.append({"key": key, "script": sp,
+        if bind_script(rec["id"], sp, st) is not False:
+            bound.append({"key": key, "script": sp,
                       "shot_count": st.get("shot_count"),
                       "episode_duration_sec": st.get("episode_duration_sec")})
 

@@ -4459,7 +4459,12 @@ def api_generate_final():
         return err
     script_path = data.get('script_path', '')
 
-    if not script_path or not os.path.exists(script_path):
+    # P0-4：剧本路径必须先落在项目输出目录内（与 project_store.bind_script 同口径），
+    # 越界（如 C:/Windows/... 或项目外路径）直接拒读，避免被 index.json 里被污染的
+    # 绝对路径拖出目录读走任意文件。
+    if not script_path or not project_store.is_path_inside_output(script_path):
+        return jsonify({"error": "剧本路径必须在项目输出目录内（output/），越界路径已拒读"}), 400
+    if not os.path.exists(script_path):
         return jsonify({"error": "剧本文件不存在"}), 400
 
     try:
@@ -8184,7 +8189,10 @@ def api_continuity_revalidate(novel_id, episode_no):
 # =====================================================================
 
 def _ensure_script_file(script: dict, script_path: str, project_name: str) -> str:
-    if script_path and os.path.isfile(script_path):
+    # P0-4 纵深防御：worker（save_script_inplace 覆盖写盘）只认「项目输出目录内」的既有剧本；
+    # 越界/空路径一律视为未提供，改在 SCRIPT_DIR 内另存，绝不对项目外文件落笔。
+    if script_path and project_store.is_path_inside_output(script_path) \
+            and os.path.isfile(script_path):
         return script_path
     return novel_to_script.save_generated_script(script, SCRIPT_DIR, project_name)
 
@@ -8247,6 +8255,12 @@ def api_analyze_prompts():
     project_name = _safe_project(data.get('project_name')
                                  or (script.get('title') or 'project'))
     script_path = data.get('script_path') or script.get('metadata', {}).get('script_path') or ''
+    # P0-4：这条链路会把分析结果**写回** script_path（_ensure_script_file → save_script_inplace
+    # 覆盖式 json.dump），是「剧本路径越界」的写盘面 —— 与 /api/final/video、_dub_resolve_script、
+    # bind_script 同一校验口径。越界一律 400 拒写（空值仍允许：worker 会在 SCRIPT_DIR 内另存）。
+    if script_path and not project_store.is_path_inside_output(script_path):
+        return jsonify({"success": False,
+                        "error": "剧本路径必须在项目输出目录内（output/），越界路径已拒写"}), 400
     extra = str(data.get('extra_instruction') or '')[:500]
 
     task_id = f"prompts_{project_name}_{int(time.time())}"
@@ -8288,10 +8302,10 @@ def _dub_resolve_script(data: dict) -> dict:
 
     script_path = (data.get("script_path") or "").strip()
     if script_path:
+        # P0-4：与 project_store.bind_script / /api/final/video 同一校验函数
+        if not project_store.is_path_inside_output(script_path):
+            raise TTSError(f"剧本路径必须在项目输出目录内：{os.path.abspath(PROJECT_OUTPUT_DIR)}")
         p = os.path.abspath(script_path)
-        root = os.path.abspath(PROJECT_OUTPUT_DIR)
-        if not p.startswith(root + os.sep):
-            raise TTSError(f"剧本路径必须在项目输出目录内：{root}")
         if not os.path.exists(p):
             raise TTSError(f"剧本文件不存在：{p}")
         with open(p, "r", encoding="utf-8") as f:
@@ -10057,7 +10071,12 @@ def api_autopilot_exceptions():
     for pj in projects:
         for d in pipeline.list_dead_letters(pj):
             if not d.get('resolved'):
-                items.append(d)
+                # P0-4：list_dead_letters 返回的是磁盘 dead_letter.json 里的原始项
+                # （字段只有 episode_no/reason/detail/...，不含 project）——不传
+                # ?project= 时每条无法归属项目、排序键 x.get('project') 形同虚设。
+                # 用**拷贝**补 project（不就地改磁盘读出的对象，避免污染其他调用方），
+                # 让 items.sort 的 project 排序键从此真正生效。
+                items.append({**d, "project": pj})
     items.sort(key=lambda x: (x.get('project') or '', int(x.get('episode_no') or 0)))
     return jsonify({"success": True, "count": len(items), "items": items})
 
