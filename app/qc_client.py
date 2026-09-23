@@ -748,6 +748,43 @@ def load_config(config_path: str) -> dict:
     return _normalize(cfg)
 
 
+def _sync_credentials_db(cfg: dict = None, api_key: str = None, source: str = "qc_config",
+                         clear: bool = False) -> str:
+    """A2（2026-09-23 收口）：把质检端点同步进「AI 凭证单一事实源」（tasks.db 的 qc 模块）。
+
+    为什么要做：读侧（`load_config` / `ai_config.get_module`）自 P0-5 起**优先读 tasks.db**，
+    但质检端点此前只有旧加密库（裸槽 ``qc``）一个写点 —— 实际能工作全靠「DB 无该模块行时
+    回落旧库」这条读侧兜底，DB 并未真正成为单点（`/api/qc/config` 与 `/api/ai/config` 不对称）。
+
+    - `clear=True`：清空 DB 的 qc 模块（「恢复为 AI 设置」必须同步清，否则读侧仍读 DB 旧端点，
+      用户会看到「点了恢复却还是旧接口」）。
+    - 否则按**生效端点**（`resolve_endpoint`，会从加密库补齐密钥）写入；`api_key=None` 表示
+      本次未改密钥 → 库内原值不动。
+
+    返回 "" 表示成功；否则返回错误描述 —— 调用方需**响亮降级**（绝不阻断已完成的落盘）。
+    """
+    try:
+        import ai_credentials_db
+        if clear:
+            ai_credentials_db.clear_credentials("qc")
+            return ""
+        ep = resolve_endpoint(cfg)
+        # 安全阀：端点全空且本次未改密钥 → **不写 DB**。
+        # 否则「只改一个阈值再保存」这种调用方（cfg 里 base_url/model 为空）会把 DB 里
+        # 已有的端点覆盖成空串 —— 清空必须走显式的 clear（clear_config / reset_endpoint）。
+        if not (ep.get("base_url") or ep.get("model") or api_key):
+            return ""
+        ai_credentials_db.set_credentials(
+            "qc", base_url=ep.get("base_url") or "", model=ep.get("model") or "",
+            api_key=api_key, source=source)
+    except Exception as e:  # noqa: BLE001
+        msg = f"{type(e).__name__}: {e}"
+        logger.error("质检端点同步到 AI 凭证库失败（读侧将回落旧加密库，可能出现"
+                     "「保存成功但任务仍用旧值」的漂移，请检查 tasks.db）：%s", msg)
+        return msg
+    return ""
+
+
 def save_config(config_path: str, patch: dict, keep_key_if_blank: bool = True) -> dict:
     # P2-T3：整段「读 load_config → 改 → 原子写」持锁串行化，
     # 防两个线程同时 save 时读改写互相丢更新（唯一临时名只防文件截断，不防逻辑丢更新）。
@@ -757,6 +794,9 @@ def save_config(config_path: str, patch: dict, keep_key_if_blank: bool = True) -
 
 def _save_config_impl(config_path: str, patch: dict, keep_key_if_blank: bool = True) -> dict:
     cfg = load_config(config_path)
+    # A2（2026-09-23）：记录本次是否写入了**新**密钥。None = 未改密钥，
+    # 同步 DB 时保持库内原值（与 /api/ai/config 的 keep 语义一致）。
+    new_key = None
     for k, v in (patch or {}).items():
         if k not in CONFIG_KEYS or k == "updated_at":
             continue
@@ -785,6 +825,7 @@ def _save_config_impl(config_path: str, patch: dict, keep_key_if_blank: bool = T
                     f"请安装 cryptography 后重试，或改用环境变量 "
                     f"{secret_store.ENV_KEY_MAP.get('qc', 'MJSCXT_API_KEY_QC')} 配置密钥。")
             cfg["api_key"] = ""
+            new_key = v
             continue
         if k in ("enabled", "image_enabled", "video_enabled", "image_ref_compare"):
             # ⚠️ 审计 G2：这里原本是 `bool(v)` —— 字符串 "false"/"0"/"no"/"off"/"none"
@@ -822,7 +863,14 @@ def _save_config_impl(config_path: str, patch: dict, keep_key_if_blank: bool = T
     # 「质检开关已开启，但质检接口信息不完整，生成流程将跳过质检」的**误导性警告**
     # （实测：仅提交 {"image_enabled": true} 后 video_qc_active 从 true 掉成 false）。
     # 重新读取一次即可拿到 load_config 注入的密钥，且返回的正是应用真正会用的配置。
-    return load_config(config_path)
+    final = load_config(config_path)
+    # A2（2026-09-23 收口）：写侧与 /api/ai/config 对称地落「AI 凭证单一事实源」（tasks.db）。
+    # 此前质检端点只有旧加密库（裸槽 `qc`）一个写点，而读侧自 P0-5 起 DB 优先 ——
+    # 实际只能靠「DB 无该模块行时回落旧库」兜住，DB 并未真正成为单点。
+    # 这里按**生效端点**同步（resolve_endpoint 会从加密库补齐密钥）；
+    # api_key=None → 库内原密钥不动；失败只响亮降级，绝不阻断已完成的保存。
+    _sync_credentials_db(final, api_key=new_key)
+    return final
 
 
 def load_config_dict(raw: dict) -> dict:
@@ -969,6 +1017,9 @@ def _set_endpoint_impl(config_path: str, base_url: str, api_key: str, model: str
     cfg["endpoint_override"] = {"base_url": ep["base_url"], "api_key": "", "model": ep["model"]}
     cfg["updated_at"] = datetime.now().isoformat(timespec="seconds")
     _atomic_write_json(config_path, cfg)
+    # A2：自动写入的端点同样落 DB 单一事实源（读侧 DB 优先，漏这里会出现
+    # 「自动同步了旧加密库、但任务从 DB 读到旧端点」的分裂）
+    _sync_credentials_db(cfg, api_key=ep["api_key"], source="qc_endpoint_override")
     return cfg
 
 
@@ -989,6 +1040,9 @@ def _reset_endpoint_impl(config_path: str) -> dict:
     cfg["endpoint_override"] = {"base_url": "", "api_key": "", "model": ""}
     cfg["updated_at"] = datetime.now().isoformat(timespec="seconds")
     _atomic_write_json(config_path, cfg)
+    # A2：必须**同步清空** DB 的 qc 模块 —— 否则读侧（DB 优先）仍会读到旧端点，
+    # 用户点了「恢复为 AI 设置」却看不到任何变化（同一根因的镜像面）。
+    _sync_credentials_db(clear=True)
     return cfg
 
 
@@ -1032,8 +1086,11 @@ def clear_config(config_path: str) -> dict:
     cfg = _empty_config()
     cfg["updated_at"] = datetime.now().isoformat(timespec="seconds")
     os.makedirs(os.path.dirname(os.path.abspath(config_path)), exist_ok=True)
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    # D-03 同族收口：此处原为裸 `open(w)+json.dump`（非原子写，崩溃/并发会留半截 json），
+    # 改为与文件内其它落盘一致的原子写。
+    _atomic_write_json(config_path, cfg)
+    # A2：端点被一并重置 → 必须同步清空 DB 的 qc 模块，否则读侧（DB 优先）仍读旧端点。
+    _sync_credentials_db(clear=True)
     return cfg
 
 

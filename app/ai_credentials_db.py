@@ -40,8 +40,19 @@ import secret_store
 logger = logging.getLogger(__name__)
 
 # 项目根目录（定位 output/tasks.db 与加密主密钥 .secret_key）
-_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_DB_PATH = os.path.join(_PROJECT_ROOT, "output", "tasks.db")
+#
+# ⚠️ 支持环境变量覆盖，**默认值与生产行为完全不变**，仅供测试 / CI 做整体隔离：
+#     MJSCXT_CRED_ROOT → 项目根（同时决定加密主密钥 / secrets.enc 的位置）
+#     MJSCXT_CRED_DB   → DB 文件绝对路径（优先级高于 MJSCXT_CRED_ROOT）
+#
+# 为什么必须有：`app.py` 是**模块级初始化**（`import app` 即触发
+# `migrate_from_legacy()` 写 DB、`qc_client.save_config` 也会同步写 DB）。
+# 隔离测试若只重指向 `qc_client._PROJECT_ROOT` / `ai_config._ROOT_DIR` 而漏掉这里，
+# 会把测试用的假凭证写进**用户真实的** output/tasks.db（2026-09-23 已实测踩到：
+# qc 模块被写成 probe.example/v1 + 假钥，事后按真实旧槽值修复）。
+_PROJECT_ROOT = os.path.abspath(
+    os.getenv("MJSCXT_CRED_ROOT") or os.path.join(os.path.dirname(__file__), ".."))
+_DB_PATH = os.getenv("MJSCXT_CRED_DB") or os.path.join(_PROJECT_ROOT, "output", "tasks.db")
 
 # 三个 AI 模块（与 ai_config.MODULES 对齐；qc 即质检视觉模型）
 MODULES = ("text", "qc", "chat")
@@ -68,8 +79,8 @@ def _conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA journal_mode=WAL")
-    except Exception:  # noqa: BLE001
-        logger.debug("ai_credentials 开启 WAL 失败（忽略）")
+    except Exception as e:  # noqa: BLE001
+        logger.debug("ai_credentials 开启 WAL 失败（忽略）：%s", e)
     return conn
 
 
@@ -271,32 +282,51 @@ def clear_credentials(module: str = None) -> dict:
     return {"cleared": module or list(MODULES)}
 
 
-def has_credentials() -> bool:
-    """DB 里是否已有任一模块凭证（迁移判据用）。"""
+def modules_with_key() -> set:
+    """返回 DB 中「已配置密钥」的模块集合（``api_key_cipher`` 非空）。
+
+    A1（2026-09-23 收口）：迁移必须按**模块**判空，而不是「DB 里有没有任何一行」。
+    旧口径下 DB 只要存在任意一行（例如只有 `text`），`qc` / `chat` 的旧槽密钥就
+    永远补不进来，迁移后新写入旧槽的密钥同样进不了 DB。
+
+    ⚠️ 判据刻意取「密钥」而非「任一字段非空」：`base_url` / `model` 可能已被本模块
+    的其它写点（如 qc 端点同步）填上，若据此判「已有值」就会把**密钥**永久挡在门外。
+    """
     _ensure_schema()
     with _LOCK:
         conn = _conn()
         try:
-            n = conn.execute(
-                "SELECT COUNT(*) FROM ai_credentials WHERE (base_url<>'' OR model<>'' "
-                "OR api_key_cipher<>'')").fetchone()[0]
+            rows = conn.execute(
+                "SELECT module FROM ai_credentials WHERE api_key_cipher<>''").fetchall()
         finally:
             conn.close()
-    return n > 0
+    return {r["module"] for r in rows}
+
+
+def has_credentials() -> bool:
+    """DB 里是否已有**任一**模块密钥。
+
+    ⚠️ 迁移判据已改为按模块判空（见 :func:`modules_with_key`）；本函数只保留给
+    「是否配置过任何 AI 凭证」这类**粗粒度**判断，**不要**再拿它当迁移的整体闸门。
+    """
+    return bool(modules_with_key())
 
 
 # ===================== 一次性迁移（旧 secrets.enc 双槽 → DB） =====================
 
 def migrate_from_legacy(force: bool = False) -> dict:
     """把旧 secret_store 的 ai.text / ai.qc / ai.chat / qc 槽 + ai_config.json 非密钥字段
-    迁入 DB。仅在 DB 空（或 force）且旧源有值时逐模块写入，幂等。
+    迁入 DB。**按模块**判空：只补齐 DB 中尚无值的模块，幂等。
 
     返回 {migrated: [模块], skipped: [原因]}。任何单模块迁移失败不影响其它模块。
     """
     migrated, skipped = [], []
-    if has_credentials() and not force:
-        return {"migrated": migrated, "skipped": skipped,
-                "note": "DB 已有凭证，跳过迁移（force=True 可强制覆盖）"}
+    # A1（2026-09-23 收口）：判据从「DB 里有没有**任何**一行」改为「**该模块**是否已有值」。
+    # 旧写法 `if has_credentials() and not force: return` 会在 DB 只要有任何一行（如仅 text）
+    # 时整体早退 —— qc / chat 的旧槽密钥永远补不进来；而迁移之后新写入旧槽的密钥同样进不了
+    # DB，「DB 单点」名存实亡（09-23 实测：secrets.enc 里 ai.qc 是真钥、tasks.db 只有 text 一行）。
+    # force=True 仍为全量强制覆盖。
+    existing = set() if force else modules_with_key()
 
     store = secret_store.get_store(_PROJECT_ROOT)
     # 模块 → 旧槽优先级：`ai.*` 槽是前端「AI 设置」保存的完整值；裸槽（`qc` 等）
@@ -331,6 +361,9 @@ def migrate_from_legacy(force: bool = False) -> dict:
         return fallback
 
     for m in MODULES:
+        if m in existing:
+            skipped.append(f"{m}: DB 已有值，跳过（force=True 可强制覆盖）")
+            continue
         try:
             legacy_key, legacy_slot = _trusted_key(slot_map[m])
             if legacy_slot and len(legacy_key) < _KEY_TRUST_MIN_LEN:
@@ -348,8 +381,8 @@ def migrate_from_legacy(force: bool = False) -> dict:
                 legacy_base = (ep.get("base_url") or "").strip()
                 legacy_model = (ep.get("model") or "").strip()
                 legacy_re = (ep.get("reasoning_effort") or "").strip()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                logger.debug("迁移 %s：读取旧 ai_config 非密钥字段失败（忽略）：%s", m, e)
             if not (legacy_key or legacy_base or legacy_model):
                 skipped.append(f"{m}: 旧源无值")
                 continue

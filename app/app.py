@@ -5221,6 +5221,71 @@ def api_ai_config_get():
     return jsonify({"success": True, "config": _ai_config_view()})
 
 
+def _ai_credentials_verify(module: str, base_url: str = "", model: str = "",
+                           new_key: str = "", cleared: bool = False) -> tuple:
+    """保存/清空后**读回核对**：任务实际读的那份凭证（tasks.db）是否等于本次提交的值。
+
+    职责分工：写侧由 `ai_config.save_module` / `clear_module` 内部镜像闭合
+    （任何调用方都自动同步，见 `ai_config._mirror_credentials_db` 的长注释）。
+    这里**只做独立核对**，因为最危险的故障恰恰是「写没成功但接口照样返回 200」——
+    磁盘满 / tasks.db 不可写 / env 覆盖，都会让「前端配的」与「任务实际用的」分叉，
+    而页面上完全看不出来（用户会以为配置已生效，直到任务 401 或跑出别的账号的结果）。
+
+    返回 `(note, error)`：`error` 非空 → 响应必须响亮告警。
+    """
+    try:
+        import ai_credentials_db
+    except Exception as e:  # noqa: BLE001
+        return "", f"{type(e).__name__}: {e}"
+
+    if cleared:
+        # module=None = 整体重置 → 三个模块都要核对（`get_credentials(None)` 会抛 ValueError）
+        mods = [module] if module else list(AI_MODULES)
+        stuck = []
+        for m in mods:
+            try:
+                if ai_credentials_db.get_credentials(m).get("api_key"):
+                    stuck.append(m)
+            except Exception as e:  # noqa: BLE001
+                return "", f"{type(e).__name__}: {e}"
+        if stuck:
+            return "", (f"AI 凭证库（tasks.db）中 {'、'.join(stuck)} 模块的密钥未被清空 → "
+                        "任务仍会读到旧凭证，请检查 output/tasks.db 可写性后重试")
+        return "，AI 凭证库已同步清空", ""
+
+    try:
+        db = ai_credentials_db.get_credentials(module)
+    except Exception as e:  # noqa: BLE001
+        return "", f"{type(e).__name__}: {e}"
+
+    # env 覆盖是**设计内**的最高优先级（运维部署用），但它同样意味着「页面填的不作数」，
+    # 必须明说而不是报成错误。
+    try:
+        import secret_store
+        env_name = secret_store.ENV_KEY_MAP.get(f"ai.{module}") or ""
+    except Exception:  # noqa: BLE001
+        env_name = ""
+    env_key = ((os.getenv(env_name) or "").strip() if env_name else "")
+    if env_key and env_key != new_key:
+        return (f"注意：{module} 模块密钥被环境变量 {env_name} 覆盖，"
+                "任务实际使用的是该环境变量的值，不是页面上填写的值", "")
+
+    def _norm(u):
+        return (u or "").strip().rstrip("/").lower()
+
+    diff = []
+    if _norm(db.get("base_url")) != _norm(base_url):
+        diff.append("base_url")
+    if (db.get("model") or "") != (model or ""):
+        diff.append("model")
+    if new_key and (db.get("api_key") or "") != new_key:
+        diff.append("api_key")
+    if diff:
+        return "", (f"AI 凭证库（tasks.db）与本次保存不一致（{'、'.join(diff)}）→ "
+                    "任务可能仍用旧凭证。请检查 output/tasks.db 是否可写、磁盘是否已满后重试")
+    return "，已写入 AI 凭证库（任务下次调用立即生效，无需重启）", ""
+
+
 def _save_ai_module(data: dict):
     """保存单个 AI 模块的核心实现（/api/ai/config 与兼容路由 /api/llm/config 共用）"""
     module = (data.get("module") or "").strip()
@@ -5246,30 +5311,21 @@ def _save_ai_module(data: dict):
     cfg = ai_config.save_module(AI_CONFIG_PATH, module, base_url=base_url, model=model,
                                 api_key=None if keep else key, legacy_path=LLM_CONFIG_PATH,
                                 reasoning_effort=(reasoning_effort if has_reasoning_effort else None))
-    # ⭐ 单一事实源：AI 凭证统一写 tasks.db 的 ai_credentials 表（权威读源，见
-    # ai_config.get_module / qc_client.load_config 均改读 DB）。json + secrets.enc 仍写
-    # （向后兼容 + 首次冷启动兜底），但**任务实际读 DB**，DB 才是「前端配的=任务用的」。
-    # keep=True（留空/脱敏回显）时传 api_key=None（DB 内原密钥不动）；否则传新密钥。
-    db_note, db_error = "", ""
-    try:
-        import ai_credentials_db
-        ai_credentials_db.set_credentials(
-            module, base_url=base_url, model=model,
-            api_key=None if keep else key,
-            reasoning_effort=(reasoning_effort if has_reasoning_effort else None),
-            source="ui")
-        db_note = "，已写入 AI 凭证库（任务下次调用立即生效，无需重启）"
-    except Exception as e:  # noqa: BLE001
-        # DB 写失败不打断主保存（json/加密库已落），但**响亮**告警——此时任务读侧会
-        # 回落旧口径，可能出现「保存成功但任务用旧值」的漂移，必须让用户看到。
-        db_error = f"{type(e).__name__}: {e}"
-        app.logger.error(f"AI 凭证库写入失败（任务可能仍用旧凭证，请重试或检查 tasks.db）：{db_error}")
+    # ⭐ 凭证单一事实源由 `ai_config.save_module` **内部**镜像闭合（json + 加密库 + tasks.db
+    # 一次写完，见其 `_mirror_credentials_db` 长注释）—— 这里不再重复写库，只**读回核对**，
+    # 避免同一份值有两个写点（将来谁改一处就会漂移）。核对能抓到「接口返回成功但写没落地」
+    # 以及 env 覆盖这类页面上看不出来的分叉。
+    db_note, db_error = _ai_credentials_verify(
+        module, base_url=base_url, model=model,
+        new_key="" if keep else key)
+    if db_error:
+        app.logger.error("AI 凭证库核对不通过（module=%s）：%s", module, db_error)
     # 配置刚变 → 清掉前置自检的端点探测缓存，避免出现「明明确认改好了，开跑还是被拦」
     try:
         import ai_selfcheck
         ai_selfcheck.reset_probe_cache()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        app.logger.debug("重置 AI 前置自检探测缓存失败（忽略）：%s", e)
     view = ai_config.module_public_view(ai_config.get_module(cfg, module))
     return jsonify({
         "success": True,
@@ -5282,7 +5338,7 @@ def _save_ai_module(data: dict):
         "message": (f"{AI_MODULE_LABEL.get(module, module)}配置已保存"
                     + ("（api_key 保持不变）" if keep else "")
                     + db_note
-                    + (f"；但 AI 凭证库写入失败：{db_error}" if db_error else "")),
+                    + (f"；但凭证核对未通过：{db_error}" if db_error else "")),
     })
 
 
@@ -5304,20 +5360,15 @@ def api_ai_config_clear():
     module = (data.get("module") or "").strip() or None
     if module and module not in AI_MODULES:
         return jsonify({"success": False, "error": f"unknown module：{module}"}), 400
-    # A-22（M5）：clear_module 有落盘副作用（清空模块配置 + 同步清密钥库），必须保留调用；
-    # 返回值此前被赋给 cfg 却从未使用（响应改由下方 _ai_config_view() 重新取整份视图），故去掉赋值。
+    # A-22（M5）：clear_module 有落盘副作用（清空模块配置 + 同步清密钥库 + **镜像清 DB**），
+    # 必须保留调用；返回值此前被赋给 cfg 却从未使用（响应改由下方 _ai_config_view() 重新取整份视图），故去掉赋值。
     ai_config.clear_module(AI_CONFIG_PATH, module=module, legacy_path=LLM_CONFIG_PATH)
-    # ⭐ 与「保存」对称：清空某模块（或整体重置）时，同步清空 AI 凭证库（tasks.db）里
-    # 对应行，避免出现「AI 设置显示已清空，任务却仍读到 DB 旧凭证」。清 qc/整体重置时
-    # 也重置质检自己的 endpoint_override（旧 json 口径，保留向后兼容）。
-    db_clear_note, db_clear_error = "", ""
-    try:
-        import ai_credentials_db
-        ai_credentials_db.clear_credentials(module)
-        db_clear_note = "，AI 凭证库已同步清空"
-    except Exception as e:  # noqa: BLE001
-        db_clear_error = f"{type(e).__name__}: {e}"
-        app.logger.error(f"AI 凭证库清空失败（任务可能仍用旧凭证）：{db_clear_error}")
+    # ⭐ 与「保存」对称：清库同样由 `ai_config.clear_module` 内部闭合（`_mirror_credentials_db(
+    # clear=True)`），这里只**读回核对** —— 避免「AI 设置显示已清空，任务却仍读到 DB 旧凭证」
+    # 这种页面上看不出来的漂移（清库失败会让任务继续用旧密钥跑）。
+    db_clear_note, db_clear_error = _ai_credentials_verify(module, cleared=True)
+    if db_clear_error:
+        app.logger.error("AI 凭证库清空核对不通过（module=%s）：%s", module, db_clear_error)
     reset_note, reset_error = "", ""
     if module in (None, "qc"):
         try:
@@ -5397,8 +5448,8 @@ def api_ai_test():
     try:
         import ai_selfcheck
         ai_selfcheck.reset_probe_cache()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        app.logger.debug("重置 AI 前置自检探测缓存失败（忽略）：%s", e)
 
     cfg = ai_config.load_config(AI_CONFIG_PATH, LLM_CONFIG_PATH)
     saved = ai_config.get_module(cfg, module)

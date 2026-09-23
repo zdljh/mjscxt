@@ -49,6 +49,56 @@ def _store():
 
 
 # =====================================================================
+# 凭证单一事实源闭合（2026-09-23）
+# ---------------------------------------------------------------------
+# 读侧（本模块 `get_module`、`qc_client.load_config`、`ai_selfcheck`）自 P0-5 起
+# **一律 DB 优先**（`output/tasks.db` · ai_credentials 表），所以**任务真正用的是 DB 里那把钥**。
+# 但写侧此前是「谁调用谁负责同步」：只有 `/api/ai/module`(`/api/ai/config`) 与
+# `/api/ai/config/clear` 在**路由里**顺手补了一次 `ai_credentials_db` 写入；而
+# `/api/ai/settings`（兼容旧接口，`llm_api_key` 字段）与 `/api/llm/config/clear`
+# 直接调本模块的 `save_module` / `clear_module` —— 这两个函数**只写 json + 旧加密库**，
+# 于是「前端配的新密钥」永远进不了 DB：
+#     · 任务读 DB 旧值 → 继续用旧密钥（表现：改了 key 但任务照旧 401 / 用错账号）；
+#     · 加密库已是新值 → 万一 DB 被清空又「回落」出新旧两套，排查时自相矛盾。
+# 这就是用户报的「前端配置的 ai 密钥与后端实际任务调用的不一致」。
+#
+# 修法：把镜像**下沉到写函数内部**，任何调用方（含将来新增的路由）都自动闭合。
+# 失败必须**响亮降级**且**绝不抛**：json / 加密库已经落盘成功，不能因为镜像失败
+# 让保存接口 500 或把用户的改动回滚（此时读侧会回落旧口径 → 必须让用户看见告警）。
+# =====================================================================
+
+def _mirror_credentials_db(module: str, base_url: str = "", model: str = "",
+                           api_key: str = None, reasoning_effort: str = None,
+                           clear: bool = False) -> str:
+    """把「AI 设置」的改动镜像进 AI 凭证单一事实源（tasks.db · ai_credentials）。
+
+    参数语义与 `ai_credentials_db.set_credentials` 对齐：
+    - `api_key=None` = 库内原密钥不动（对应「留空 / 脱敏回显 = 不改密钥」）；`""` = 清空。
+    - `reasoning_effort=None` = 不动；`""` = 清空；其余为已归一化档位。
+    - `clear=True` 时忽略其余参数，直接清空该模块（`module=None` 清全部）。
+
+    返回 "" = 成功；否则返回错误描述（供调用方/守卫判读）。**绝不抛异常**。
+    """
+    try:
+        import ai_credentials_db
+        if clear:
+            ai_credentials_db.clear_credentials(module)
+            return ""
+        ai_credentials_db.set_credentials(
+            module, base_url=base_url or "", model=model or "",
+            api_key=api_key, reasoning_effort=reasoning_effort, source="ai_config")
+        return ""
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+        logger.error(
+            "AI 凭证库（tasks.db）镜像失败：模块 %s 的改动只落了 json / 旧加密库，"
+            "而任务读侧是 DB 优先 → 会出现「前端配的 ≠ 任务实际用的」漂移"
+            "（任务会继续用 DB 里的旧凭证）。请检查 output/tasks.db 是否可写、磁盘是否已满。"
+            "原因：%s", module, err)
+        return err
+
+
+# =====================================================================
 # 并发保护（审计 S8）
 # ---------------------------------------------------------------------
 # `save_module` / `clear_module` / `load_config` 的首次迁移都是
@@ -348,6 +398,14 @@ def save_module(config_path: str, module: str, base_url: str = None, model: str 
     ep["updated_at"] = _now()
     cfg["updated_at"] = _now()
     _write_file(config_path, cfg)
+    # ⭐ 凭证单一事实源闭合：DB（tasks.db）才是任务实际读的那份（读侧 DB 优先）。
+    #    只写 json / 加密库 = 「前端配了但任务不用」，故镜像下沉到本函数（见上方长注释）。
+    #    keep 语义：留空或含 "*" 的脱敏回显 → 传 None，DB 内原密钥不动。
+    #    档位只在本次**显式传参**时镜像（None = 不改动），避免把「未提交档位」误当「清空档位」。
+    _mirror_credentials_db(
+        module, base_url=ep["base_url"], model=ep["model"],
+        api_key=None if (not key or "*" in key) else key,
+        reasoning_effort=(ep.get("reasoning_effort") if reasoning_effort is not None else None))
     return cfg
 
 
@@ -380,6 +438,10 @@ def clear_module(config_path: str, module: str = None, legacy_path: str = None) 
             _store().clear_api_key(f"ai.{m}")
     cfg["updated_at"] = _now()
     _write_file(config_path, cfg)
+    # ⭐ 与保存对称：DB 是任务实际读的那份，只清 json / 加密库 = 「AI 设置显示已清空、
+    #    任务却仍拿 DB 旧凭证跑」。清空同样下沉到本函数，任何调用方都自动闭合
+    #    （`/api/llm/config/clear` 此前就漏了这一步）。module=None → 清全部三模块。
+    _mirror_credentials_db(module, clear=True)
     return cfg
 
 
