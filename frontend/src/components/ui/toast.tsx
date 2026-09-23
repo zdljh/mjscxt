@@ -58,23 +58,23 @@ const DEFAULT_DURATION: Record<ToastType, number> = {
 
 const STYLES: Record<ToastType, { wrap: string; icon: string; glyph: string }> = {
   success: {
-    wrap: 'border-green-200 bg-green-50 text-green-900',
-    icon: 'bg-green-500',
+    wrap: 'border-success/30 bg-success-subtle text-success-strong',
+    icon: 'bg-success',
     glyph: 'M5 13l4 4L19 7',
   },
   error: {
-    wrap: 'border-red-200 bg-red-50 text-red-900',
-    icon: 'bg-red-500',
+    wrap: 'border-danger/30 bg-danger-subtle text-danger-strong',
+    icon: 'bg-danger',
     glyph: 'M6 18L18 6M6 6l12 12',
   },
   warning: {
-    wrap: 'border-amber-200 bg-amber-50 text-amber-900',
-    icon: 'bg-amber-500',
+    wrap: 'border-warning/30 bg-warning-subtle text-warning-strong',
+    icon: 'bg-warning',
     glyph: 'M12 9v4m0 4h.01M12 3l9 16H3l9-16z',
   },
   info: {
-    wrap: 'border-blue-200 bg-blue-50 text-blue-900',
-    icon: 'bg-blue-500',
+    wrap: 'border-info/30 bg-info-subtle text-info-strong',
+    icon: 'bg-brand',
     glyph: 'M12 8h.01M11 12h1v5h1',
   },
 };
@@ -138,7 +138,7 @@ export function ToastProvider({ children, max = 5 }: { children: React.ReactNode
 
   const host = (
     <div
-      className="fixed top-4 right-4 z-[200] flex flex-col gap-2 w-[min(92vw,22rem)] pointer-events-none"
+      className="fixed top-4 right-4 z-toast flex flex-col gap-2 w-[min(92vw,22rem)] pointer-events-none"
       role="region"
       aria-label="通知"
     >
@@ -157,20 +157,24 @@ export function ToastProvider({ children, max = 5 }: { children: React.ReactNode
               </svg>
             </span>
             <p className="flex-1 text-sm leading-5 break-words">{t.message}</p>
+            {/* 保留原生：行内链接按钮跟随 toast 的 currentColor 变色，
+                Button 的 link 变体会强制 text-brand，在 warning/danger 底上失去对比度 */}
             {t.action && (
               <button
                 type="button"
                 onClick={() => { t.action?.onClick(); dismiss(t.id); }}
-                className="shrink-0 text-sm font-medium underline underline-offset-2 opacity-80 hover:opacity-100"
+                className="shrink-0 text-sm font-medium underline underline-offset-2 opacity-80 hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
               >
                 {t.action.label}
               </button>
             )}
+            {/* 保留原生：图标关闭键靠 h-4/w-4 + tiny padding 贴合 20px 行高，
+                Button 的最小尺寸是 h-8 + px-3，会把 toast 撑高 */}
             <button
               type="button"
               onClick={() => dismiss(t.id)}
               aria-label="关闭通知"
-              className="shrink-0 opacity-50 hover:opacity-100"
+              className="shrink-0 opacity-50 hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
             >
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />

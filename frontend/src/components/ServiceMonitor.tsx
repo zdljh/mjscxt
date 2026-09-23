@@ -46,19 +46,21 @@ export function ServiceMonitor() {
   if (status.flask === 'ok') return null;
 
   return (
-    <div className="fixed bottom-4 right-4 z-50">
+    <div className="fixed bottom-4 right-4 z-dropdown">
       <div className={`flex items-center gap-2 px-4 py-2 rounded-lg shadow-lg ${
         status.flask === 'error' 
-          ? 'bg-red-500 text-white' 
-          : 'bg-yellow-500 text-white'
+          ? 'bg-danger text-white' 
+          : 'bg-warning text-white'
       }`}>
-        <span className="w-2 h-2 rounded-full bg-white animate-pulse"></span>
+        <span className="w-2 h-2 rounded-full bg-surface animate-pulse"></span>
         <span className="text-sm font-medium">
           {status.flask === 'error' ? '服务连接失败' : '检查中...'}
         </span>
+        {/* 保留原生：该按钮叠在 danger/warning 实色横幅上，
+            ghost 变体的 text-ink-2 / hover:bg-surface-2 会在实色底上失去对比度 */}
         <button
           onClick={() => window.location.reload()}
-          className="ml-2 px-2 py-1 bg-white/20 rounded hover:bg-white/30 transition-colors"
+          className="ml-2 px-2 py-1 bg-surface/20 rounded hover:bg-surface/30 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
         >
           重试
         </button>

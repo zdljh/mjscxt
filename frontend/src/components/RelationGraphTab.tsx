@@ -4,16 +4,16 @@ import type { Relation } from '@/types';
 
 // 关系类型颜色映射
 const RELATION_COLORS: Record<string, string> = {
-  family: '#ef4444', // 红色 - 亲属
-  friend: '#22c55e', // 绿色 - 朋友
-  enemy: '#6b7280', // 灰色 - 敌人
-  romance: '#ec4899', // 粉色 - 恋人
-  mentor: '#f59e0b', // 橙色 - 师徒
-  colleague: '#3b82f6', // 蓝色 - 同事
-  rival: '#8b5cf6', // 紫色 - 对手
-  ally: '#14b8a6', // 青色 - 盟友
-  stranger: '#9ca3af', // 浅灰 - 陌生人
-  master: '#dc2626', // 深红 - 主仆
+  family: 'rgb(var(--danger))', // 红色 - 亲属
+  friend: 'rgb(var(--success))', // 绿色 - 朋友
+  enemy: 'rgb(var(--state-pending))', // 灰色 - 敌人
+  romance: 'rgb(var(--viz-rose))', // 粉色 - 恋人
+  mentor: 'rgb(var(--viz-amber))', // 橙色 - 师徒
+  colleague: 'rgb(var(--info))', // 蓝色 - 同事
+  rival: 'rgb(var(--viz-violet))', // 紫色 - 对手
+  ally: 'rgb(var(--viz-teal))', // 青色 - 盟友
+  stranger: 'rgb(var(--text-tertiary))', // 浅灰 - 陌生人
+  master: 'rgb(var(--state-failed-strong))', // 深红 - 主仆
 };
 
 const RELATION_LABELS: Record<string, string> = {
@@ -231,14 +231,14 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="text-gray-500">加载中...</div>
+        <div className="text-ink-2">加载中...</div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400">
+      <div className="p-4 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong">
         {error}
       </div>
     );
@@ -248,17 +248,17 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
     return (
       <div className="text-center py-12">
         <div className="text-5xl mb-4">🔗</div>
-        <h4 className="text-lg font-medium text-gray-900 mb-1">暂无关系数据</h4>
-        <p className="text-sm text-gray-500">请先在角色管理中创建角色关系</p>
+        <h4 className="text-lg font-medium text-ink-1 mb-1">暂无关系数据</h4>
+        <p className="text-sm text-ink-2">请先在角色管理中创建角色关系</p>
       </div>
     );
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h3 className="text-lg font-semibold text-gray-900">角色关系图谱</h3>
-        <div className="flex gap-2 text-xs">
+    <div className="space-y-4 min-w-0">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-lg font-semibold text-ink-1">角色关系图谱</h3>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
           {Object.entries(RELATION_LABELS).slice(0, 5).map(([type, label]) => (
             <span key={type} className="flex items-center gap-1">
               <span className="w-3 h-3 rounded-full" style={{ backgroundColor: RELATION_COLORS[type] }}></span>
@@ -270,8 +270,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
 
       <div
         ref={containerRef}
-        className="relative bg-white rounded-lg border border-gray-200 overflow-hidden"
-        style={{ height: '500px' }}
+        className="relative bg-surface rounded-lg border border-line overflow-auto h-[360px] sm:h-[500px]"
       >
         <svg
           ref={svgRef}
@@ -286,7 +285,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
           {/* 背景网格 */}
           <defs>
             <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-              <path d="M 40 0 L 0 0 0 40" fill="none" stroke="currentColor" strokeWidth="0.5" className="text-gray-100" />
+              <path d="M 40 0 L 0 0 0 40" fill="none" stroke="currentColor" strokeWidth="0.5" className="text-line" />
             </pattern>
           </defs>
           <rect width="100%" height="100%" fill="url(#grid)" />
@@ -297,7 +296,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
             const target = nodes.find(n => n.id === edge.target);
             if (!source || !target) return null;
 
-            const color = RELATION_COLORS[edge.type] || '#9ca3af';
+            const color = RELATION_COLORS[edge.type] || 'rgb(var(--text-tertiary))';
             const width = Math.abs(edge.strength) * 3 + 1;
             const isHovered = hoveredEdge === `${edge.source}-${edge.target}`;
 
@@ -323,7 +322,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
                       y={(source.y + target.y) / 2 - 12}
                       width="60"
                       height="20"
-                      fill="rgba(0,0,0,0.7)"
+                      fill="rgb(var(--text-primary) / 0.7)"
                       rx="4"
                     />
                     <text
@@ -358,7 +357,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
                   <circle
                     r={35}
                     fill="none"
-                    stroke="#6366f1"
+                    stroke="rgb(var(--brand))"
                     strokeWidth="3"
                     opacity="0.5"
                   />
@@ -367,8 +366,8 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
                 {/* 节点圆形 */}
                 <circle
                   r={25}
-                  fill={isSelected ? '#6366f1' : 'white'}
-                  stroke={isSelected ? '#4f46e5' : '#d1d5db'}
+                  fill={isSelected ? 'rgb(var(--brand))' : 'rgb(var(--bg-surface))'}
+                  stroke={isSelected ? 'rgb(var(--brand-hover))' : 'rgb(var(--border-strong))'}
                   strokeWidth="2"
                   className="transition-all duration-200"
                 />
@@ -377,7 +376,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
                 <text
                   textAnchor="middle"
                   dominantBaseline="middle"
-                  fill={isSelected ? 'white' : '#374151'}
+                  fill={isSelected ? 'rgb(var(--bg-surface))' : 'rgb(var(--text-primary))'}
                   fontSize="14"
                   fontWeight="bold"
                 >
@@ -388,7 +387,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
                 <text
                   y={40}
                   textAnchor="middle"
-                  fill="#374151"
+                  fill="rgb(var(--text-primary))"
                   fontSize="11"
                   className=""
                 >
@@ -400,7 +399,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
                   <text
                     y={52}
                     textAnchor="middle"
-                    fill="#9ca3af"
+                    fill="rgb(var(--text-tertiary))"
                     fontSize="9"
                   >
                     {node.role}
@@ -413,24 +412,24 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
 
         {/* 节点详情面板 */}
         {selectedNode && (
-          <div className="absolute top-4 right-4 w-64 bg-white rounded-lg shadow-lg border border-gray-200 p-4">
+          <div className="absolute top-4 right-4 w-64 bg-surface rounded-lg shadow-lg border border-line p-4">
             <div className="flex items-start justify-between mb-3">
               <div>
-                <h4 className="font-semibold text-gray-900">{selectedNode.name}</h4>
+                <h4 className="font-semibold text-ink-1">{selectedNode.name}</h4>
                 {selectedNode.role && (
-                  <p className="text-xs text-gray-500">{selectedNode.role}</p>
+                  <p className="text-xs text-ink-2">{selectedNode.role}</p>
                 )}
               </div>
               <button
                 onClick={() => setSelectedNode(null)}
-                className="text-gray-400 hover:text-gray-600"
+                className="text-ink-3 hover:text-ink-2"
               >
                 ✕
               </button>
             </div>
             
             <div className="space-y-2">
-              <p className="text-xs text-gray-600">
+              <p className="text-xs text-ink-2">
                 关系数: {edges.filter(e => e.source === selectedNode.id || e.target === selectedNode.id).length}
               </p>
               
@@ -451,10 +450,10 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
                       >
                         <span
                           className="w-2 h-2 rounded-full shrink-0"
-                          style={{ backgroundColor: RELATION_COLORS[edge.type] || '#9ca3af' }}
+                          style={{ backgroundColor: RELATION_COLORS[edge.type] || 'rgb(var(--text-tertiary))' }}
                         ></span>
-                        <span className="text-gray-700">{otherNode.name}</span>
-                        <span className="text-gray-400 ml-auto">
+                        <span className="text-ink-2">{otherNode.name}</span>
+                        <span className="text-ink-3 ml-auto">
                           {RELATION_LABELS[edge.type] || edge.type}
                         </span>
                       </div>
@@ -467,7 +466,7 @@ export function RelationGraphTab({ projectKey }: RelationGraphTabProps) {
       </div>
 
       {/* 操作提示 */}
-      <div className="flex items-center justify-between text-xs text-gray-500">
+      <div className="flex flex-wrap items-center justify-between gap-1 text-xs text-ink-2">
         <span>💡 拖拽节点调整布局 · 点击节点查看详情</span>
         <span>共 {nodes.length} 个角色 · {edges.length} 条关系</span>
       </div>

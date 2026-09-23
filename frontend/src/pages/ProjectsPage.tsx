@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '@/context/AppContext';
 import { projectsApi, novelsApi } from '@/api/client';
-import { Button, Loading, Modal, Badge, ConfirmDialog } from '@/components/ui';
+import { Button, Input, Loading, Modal, Badge, ConfirmDialog, Select } from '@/components/ui';
 import type { Project, Novel } from '@/types';
 
 type NovelSource = 'upload' | 'existing';
@@ -222,8 +222,8 @@ export function ProjectsPage() {
     <div className="space-y-6 fade-in">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold text-gray-900">{t('project.title')}</h2>
-          <p className="text-sm text-gray-500 mt-1">{t('project.chooseOrUpload')}</p>
+          <h2 className="text-2xl font-bold text-ink-1">{t('project.title')}</h2>
+          <p className="text-sm text-ink-2 mt-1">{t('project.chooseOrUpload')}</p>
         </div>
         <Button onClick={openModal}>
           <span className="mr-2">+</span>
@@ -232,7 +232,7 @@ export function ProjectsPage() {
       </div>
 
       {loadError && (
-        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-500 text-sm">
+        <div className="p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong text-sm">
           {t('project.loadingFailed')}: {loadError}
         </div>
       )}
@@ -240,8 +240,8 @@ export function ProjectsPage() {
       {projects.length === 0 ? (
         <div className="text-center py-12">
           <div className="text-4xl mb-4">📁</div>
-          <h3 className="text-lg font-medium text-gray-900 mb-2">{t('project.noProjects')}</h3>
-          <p className="text-sm text-gray-500 mb-4">{t('project.noProjectsHint')}</p>
+          <h3 className="text-lg font-medium text-ink-1 mb-2">{t('project.noProjects')}</h3>
+          <p className="text-sm text-ink-2 mb-4">{t('project.noProjectsHint')}</p>
           <Button onClick={openModal} className="mt-2">
             {t('project.createNew')}
           </Button>
@@ -251,47 +251,47 @@ export function ProjectsPage() {
           {projects.map((proj) => (
             <div
               key={proj.id}
-              className="group bg-white rounded-xl border border-gray-200 p-4 hover:shadow-lg transition-shadow"
+              className="group bg-surface rounded-xl border border-line p-4 hover:shadow-lg transition-shadow"
             >
               <div
                 className="cursor-pointer"
                 onClick={() => { window.location.hash = `/?p=${encodeURIComponent(proj.dir_key || proj.id)}`; }}
               >
-                <div className="aspect-video bg-gradient-to-br from-blue-100 to-purple-100 rounded-lg mb-4 flex items-center justify-center group-hover:scale-105 transition-transform">
+                <div className="aspect-video bg-surface-2 rounded-lg mb-4 flex items-center justify-center group-hover:scale-105 transition-transform">
                   <span className="text-4xl">🎬</span>
                 </div>
-                <h3 className="font-semibold text-gray-900 mb-1">{proj.name}</h3>
-                <p className="text-sm text-gray-500 mb-3">
+                <h3 className="font-semibold text-ink-1 mb-1">{proj.name}</h3>
+                <p className="text-sm text-ink-2 mb-3">
                   风格: {proj.config?.style || '—'}
                 </p>
                 <div className="flex items-center justify-between text-sm">
                   <Badge variant="info">{proj.episode_count} {t('ep.suffix')}</Badge>
-                  <span className="text-gray-400">{new Date(proj.created_at).toLocaleDateString()}</span>
+                  <span className="text-ink-3">{new Date(proj.created_at).toLocaleDateString()}</span>
                 </div>
               </div>
 
               {/* 操作按钮 */}
-              <div className="flex gap-2 mt-3 pt-3 border-t border-gray-100">
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
+              <div className="flex gap-2 mt-3 pt-3 border-t border-line">
+                {/* 编辑/删除按钮与可点击卡片是兄弟节点（不嵌套），无需再 stopPropagation */}
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="flex-1"
+                  onClick={() => {
                     setEditingProject(proj);
                     setEditName(proj.name);
                     setEditError('');
                   }}
-                  className="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
                 >
                   ✏️ 编辑
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    openDeleteModal(proj);
-                  }}
-                  className="px-3 py-1.5 text-xs font-medium rounded-lg border border-red-300 text-red-600 hover:bg-red-50 transition-colors"
+                </Button>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={() => openDeleteModal(proj)}
                 >
                   🗑️ 删除
-                </button>
+                </Button>
               </div>
             </div>
           ))}
@@ -304,24 +304,22 @@ export function ProjectsPage() {
         <div className="space-y-4">
           {/* 项目名称 */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              {t('project.name')}
-            </label>
-            <input
-              type="text"
+            <Input
               value={projectName}
-              onChange={(e) => setProjectName(e.target.value)}
+              onChange={setProjectName}
+              label={t('project.name')}
               placeholder={t('project.namePlaceholder')}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
           </div>
 
           {/* 小说来源切换 */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-ink-1 mb-1">
               {t('project.novelSource')}
             </label>
-            <div className="inline-flex rounded-lg border border-gray-300 overflow-hidden">
+            <div className="inline-flex rounded-lg border border-line-strong overflow-hidden">
+              {/* 保留原生：分段开关（选中态共用同一元素），
+                  Button 的 rounded-md/h-8 会破坏「无间隙拼成一个圆角容器」的形状 */}
               {([
                 { id: 'upload' as NovelSource, label: t('project.sourceUpload') },
                 { id: 'existing' as NovelSource, label: t('project.sourceExisting') },
@@ -330,10 +328,10 @@ export function ProjectsPage() {
                   key={opt.id}
                   type="button"
                   onClick={() => { setSource(opt.id); setFormError(''); }}
-                  className={`px-4 py-2 text-sm font-medium transition-colors ${
+                  className={`px-4 py-2 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas ${
                     source === opt.id
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-transparent text-gray-600 hover:bg-gray-100'
+                      ? 'bg-brand text-white'
+                      : 'bg-transparent text-ink-2 hover:bg-surface-2'
                   }`}
                 >
                   {opt.label}
@@ -352,15 +350,15 @@ export function ProjectsPage() {
                 onClick={() => fileInputRef.current?.click()}
                 className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-colors ${
                   dragOver
-                    ? 'border-blue-500 bg-blue-50'
-                    : 'border-gray-300 hover:border-blue-400'
+                    ? 'border-brand bg-info-subtle'
+                    : 'border-line-strong hover:border-brand'
                 }`}
               >
                 <div className="text-3xl mb-2">📄</div>
-                <p className="text-sm font-medium text-gray-900">
+                <p className="text-sm font-medium text-ink-1">
                   {pendingFile ? pendingFile.name : t('upload.uploadText')}
                 </p>
-                <p className="text-xs text-gray-500 mt-1">
+                <p className="text-xs text-ink-2 mt-1">
                   {pendingFile
                     ? `${(pendingFile.size / 1024).toFixed(0)} KB`
                     : t('upload.fileHint')}
@@ -380,28 +378,27 @@ export function ProjectsPage() {
           {source === 'existing' && (
             <div>
               {novels.length === 0 ? (
-                <p className="text-sm text-gray-500 py-3">
+                <p className="text-sm text-ink-2 py-3">
                   {t('project.noNovelsYet')}
                 </p>
               ) : (
-                <select
+                <Select
                   value={selectedNovel}
-                  onChange={(e) => { setSelectedNovel(e.target.value); setFormError(''); }}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                >
-                  <option value="">{t('project.selectNovelPlaceholder')}</option>
-                  {novels.map((n) => (
-                    <option key={n.novel_id} value={n.novel_id}>
-                      {n.name}（{n.chapter_count} 章）
-                    </option>
-                  ))}
-                </select>
+                  onChange={(v) => { setSelectedNovel(v); setFormError(''); }}
+                  options={[
+                    { value: '', label: t('project.selectNovelPlaceholder') },
+                    ...novels.map((n) => ({
+                      value: n.novel_id,
+                      label: `${n.name}（${n.chapter_count} 章）`,
+                    })),
+                  ]}
+                />
               )}
             </div>
           )}
 
           {formError && (
-            <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-500 text-sm break-words">
+            <div className="p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong text-sm break-words">
               {formError}
             </div>
           )}
@@ -423,18 +420,10 @@ export function ProjectsPage() {
           closeOnBackdrop={false} closeOnEsc={false} preventClose={savingEdit}>
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                项目名称
-              </label>
-              <input
-                type="text"
-                value={editName}
-                onChange={(e) => setEditName(e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
+              <Input value={editName} onChange={setEditName} label="项目名称" />
             </div>
             {editError && (
-              <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-500 text-sm">
+              <div className="p-3 bg-danger/10 border border-danger/30 rounded-lg text-danger-strong text-sm">
                 {editError}
               </div>
             )}
@@ -461,14 +450,14 @@ export function ProjectsPage() {
         confirmText="确认删除"
         message={
           <>
-            <p className="text-gray-700">
+            <p className="text-ink-1">
               确定要删除项目《<span className="font-semibold">{deletingProject?.name}</span>》吗？
             </p>
-            <p className="mt-2 text-sm text-red-500">
+            <p className="mt-2 text-sm text-danger-strong">
               ⚠️ 此操作会将项目及其所有产物移入回收站，可从磁盘还原。
             </p>
             {deleteError && (
-              <p className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-500">
+              <p className="mt-3 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger-strong">
                 {deleteError}
               </p>
             )}

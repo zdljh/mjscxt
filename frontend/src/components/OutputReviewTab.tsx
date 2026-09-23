@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useApp } from '@/context/AppContext';
 import { exportApi, autopilotApi } from '@/api/client';
-import { Button, Loading } from '@/components/ui';
+import { Button, Loading, Textarea } from '@/components/ui';
 import { useToast } from '@/components/ui/toast';
 import type { Deliverable } from '@/types';
 
@@ -101,12 +101,12 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
 
   const statusBadge = (d: Deliverable) => {
     if (d.review === 'accepted') {
-      return { text: t('deliver.accepted'), cls: 'bg-green-100 text-green-700' };
+      return { text: t('deliver.accepted'), cls: 'bg-success-subtle text-success-strong' };
     }
     if (d.review === 'rejected') {
-      return { text: t('deliver.rejected'), cls: 'bg-red-100 text-red-700' };
+      return { text: t('deliver.rejected'), cls: 'bg-danger-subtle text-danger-strong' };
     }
-    return { text: t('deliver.pending'), cls: 'bg-amber-100 text-amber-700' };
+    return { text: t('deliver.pending'), cls: 'bg-warning-subtle text-warning-strong' };
   };
 
   const triggerDownload = (url: string, filename?: string) => {
@@ -128,8 +128,8 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
       {/* 页面标题 */}
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-lg font-semibold text-gray-900">输出与验收</h3>
-          <p className="text-sm text-gray-500 mt-0.5">
+          <h3 className="text-lg font-semibold text-ink-1">输出与验收</h3>
+          <p className="text-sm text-ink-2 mt-0.5">
             导出工程文件 & 验收成片
           </p>
         </div>
@@ -139,13 +139,13 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
       </div>
 
       {error && (
-        <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+        <div className="p-3 bg-danger-subtle border border-danger/30 rounded-lg text-sm text-danger-strong">
           {error}
         </div>
       )}
       {/* 区域 1: 导出配置 */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <h4 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+      <div className="bg-surface rounded-lg border border-line p-4">
+        <h4 className="font-semibold text-ink-1 mb-3 flex items-center gap-2">
           <span>🎬</span> 导出配置
         </h4>
         
@@ -156,23 +156,23 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
         </div>
 
         {notice && (
-          <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-green-600 text-sm mb-4">
+          <div className="p-3 bg-success/10 border border-success/30 rounded-lg text-success-strong text-sm mb-4">
             {notice}
           </div>
         )}
 
         {/* 成片下载 */}
         <div className="mb-4">
-          <h5 className="text-sm font-medium text-gray-700 mb-2">
+          <h5 className="text-sm font-medium text-ink-1 mb-2">
             📁 成片清单 · {finals.length}
           </h5>
           {finals.length > 0 ? (
             <div className="space-y-2">
               {finals.map((item, idx) => (
-                <div key={idx} className="flex items-center justify-between p-2 bg-gray-50 rounded">
+                <div key={idx} className="flex items-center justify-between p-2 bg-surface-2 rounded">
                   <div className="min-w-0">
-                    <p className="font-medium text-gray-900 truncate text-sm">{item.name}</p>
-                    {item.size && <p className="text-xs text-gray-500">{sizeText(item.size)}</p>}
+                    <p className="font-medium text-ink-1 truncate text-sm">{item.name}</p>
+                    {item.size && <p className="text-xs text-ink-2">{sizeText(item.size)}</p>}
                   </div>
                   <div className="flex gap-2 shrink-0">
                     <Button size="sm" variant="secondary" onClick={() => window.open(item.url, '_blank')}>
@@ -186,22 +186,22 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
               ))}
             </div>
           ) : (
-            <p className="text-sm text-gray-500 py-2">暂无成片，请先完成视频生成</p>
+            <p className="text-sm text-ink-2 py-2">暂无成片，请先完成视频生成</p>
           )}
         </div>
 
         {/* 剪辑工程文件 */}
         <div>
-          <h5 className="text-sm font-medium text-gray-700 mb-2">
+          <h5 className="text-sm font-medium text-ink-1 mb-2">
             🎞️ 工程文件 · {exportFiles.filter(f => f.exists).length}
           </h5>
           {exportFiles.filter(f => f.exists).length > 0 ? (
             <div className="space-y-2">
               {exportFiles.filter(f => f.exists).map((file: any, idx: number) => (
-                <div key={idx} className="flex items-center justify-between p-2 bg-gray-50 rounded">
+                <div key={idx} className="flex items-center justify-between p-2 bg-surface-2 rounded">
                   <div className="min-w-0">
-                    <p className="font-medium text-gray-900 truncate text-sm">{file.filename}</p>
-                    <p className="text-xs text-gray-500">{String(file.format || '').toUpperCase()}</p>
+                    <p className="font-medium text-ink-1 truncate text-sm">{file.filename}</p>
+                    <p className="text-xs text-ink-2">{String(file.format || '').toUpperCase()}</p>
                   </div>
                   <Button
                     size="sm"
@@ -214,16 +214,16 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
               ))}
             </div>
           ) : (
-            <p className="text-sm text-gray-500 py-2">暂无导出文件</p>
+            <p className="text-sm text-ink-2 py-2">暂无导出文件</p>
           )}
         </div>
       </div>
 
       {/* 区域 2: 成片验收 */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <h4 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+      <div className="bg-surface rounded-lg border border-line p-4">
+        <h4 className="font-semibold text-ink-1 mb-3 flex items-center gap-2">
           <span>📦</span> 成片验收
-          <span className="ml-auto text-xs font-normal text-gray-500">
+          <span className="ml-auto text-xs font-normal text-ink-2">
             待验收: {pending} / 共 {deliverables.length} 集
           </span>
         </h4>
@@ -231,8 +231,8 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
         {deliverables.length === 0 ? (
           <div className="text-center py-8">
             <div className="text-4xl mb-3">📦</div>
-            <p className="text-sm text-gray-500">暂无成片，请先运行自动生产</p>
-            <p className="text-xs text-indigo-500 mt-2">
+            <p className="text-sm text-ink-2">暂无成片，请先运行自动生产</p>
+            <p className="text-xs text-brand mt-2">
               请通过右侧「AI总控」下达生产指令，AI会先与您沟通生产风格
             </p>
           </div>
@@ -245,26 +245,26 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
               return (
                 <div
                   key={`${d.project}-${d.episode_no}`}
-                  className="border border-gray-200 rounded-lg p-3"
+                  className="border border-line rounded-lg p-3"
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-semibold text-gray-900">
+                        <span className="font-semibold text-ink-1">
                           第 {d.episode_no} 集
                         </span>
                         {d.meta?.title && (
-                          <span className="text-sm text-gray-500">{d.meta.title}</span>
+                          <span className="text-sm text-ink-2">{d.meta.title}</span>
                         )}
                         <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${b.cls}`}>{b.text}</span>
                         {d.exists === false && (
-                          <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700">
+                          <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-danger-subtle text-danger-strong">
                             文件缺失
                           </span>
                         )}
                         {d.meta?.stale && (
                           <span
-                            className="px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-700"
+                            className="px-2 py-0.5 rounded-full text-xs font-medium bg-warning-subtle text-warning-strong"
                             title={d.meta.stale.reason || '成片已过期'}
                           >
                             成片已过期
@@ -272,21 +272,21 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
                         )}
                         {d.meta?.incomplete_shots && (
                           <span
-                            className="px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700"
+                            className="px-2 py-0.5 rounded-full text-xs font-medium bg-warning-subtle text-warning-strong"
                             title={d.meta?.warning || '镜头数不齐，成片可能不完整'}
                           >
                             可能不完整 {d.meta?.shots_ready ?? '?'}/{d.meta?.shots_total ?? '?'}
                           </span>
                         )}
                       </div>
-                      <p className="text-xs text-gray-500 mt-1">
+                      <p className="text-xs text-ink-2 mt-1">
                         {d.filename} · {sizeText(d.size)}
                         {typeof d.meta?.duration_sec === 'number' && d.meta.duration_sec > 0 && (
                           <span> · {d.meta.duration_sec.toFixed(1)}s</span>
                         )}
                       </p>
                       {d.meta?.stale && (
-                        <p className="text-xs text-orange-600 mt-1">
+                        <p className="text-xs text-warning-strong mt-1">
                           {d.meta.stale.reason || '同集镜头已重做'}
                           {d.meta.stale.detail?.shot_id != null && (
                             <span>（涉及镜头 #{d.meta.stale.detail.shot_id}）</span>
@@ -295,12 +295,12 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
                         </p>
                       )}
                       {d.meta?.incomplete_shots && d.meta?.warning && (
-                        <p className="text-xs text-amber-600 mt-1">
+                        <p className="text-xs text-warning-strong mt-1">
                           {d.meta.warning}
                         </p>
                       )}
                       {d.review === 'rejected' && d.review_note && (
-                        <p className="text-xs text-gray-600 mt-1">
+                        <p className="text-xs text-ink-2 mt-1">
                           打回原因: {d.review_note}
                         </p>
                       )}
@@ -318,7 +318,7 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
                           </Button>
                           <a
                             href={`${d.url}?download=1`}
-                            className="inline-flex items-center px-3 py-1.5 text-sm rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
+                            className="inline-flex items-center px-3 py-1.5 text-sm rounded-lg border border-line-strong text-ink-1 hover:bg-surface-2 transition-colors"
                           >
                             下载
                           </a>
@@ -350,16 +350,13 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
                   )}
 
                   {rejecting === d.episode_no && (
-                    <div className="mt-3 pt-3 border-t border-gray-200 space-y-2">
-                      <label className="block text-xs text-gray-600">
-                        打回原因
-                      </label>
-                      <textarea
+                    <div className="mt-3 pt-3 border-t border-line space-y-2">
+                      <Textarea
                         value={reason}
-                        onChange={(e) => setReason(e.target.value)}
+                        onChange={setReason}
+                        label="打回原因"
                         rows={2}
                         placeholder="请输入打回原因..."
-                        className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg bg-white text-gray-900"
                       />
                       <div className="flex gap-2">
                         <Button size="sm" onClick={() => review(d.episode_no, 'rejected', reason)} disabled={!canReview}>

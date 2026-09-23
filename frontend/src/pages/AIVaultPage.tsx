@@ -387,12 +387,12 @@ export function AIVaultPage() {
 
         <div className="flex justify-end pt-2">
           <Button
-          variant="brand"
+            variant="brand"
             onClick={handleSysSave}
             loading={sysSaving}
           >
             保存水印设置
-              </Button>
+          </Button>
         </div>
       </Card>
 
@@ -422,9 +422,9 @@ export function AIVaultPage() {
                 <div className="flex items-center gap-2">
                   <Badge variant={isConfigured ? 'success' : 'default'}>
                     {isConfigured ? '已配置' : '未配置'}
-                      </Badge>
+                  </Badge>
                   <button
-                  type="button"
+                    type="button"
                     onClick={() => handleClear(moduleKey)}
                     className="rounded-md p-2 text-ink-3 transition-colors hover:bg-surface-2 hover:text-danger focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2"
                     title="清空配置"
@@ -476,11 +476,11 @@ export function AIVaultPage() {
                     value={state.reasoning_effort}
                     onChange={v => updateField(moduleKey, 'reasoning_effort', v)}
                     options={reOptions.map(opt => ({
-                  value: opt,
-                    label: REASONING_EFFORT_LABELS[opt] || opt,
-                      }))}
-                        />
-                      <p className="text-xs text-ink-3 mt-1">
+                      value: opt,
+                      label: REASONING_EFFORT_LABELS[opt] || opt,
+                    }))}
+                  />
+                  <p className="text-xs text-ink-3 mt-1">
                     仅「思考不可关闭」的模型需要设置（如 GLM-5.3-Flash，它没有关闭思考的开关，
                     只能调档）。留空 = 不注入该参数、由服务端取默认档；
                     <span className="text-warning-strong">
@@ -494,21 +494,21 @@ export function AIVaultPage() {
               {/* Action Buttons */}
               <div className="flex items-center gap-3 pt-2">
                 <Button
-                variant="secondary"
+                  variant="secondary"
                   onClick={() => handleTest(moduleKey)}
                   loading={testing === moduleKey}
                   disabled={!state.base_url || !state.model}
                 >
                   测试连接
-                    </Button>
-                      <Button
-                      variant="brand"
+                </Button>
+                <Button
+                  variant="brand"
                   onClick={() => handleSave(moduleKey)}
                   loading={saving === moduleKey}
                   disabled={!state.base_url || !state.model}
                 >
                   保存配置
-                    </Button>
+                </Button>
               </div>
 
               {/* Test Result */}

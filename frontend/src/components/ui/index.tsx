@@ -18,25 +18,25 @@ const FOCUS_RING = 'focus:outline-none focus-visible:ring-2 focus-visible:ring-b
 
 /** 表单控件基线：36px 高、10px 圆角、聚焦转品牌色 */
 const FIELD_BASE =
-'w-full rounded-md border bg-surface px-3 text-base text-ink-1 transition-colors placeholder:text-ink-3 ' +
-'disabled:cursor-not-allowed disabled:opacity-50';
+  'w-full rounded-md border bg-surface px-3 text-base text-ink-1 transition-colors placeholder:text-ink-3 ' +
+  'disabled:cursor-not-allowed disabled:opacity-50';
 
 const FIELD_OK = 'border-line hover:border-line-strong focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/25';
 const FIELD_ERR = 'border-danger focus:border-danger focus:outline-none focus:ring-2 focus:ring-danger/25';
 
 function FieldLabel({ label, children }: { label?: string; children: React.ReactNode }) {
-if (!label) return <>{children}</>;
-return (
-<label className="block">
-<span className="mb-1 block text-sm font-medium text-ink-2">{label}</span>
-{children}
-</label>
-);
+  if (!label) return <>{children}</>;
+  return (
+    <label className="block">
+      <span className="mb-1 block text-sm font-medium text-ink-2">{label}</span>
+      {children}
+    </label>
+  );
 }
 
 function FieldError({ error }: { error?: string }) {
-if (!error) return null;
-return <p className="mt-1 text-xs text-danger-strong">{error}</p>;
+  if (!error) return null;
+  return <p className="mt-1 text-xs text-danger-strong">{error}</p>;
 }
 
 // ===================== 基础反馈 =====================
@@ -49,10 +49,10 @@ export function Loading({ size = 'md', label }: { size?: 'sm' | 'md' | 'lg'; lab
       {label && <span className="text-sm text-ink-2">{label}</span>}
     </div>
   );
-  }
-  
-  /** 骨架屏：数据区块加载态占位，避免「白屏 → 内容」的跳变 */
-  export function Skeleton({ className = '' }: { className?: string }) {
+}
+
+/** 骨架屏：数据区块加载态占位，避免「白屏 → 内容」的跳变 */
+export function Skeleton({ className = '' }: { className?: string }) {
   return <div className={`animate-skeleton rounded-md bg-surface-2 ${className}`} aria-hidden="true" />;
 }
 
@@ -71,47 +71,47 @@ export function EmptyState({
   return (
     <div className="flex flex-col items-center justify-center py-12 text-center">
       {icon && (
-      <div className="mb-4 text-ink-3 [&>svg]:h-10 [&>svg]:w-10" aria-hidden="true">
-      {/* 历史调用点传的是 emoji 字符串；新代码请直接传 Lucide/SVG 节点 */}
-      {typeof icon === 'string' ? <span className="text-4xl leading-none">{icon}</span> : icon}
-      </div>
+        <div className="mb-4 text-ink-3 [&>svg]:h-10 [&>svg]:w-10" aria-hidden="true">
+          {/* 历史调用点传的是 emoji 字符串；新代码请直接传 Lucide/SVG 节点 */}
+          {typeof icon === 'string' ? <span className="text-4xl leading-none">{icon}</span> : icon}
+        </div>
       )}
       <h3 className="mb-2 text-lg font-medium text-ink-1">{title}</h3>
       {description && <p className="max-w-md text-sm text-ink-2">{description}</p>}
       {action && <div className="mt-5">{action}</div>}
-      </div>
-      );
-      }
-      
-      /** 错误态：给出错误码 + 原因 + 重试，而不是一句「加载失败」 */
-      export function ErrorState({
-      title = '加载失败',
-      description,
-      code,
-      onRetry,
-      }: {
-      title?: string;
-      description?: React.ReactNode;
-      code?: string;
-      onRetry?: () => void;
-      }) {
-      return (
-      <div className="flex flex-col items-center justify-center gap-3 py-12 text-center" role="alert">
+    </div>
+  );
+}
+
+/** 错误态：给出错误码 + 原因 + 重试，而不是一句「加载失败」 */
+export function ErrorState({
+  title = '加载失败',
+  description,
+  code,
+  onRetry,
+}: {
+  title?: string;
+  description?: React.ReactNode;
+  code?: string;
+  onRetry?: () => void;
+}) {
+  return (
+    <div className="flex flex-col items-center justify-center gap-3 py-12 text-center" role="alert">
       <svg className="h-10 w-10 text-danger" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
-      <circle cx="12" cy="12" r="9" strokeWidth="1.6" />
-      <path strokeLinecap="round" strokeWidth="1.8" d="M12 7.5v5.5M12 16.2v.6" />
+        <circle cx="12" cy="12" r="9" strokeWidth="1.6" />
+        <path strokeLinecap="round" strokeWidth="1.8" d="M12 7.5v5.5M12 16.2v.6" />
       </svg>
       <h3 className="text-base font-medium text-ink-1">{title}</h3>
       {description && <p className="max-w-md text-sm text-ink-2">{description}</p>}
       {code && <code className="rounded-sm bg-surface-2 px-2 py-0.5 text-xs text-ink-3">{code}</code>}
       {onRetry && (
-      <button
-      type="button"
-      onClick={onRetry}
-      className={`mt-1 inline-flex h-9 items-center rounded-md border border-line bg-surface px-4 text-sm font-medium text-ink-1 transition-colors hover:bg-surface-2 ${FOCUS_RING}`}
-      >
-      重试
-      </button>
+        <button
+          type="button"
+          onClick={onRetry}
+          className={`mt-1 inline-flex h-9 items-center rounded-md border border-line bg-surface px-4 text-sm font-medium text-ink-1 transition-colors hover:bg-surface-2 ${FOCUS_RING}`}
+        >
+          重试
+        </button>
       )}
     </div>
   );
@@ -130,70 +130,70 @@ export function Badge({ children, variant = 'default' }: { children: React.React
       {children}
     </span>
   );
-  }
-  
-  export type ProductionStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'attention';
-  
-  const STATUS_STYLE: Record<ProductionStatus, string> = {
+}
+
+export type ProductionStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'attention';
+
+const STATUS_STYLE: Record<ProductionStatus, string> = {
   pending: 'bg-state-pending-subtle text-state-pending-strong',
   running: 'bg-state-running-subtle text-state-running-strong',
   done: 'bg-state-done-subtle text-state-done-strong',
   failed: 'bg-state-failed-subtle text-state-failed-strong',
   skipped: 'border border-dashed border-state-skipped bg-transparent text-state-skipped-strong',
   attention: 'bg-state-attention-subtle text-state-attention-strong',
-  };
-  
-  const STATUS_LABEL: Record<ProductionStatus, string> = {
+};
+
+const STATUS_LABEL: Record<ProductionStatus, string> = {
   pending: '待办',
   running: '进行中',
   done: '已完成',
   failed: '失败',
   skipped: '已跳过',
   attention: '需人工',
-  };
-  
-  /**
-  * 生产状态徽标 —— 本项目最核心的状态表达（方案 §6.6）。
-  * 漫剧生产链路有 pending/running/done/failed/skipped/attention 六种状态，
-  * 此前全靠文字叙述，扫一眼看不出全局进度。
-  */
-  export function StateBadge({
+};
+
+/**
+ * 生产状态徽标 —— 本项目最核心的状态表达（方案 §6.6）。
+ * 漫剧生产链路有 pending/running/done/failed/skipped/attention 六种状态，
+ * 此前全靠文字叙述，扫一眼看不出全局进度。
+ */
+export function StateBadge({
   status,
   label,
   onClick,
   className = '',
-  }: {
+}: {
   status: ProductionStatus;
   label?: string;
   /** failed 可点击直接跳失败定位；传了 onClick 就渲染成 button */
   onClick?: () => void;
   className?: string;
-  }) {
+}) {
   const base = 'inline-flex h-[22px] items-center gap-1.5 rounded-full px-2 text-xs font-medium';
   const body = (
-  <>
-  {status === 'running' && (
-  <span className="h-1.5 w-1.5 animate-pulse-dot rounded-full bg-state-running" aria-hidden="true" />
-  )}
-  {status === 'attention' && (
-  <svg className="h-3 w-3" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-  <path d="M12 3.6 22 20.4H2L12 3.6Z" />
-  </svg>
-  )}
-  {label ?? STATUS_LABEL[status]}
-  </>
+    <>
+      {status === 'running' && (
+        <span className="h-1.5 w-1.5 animate-pulse-dot rounded-full bg-state-running" aria-hidden="true" />
+      )}
+      {status === 'attention' && (
+        <svg className="h-3 w-3" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M12 3.6 22 20.4H2L12 3.6Z" />
+        </svg>
+      )}
+      {label ?? STATUS_LABEL[status]}
+    </>
   );
-  
+
   if (onClick) {
-  return (
-  <button
-  type="button"
-  onClick={onClick}
-  className={`${base} ${STATUS_STYLE[status]} transition-opacity hover:opacity-80 ${FOCUS_RING} ${className}`}
-  >
-  {body}
-  </button>
-  );
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className={`${base} ${STATUS_STYLE[status]} transition-opacity hover:opacity-80 ${FOCUS_RING} ${className}`}
+      >
+        {body}
+      </button>
+    );
   }
   return <span className={`${base} ${STATUS_STYLE[status]} ${className}`}>{body}</span>;
 }
@@ -334,9 +334,9 @@ export function Input({
   return (
     <FieldLabel label={label}>
       <>
-      {input}
-    <FieldError error={error} />
-    </>
+        {input}
+        <FieldError error={error} />
+      </>
     </FieldLabel>
   );
 }
@@ -350,6 +350,7 @@ export function Textarea({
   label,
   mono = false,
   error,
+  resize = true,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -359,6 +360,9 @@ export function Textarea({
   label?: string;
   mono?: boolean;
   error?: string;
+  /** ⚠️ 必须走 prop 而不是 className 覆盖：resize-y 与 resize-none 同属性，
+      谁生效取决于 Tailwind 产出顺序，靠 className 压不住 */
+  resize?: boolean;
 }) {
   const area = (
     <textarea
@@ -367,46 +371,46 @@ export function Textarea({
       rows={rows}
       placeholder={placeholder}
       aria-invalid={error ? true : undefined}
-      className={`${FIELD_BASE} resize-y py-2 ${error ? FIELD_ERR : FIELD_OK} ${mono ? 'font-mono text-sm' : ''} ${className}`}
+      className={`${FIELD_BASE} ${resize ? 'resize-y' : 'resize-none'} py-2 ${error ? FIELD_ERR : FIELD_OK} ${mono ? 'font-mono text-sm' : ''} ${className}`}
     />
   );
   return (
     <FieldLabel label={label}>
       <>
-      {area}
-    <FieldError error={error} />
-    </>
+        {area}
+        <FieldError error={error} />
+      </>
     </FieldLabel>
   );
-  }
-  
-  /** 原生 <select> 此前 6 处各自手写样式，这里统一出口 */
-  export function Select({
+}
+
+/** 原生 <select> 此前 6 处各自手写样式，这里统一出口 */
+export function Select({
   value,
   onChange,
   options,
   className = '',
   disabled = false,
   label,
-  }: {
+}: {
   value: string;
   onChange: (v: string) => void;
   options: { value: string; label: string }[];
   className?: string;
   disabled?: boolean;
   label?: string;
-  }) {
+}) {
   const select = (
-  <select
-  value={value}
-  onChange={(e) => onChange(e.target.value)}
-  disabled={disabled}
-  className={`${FIELD_BASE} h-9 cursor-pointer ${FIELD_OK} ${className}`}
-  >
-  {options.map((o) => (
-  <option key={o.value} value={o.value}>{o.label}</option>
-  ))}
-  </select>
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      disabled={disabled}
+      className={`${FIELD_BASE} h-9 cursor-pointer ${FIELD_OK} ${className}`}
+    >
+      {options.map((o) => (
+        <option key={o.value} value={o.value}>{o.label}</option>
+      ))}
+    </select>
   );
   return <FieldLabel label={label}>{select}</FieldLabel>;
 }
@@ -439,7 +443,7 @@ export type ModalSize = keyof typeof MODAL_SIZES;
  * - footer 操作区；入场动画
  *
  * 2026-09-23：层级由写死 z-[100] 收敛为 z-modal（方案 §5.3 六档规范）；
- * 遮罩 / 容器 / 描边全部改引用 token，与工作台北美的自建弹层合并为唯一实现。
+ * 遮罩 / 容器 / 描边全部改引用 token，与工作台自建弹层合并为唯一实现。
  */
 export function Modal({
   isOpen,

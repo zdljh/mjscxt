@@ -121,7 +121,7 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
           {/* Stats Bar —— 窄屏折成两行，避免 4 列挤压成一竖条（方案 P1-8） */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             {[
-              { label: '角色', count: assets?.counts?.characters || 0, color: 'text-indigo-400' },
+              { label: '角色', count: assets?.counts?.characters || 0, color: 'text-brand' },
               { label: '物品', count: assets?.counts?.items || 0, color: 'text-green-400' },
               { label: '场景', count: assets?.counts?.scenes || 0, color: 'text-yellow-400' },
               { label: '分镜', count: assets?.counts?.storyboards || 0, color: 'text-blue-400' },
@@ -153,32 +153,32 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
 
           {/* Tab Content */}
           <div className="min-h-[400px]">
-        {activeTab === 'overview' && (
-          <OverviewTab
-            assets={assets}
-            projectKey={projectKey}
-            novelId={project.novel_id}
-            onRefreshAssets={reloadAssets}
-          />
-        )}
-        {activeTab === 'storyboard' && (
-          <StoryboardHubTab projectKey={projectKey} />
-        )}
-        {activeTab === 'qc' && (
-          <QcTab projectKey={projectKey} />
-        )}
-        {activeTab === 'audio' && (
-          <AudioTab projectKey={projectKey} />
-        )}
-        {activeTab === 'output' && (
-          <OutputReviewTab projectKey={projectKey} assets={assets} />
-        )}
-        {activeTab === 'upscale' && (
-          <UpscaleTab projectKey={projectKey} />
-        )}
-        {activeTab === 'relation' && (
-          <RelationGraphTab projectKey={projectKey} />
-        )}
+            {activeTab === 'overview' && (
+              <OverviewTab
+                assets={assets}
+                projectKey={projectKey}
+                novelId={project.novel_id}
+                onRefreshAssets={reloadAssets}
+              />
+            )}
+            {activeTab === 'storyboard' && (
+              <StoryboardHubTab projectKey={projectKey} />
+            )}
+            {activeTab === 'qc' && (
+              <QcTab projectKey={projectKey} />
+            )}
+            {activeTab === 'audio' && (
+              <AudioTab projectKey={projectKey} />
+            )}
+            {activeTab === 'output' && (
+              <OutputReviewTab projectKey={projectKey} assets={assets} />
+            )}
+            {activeTab === 'upscale' && (
+              <UpscaleTab projectKey={projectKey} />
+            )}
+            {activeTab === 'relation' && (
+              <RelationGraphTab projectKey={projectKey} />
+            )}
           </div>
         </div>
 
@@ -189,9 +189,9 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
           <button
             onClick={() => setChatOpen(true)}
             title="展开 AI总控"
-            className="sticky top-0 shrink-0 w-11 h-[calc(100vh-7rem)] min-h-[420px] flex flex-col items-center gap-3 py-4 rounded-xl border border-gray-200 bg-white text-gray-500 hover:text-indigo-600 hover:border-indigo-400 transition-colors"
+            className="sticky top-0 shrink-0 w-11 h-[calc(100vh-7rem)] min-h-[420px] flex flex-col items-center gap-3 py-4 rounded-xl border border-gray-200 bg-white text-gray-500 hover:text-brand hover:border-brand transition-colors"
           >
-            <span className="w-7 h-7 rounded-lg bg-indigo-50 flex items-center justify-center text-sm">💬</span>
+            <span className="w-7 h-7 rounded-lg bg-brand-subtle flex items-center justify-center text-sm">💬</span>
             <span className="text-xs tracking-wide" style={{ writingMode: 'vertical-rl' }}>AI总控</span>
           </button>
         )}
@@ -385,9 +385,9 @@ function OverviewTab({
           {(episodeDetail.shots && episodeDetail.shots.length > 0) ? (
             <div className="space-y-4">
               {episodeDetail.shots.map((shot: any, idx: number) => (
-                <div key={idx} className="border-l-4 border-indigo-500 pl-4 py-2">
+                <div key={idx} className="border-l-4 border-brand pl-4 py-2">
                   <div className="flex items-center gap-2 mb-1 flex-wrap">
-                    <span className="px-2 py-0.5 bg-indigo-100 text-indigo-600 text-xs font-medium rounded">
+                    <span className="px-2 py-0.5 bg-brand-subtle text-brand text-xs font-medium rounded">
                       镜头 {shot.shot_id ?? idx + 1}
                     </span>
                     {shot.camera && (
@@ -437,7 +437,7 @@ function OverviewTab({
         <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
           {detailError}
         </div>
-        <button onClick={goBack} className="text-sm text-indigo-600 hover:underline">
+        <button onClick={goBack} className="text-sm text-brand hover:underline">
           返回列表
         </button>
       </div>
@@ -459,7 +459,7 @@ function OverviewTab({
           <div className="text-4xl mb-3">📁</div>
           <p className="font-medium">暂无资产</p>
           <p className="text-sm mt-2">角色 / 物品 / 场景 会在生产流程中自动生成</p>
-          <p className="text-sm mt-3 text-indigo-500">
+          <p className="text-sm mt-3 text-brand">
             请通过右侧「AI总控」下达生产指令，AI会先与您沟通生产风格再启动
           </p>
         </div>
@@ -574,13 +574,13 @@ function OverviewTab({
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">
-                        <span className="flex items-center justify-center w-8 h-8 rounded-full bg-indigo-100 text-indigo-600 text-sm font-semibold">
+                        <span className="flex items-center justify-center w-8 h-8 rounded-full bg-brand-subtle text-brand text-sm font-semibold">
                           {ep.episode_no}
                         </span>
                         <div>
                           <p className="font-medium text-gray-900">
                             第 {ep.episode_no} 集
-                            {ep.chapter_title && <span className="ml-2 text-sm text-indigo-600">《{ep.chapter_title}》</span>}
+                            {ep.chapter_title && <span className="ml-2 text-sm text-brand">《{ep.chapter_title}》</span>}
                           </p>
                           <p className="text-xs text-gray-500 mt-0.5">
                             章节 {ep.chapter_index ?? ep.episode_no}
@@ -659,7 +659,7 @@ function AssetCard({
       onClick={onClick}
       className="text-left bg-white rounded-xl border border-gray-200 overflow-hidden hover:shadow-lg transition-shadow"
     >
-      <div className="aspect-video bg-gradient-to-br from-gray-100 to-gray-200 flex items-center justify-center overflow-hidden">
+      <div className="aspect-video bg-surface-2 flex items-center justify-center overflow-hidden">
         {imageUrl && !broken ? (
           <img
             src={imageUrl}
@@ -684,7 +684,7 @@ function AssetCard({
 
 // ========== Asset Preview Modal ==========
 // 薄封装：遮罩、头部、动画、ESC / 遮罩关闭、滚动锁定、焦点陷阱、层级全部由共享 Modal
-// 负责（方案 P1-7）。此前这里是一份独立的自建弹层（bg-black/60 + p-4 头部 + z-[100]），
+// 负责（方案 P1-7）。此前这里是一份独立的自建弹层（bg-black/60 + p-4 头部 + z-modal），
 // 与全站 Modal 的观感和层级都对不上。本组件只保留资产预览自己的业务：多视角切换 + 下载。
 function AssetPreviewModal({
   preview,
@@ -724,38 +724,38 @@ function AssetPreviewModal({
 
   const downloadCurrent = () => {
     if (!src) return;
-      const a = document.createElement('a');
-      a.href = src;
-        a.download = `${item?.name || 'asset'}${current?.view ? '_' + current.view : ''}.png`;
-        a.click();
-        };
-        
-        return (
-        <Modal
-        isOpen={isOpen}
-        onClose={onClose}
-        title={item?.name || '资产预览'}
-        size="xl"
-        footer={
+    const a = document.createElement('a');
+    a.href = src;
+    a.download = `${item?.name || 'asset'}${current?.view ? '_' + current.view : ''}.png`;
+    a.click();
+  };
+
+  return (
+    <Modal
+      isOpen={isOpen}
+      onClose={onClose}
+      title={item?.name || '资产预览'}
+      size="xl"
+      footer={
         <div className="flex w-full items-center gap-2">
-        <Button size="sm" variant="secondary" onClick={downloadCurrent}>
-        下载当前图
-        </Button>
-        {current?.size && (
-        <span className="text-xs text-ink-3">{(current.size / 1024).toFixed(0)} KB</span>
-        )}
-        {gallery.length > 1 && (
-        <span className="ml-auto text-xs text-ink-3">← → 切换视角</span>
-        )}
+          <Button size="sm" variant="secondary" onClick={downloadCurrent}>
+            下载当前图
+          </Button>
+          {current?.size && (
+            <span className="text-xs text-ink-3">{(current.size / 1024).toFixed(0)} KB</span>
+          )}
+          {gallery.length > 1 && (
+            <span className="ml-auto text-xs text-ink-3">← → 切换视角</span>
+          )}
         </div>
-        }
-      >
+      }
+    >
         <div className="space-y-4">
           {src ? (
             <img
-            src={src}
-            alt={`${item?.name || ''}${current?.view ? ` - ${current.view}` : ''}`}
-            className="w-full rounded-md bg-surface-2"
+              src={src}
+              alt={`${item?.name || ''}${current?.view ? ` - ${current.view}` : ''}`}
+              className="w-full rounded-md bg-surface-2"
             />
           ) : (
             <div className="py-16 text-center text-ink-2">图片不可用</div>
@@ -774,7 +774,7 @@ function AssetPreviewModal({
                     aria-label={g.view || `视角 ${i + 1}`}
                     onClick={() => setActive(i)}
                     className={`h-14 w-20 overflow-hidden rounded border-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${
-                    i === active ? 'border-brand' : 'border-transparent hover:border-line-strong'
+                      i === active ? 'border-brand' : 'border-transparent hover:border-line-strong'
                     }`}
                   >
                     {t && <img src={t} alt="" className="h-full w-full object-cover" />}
@@ -783,8 +783,8 @@ function AssetPreviewModal({
               })}
             </div>
           )}
-          </div>
-        </Modal>
+        </div>
+    </Modal>
   );
 }
 
@@ -874,7 +874,7 @@ function QcTab({ projectKey }: { projectKey: string }) {
             {cfg.enabled ? '已启用' : '未启用'}
           </span>
           <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-            cfg.ready ? 'bg-indigo-100 text-indigo-700'
+            cfg.ready ? 'bg-brand-subtle text-brand-hover'
                       : 'bg-yellow-100 text-yellow-700'
           }`}>
             {cfg.ready ? '就绪' : '未就绪'}
@@ -906,7 +906,7 @@ function QcTab({ projectKey }: { projectKey: string }) {
             { label: '音频', on: cfg.audio_enabled },
           ].map((k) => (
             <span key={k.label} className={`px-2 py-0.5 rounded ${
-              k.on ? 'bg-indigo-50 text-indigo-600'
+              k.on ? 'bg-brand-subtle text-brand'
                    : 'bg-gray-100 text-gray-500'
             }`}>
               {k.label}质检 {k.on ? '开' : '关'}
@@ -1000,7 +1000,7 @@ function StoryboardHubTab({ projectKey }: { projectKey: string }) {
             title={s.hint}
             className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-all ${
               sub === s.id
-                ? 'bg-indigo-600 text-white shadow'
+                ? 'bg-brand text-white shadow'
                 : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
             }`}
           >
@@ -1071,7 +1071,7 @@ function KeyframesTab({ projectKey }: { projectKey: string }) {
       {plan && (
         <div className="grid grid-cols-4 gap-4">
           <div className="bg-white rounded-lg border border-gray-200 p-4 text-center">
-            <div className="text-3xl font-bold text-indigo-400">{plan.shot_count}</div>
+            <div className="text-3xl font-bold text-brand">{plan.shot_count}</div>
             <div className="text-sm text-gray-500">总镜头数</div>
           </div>
           <div className="bg-white rounded-lg border border-gray-200 p-4 text-center">
@@ -1093,8 +1093,7 @@ function KeyframesTab({ projectKey }: { projectKey: string }) {
         <Button
           onClick={handleGenerate}
           disabled={generating}
-          style={{ background: 'linear-gradient(135deg, #f59e0b 0%, #ef4444 100%)' }}
-          className="w-full py-3"
+          className="w-full bg-warning hover:bg-warning-strong"
         >
           {generating ? '生成中...' : '生成尾帧'}
         </Button>
@@ -1120,7 +1119,7 @@ function KeyframesTab({ projectKey }: { projectKey: string }) {
                 {shot.need_gen && !shot.has_end && <span className="px-2 py-1 bg-yellow-500/20 text-yellow-400 rounded text-xs">待生成</span>}
               </div>
               {shot.url && (
-                <a href={shot.url} target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300">查看</a>
+                <a href={shot.url} target="_blank" rel="noopener noreferrer" className="text-brand hover:text-brand">查看</a>
               )}
             </div>
           ))}
@@ -1295,7 +1294,7 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
                     href={card.video.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-xs text-indigo-500 hover:text-indigo-400"
+                    className="text-xs text-brand hover:text-brand"
                   >
                     查看视频
                   </a>
@@ -1591,7 +1590,7 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
                 disabled={savingPlan}
                 onClick={() => savePlan({ enable_upscale: !planOn })}
                 className={`relative w-11 h-6 rounded-full transition-colors disabled:opacity-50 ${
-                  planOn ? 'bg-indigo-600' : 'bg-gray-300'
+                  planOn ? 'bg-brand' : 'bg-gray-300'
                 }`}
               >
                 <span
@@ -1614,7 +1613,7 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
                   onClick={() => savePlan({ upscale_scale: n })}
                   className={`px-3 py-1 rounded-md text-xs font-medium transition-all disabled:opacity-50 ${
                     planScale === n
-                      ? 'bg-indigo-600 text-white'
+                      ? 'bg-brand text-white'
                       : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                   }`}
                 >
@@ -1695,7 +1694,7 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
                       disabled={busy}
                       className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
                         scale === n
-                          ? 'bg-indigo-600 text-white shadow-lg'
+                          ? 'bg-brand text-white shadow-lg'
                           : 'bg-gray-100 text-gray-600 hover:bg-gray-200 hover:text-gray-900'
                       }`}
                     >
@@ -1749,7 +1748,7 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
           <div className="h-2 rounded-full bg-gray-100 overflow-hidden">
             <div
               className={`h-full transition-all ${
-                task.status === 'error' ? 'bg-red-500' : 'bg-indigo-600'
+                task.status === 'error' ? 'bg-red-500' : 'bg-brand'
               }`}
               style={{ width: `${Math.min(100, task.progress || 0)}%` }}
             />
@@ -1969,7 +1968,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
       {/* 头部：与工作台其他面板一致的白底 + 灰边 + indigo 强调 */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
-          <span className="w-7 h-7 rounded-lg bg-indigo-50 flex items-center justify-center text-sm shrink-0">
+          <span className="w-7 h-7 rounded-lg bg-brand-subtle flex items-center justify-center text-sm shrink-0">
             💬
           </span>
           <div className="min-w-0">
@@ -1983,7 +1982,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
                 title={autoMode ? '切回纯聊天（不执行动作）' : '切到自主执行（总控自己干活）'}
                 className={`text-[10px] leading-none px-1.5 py-0.5 rounded border transition-colors ${
                   autoMode
-                    ? 'border-indigo-300 text-indigo-600 bg-indigo-50'
+                    ? 'border-brand/30 text-brand bg-brand-subtle'
                     : 'border-gray-300 text-gray-500'
                 }`}
               >
@@ -2011,7 +2010,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
           <button
             onClick={loadHistory}
             title="刷新对话"
-            className="p-1.5 rounded-lg text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+            className="p-1.5 rounded-lg text-gray-500 hover:text-brand hover:bg-brand-subtle transition-colors"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -2021,7 +2020,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
           <button
             onClick={onClose}
             title="收起面板"
-            className="p-1.5 rounded-lg text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+            className="p-1.5 rounded-lg text-gray-500 hover:text-brand hover:bg-brand-subtle transition-colors"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
@@ -2059,7 +2058,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
                 <button
                   key={ex}
                   onClick={() => setInput(ex)}
-                  className="w-full text-left text-xs px-3 py-2 rounded-lg bg-white border border-gray-200 text-gray-500 hover:border-indigo-400 hover:text-indigo-600 transition-colors"
+                  className="w-full text-left text-xs px-3 py-2 rounded-lg bg-white border border-gray-200 text-gray-500 hover:border-brand hover:text-brand transition-colors"
                 >
                   {ex}
                 </button>
@@ -2073,7 +2072,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
                 key={idx}
                 className={`px-3 py-2 rounded-lg text-sm ${
                   msg.role === 'user'
-                    ? 'bg-indigo-600 text-white ml-6 rounded-br-sm'
+                    ? 'bg-brand text-white ml-6 rounded-br-sm'
                     : 'bg-white border border-gray-200 text-gray-700 mr-6 rounded-bl-sm'
                 }`}
               >
@@ -2085,7 +2084,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
               <div className="mr-6 px-3 py-2 rounded-lg border border-gray-200 bg-white space-y-1.5">
                 <div className="flex items-center gap-2 text-xs text-gray-500">
                   {run.status === 'running' ? (
-                    <span className="w-3 h-3 border-2 border-indigo-400/40 border-t-indigo-500 rounded-full animate-spin inline-block shrink-0" />
+                    <span className="w-3 h-3 border-2 border-brand/40 border-t-brand rounded-full animate-spin inline-block shrink-0" />
                   ) : (
                     <span className="w-1.5 h-1.5 rounded-full bg-gray-400 inline-block shrink-0" />
                   )}
@@ -2107,7 +2106,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
             )}
             {sending && !run && (
               <div className="bg-white border border-gray-200 mr-6 px-3 py-2 rounded-lg text-sm text-gray-500 flex items-center gap-2">
-                <span className="w-3 h-3 border-2 border-indigo-400/40 border-t-indigo-500 rounded-full animate-spin inline-block" />
+                <span className="w-3 h-3 border-2 border-brand/40 border-t-brand rounded-full animate-spin inline-block" />
                 思考中...
               </div>
             )}
@@ -2125,12 +2124,12 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') sendMessage(); }}
             placeholder="输入消息..."
-            className="flex-1 min-w-0 px-3 py-2 text-sm rounded-lg border border-gray-200 bg-white text-gray-900 placeholder-gray-400 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 outline-none transition-colors"
+            className="flex-1 min-w-0 px-3 py-2 text-sm rounded-lg border border-gray-200 bg-white text-gray-900 placeholder-gray-400 focus:ring-2 focus:ring-brand/30 focus:border-brand outline-none transition-colors"
           />
           <button
             onClick={sendMessage}
             disabled={sending || !input.trim()}
-            className="px-3 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
+            className="px-3 py-2 rounded-lg text-sm font-medium bg-brand text-white hover:bg-brand-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
           >
             发送
           </button>

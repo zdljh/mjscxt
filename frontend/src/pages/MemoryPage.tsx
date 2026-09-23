@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useApp } from '@/context/AppContext';
 import { memoryApi, projectsApi } from '@/api/client';
-import { Card, Button, Loading, EmptyState, Badge, ConfirmDialog, Input } from '@/components/ui';
+import { Card, Button, Loading, EmptyState, Badge, ConfirmDialog, Input, Select } from '@/components/ui';
 import { useToast } from '@/components/ui/toast';
 import type { Memory, MemoryType, MemoryStats, PromptLesson, LessonPage, Project } from '@/types';
 
@@ -238,7 +238,7 @@ export function MemoryPage() {
   return (
     <div className="space-y-6 fade-in">
       <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-bold text-gray-900">{t('memory.title')}</h2>
+        <h2 className="text-2xl font-bold text-ink-1">{t('memory.title')}</h2>
         <div className="flex gap-2">
           <Button variant="secondary" onClick={() => window.location.reload()}>
             {t('common.refresh')}
@@ -261,13 +261,14 @@ export function MemoryPage() {
       {/* 质检教训库：生成链路自动沉淀，驱动「不达标 → 改提示词重生成」 */}
       <Card title="质检教训库（自动学习）">
         {/* 环节 chips 多选（7 类） */}
+        {/* 保留原生：胶囊筛选 chip（rounded-full），Button 的 rounded-md 会改掉形状 */}
         <div className="flex flex-wrap items-center gap-2 mb-3">
           <button
             onClick={() => setLessonKinds([])}
-            className={`px-3 py-1 rounded-full text-xs border transition-colors ${
+            className={`px-3 py-1 rounded-full text-xs border transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas ${
               lessonKinds.length === 0
-                ? 'bg-indigo-600 text-white border-indigo-600'
-                : 'bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100'
+                ? 'bg-brand text-white border-brand'
+                : 'bg-surface-2 text-ink-2 border-line hover:bg-line'
             }`}
           >
             全部
@@ -278,10 +279,10 @@ export function MemoryPage() {
               <button
                 key={k}
                 onClick={() => toggleKind(k)}
-                className={`px-3 py-1 rounded-full text-xs border transition-colors ${
+                className={`px-3 py-1 rounded-full text-xs border transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas ${
                   active
-                    ? 'bg-indigo-600 text-white border-indigo-600'
-                    : 'bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100'
+                    ? 'bg-brand text-white border-brand'
+                    : 'bg-surface-2 text-ink-2 border-line hover:bg-line'
                 }`}
               >
                 {LESSON_KIND_LABEL[k]}
@@ -292,16 +293,16 @@ export function MemoryPage() {
 
         {/* 项目 / 时间区间 / 关键词检索 */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-3">
-          <select
+          <Select
             value={lessonProject}
-            onChange={(e) => setLessonProject(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white text-gray-900 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-          >
-            <option value="">全部项目</option>
-            {projects.map((p) => (
-              <option key={p.dir_key || p.id} value={p.name}>{p.name}</option>
-            ))}
-          </select>
+            onChange={setLessonProject}
+            options={[
+              { value: '', label: '全部项目' },
+              // ⚠️ 按 name 去重：Select 内部用 value 当 React key，同名项目会产生重复 key
+              ...Array.from(new Map(projects.map((p) => [p.name, p])).values())
+                .map((p) => ({ value: p.name, label: p.name })),
+            ]}
+          />
           <Input
             type="date"
             value={lessonSince}
@@ -324,7 +325,7 @@ export function MemoryPage() {
 
         {/* 汇总 + 清空本环节 */}
         <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-          <div className="text-xs text-gray-500">
+          <div className="text-xs text-ink-2">
             当前命中 {lessonPage.filtered} 条
             {lessonPage.filtered !== lessonPage.total ? `（全库 ${lessonPage.total} 条）` : ''}
             {' · '}死教训 {lessonPage.dead_lessons} 条
@@ -358,74 +359,78 @@ export function MemoryPage() {
               const issues = l.issues || [];
               const terms = l.terms || [];
               return (
-                <div key={key} className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
+                <div key={key} className="p-4 bg-surface-2 border border-line rounded-lg">
                   <div className="flex items-start justify-between gap-2 mb-2">
                     <div className="flex items-center gap-2 flex-wrap">
                       <Badge variant="warning">{LESSON_KIND_LABEL[l.kind || ''] || '未知'}</Badge>
                       {l.project ? (
-                        <span className="text-xs text-gray-500">{l.project}</span>
+                        <span className="text-xs text-ink-2">{l.project}</span>
                       ) : null}
                       {/* 召回次数徽标：0 次灰色弱化（死教训） */}
                       <span className={`text-xs px-2 py-0.5 rounded-full ${
                         useCount === 0
-                          ? 'bg-gray-200 text-gray-500'
-                          : 'bg-indigo-100 text-indigo-700'
+                          ? 'bg-line text-ink-2'
+                          : 'bg-brand-subtle text-brand-hover'
                       }`}>
                         被召回 {useCount} 次
                       </span>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
-                      <span className="text-xs text-gray-400 whitespace-nowrap">
+                      <span className="text-xs text-ink-3 whitespace-nowrap">
                         {l.ts ? new Date(l.ts).toLocaleString() : ''}
                       </span>
-                      <button
+                      <Button
+                        variant="link"
+                        className="text-xs whitespace-nowrap"
                         onClick={() => toggleExpand(key)}
-                        className="text-xs text-blue-600 hover:underline whitespace-nowrap"
                       >
                         {isExpanded ? '收起' : '详情'}
-                      </button>
-                      <button
+                      </Button>
+                      {/* text-danger 覆盖 link 变体的 text-brand：
+                          Tailwind 按 theme.colors 键序产出，danger 在 brand 之后，同属性后者胜出 */}
+                      <Button
+                        variant="link"
+                        className="text-xs whitespace-nowrap text-danger hover:text-danger-strong"
                         onClick={() => setDeleteTarget(l)}
-                        className="text-xs text-red-600 hover:underline whitespace-nowrap"
                       >
                         删除
-                      </button>
+                      </Button>
                     </div>
                   </div>
 
                   <ul className="list-disc list-inside space-y-1">
                     {issues.slice(0, 5).map((iss, j) => (
-                      <li key={j} className="text-sm text-gray-700">{iss}</li>
+                      <li key={j} className="text-sm text-ink-1">{iss}</li>
                     ))}
                     {issues.length === 0 && l.reason ? (
-                      <li className="text-sm text-gray-700">{l.reason}</li>
+                      <li className="text-sm text-ink-1">{l.reason}</li>
                     ) : null}
                   </ul>
 
                   {isExpanded && (
-                    <div className="mt-3 pt-3 border-t border-gray-200 space-y-3">
+                    <div className="mt-3 pt-3 border-t border-line space-y-3">
                       <div>
-                        <div className="text-xs font-medium text-gray-500 mb-1">提示词原文</div>
-                        <pre className="text-xs text-gray-700 bg-white border border-gray-200 rounded p-2 whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
+                        <div className="text-xs font-medium text-ink-2 mb-1">提示词原文</div>
+                        <pre className="text-xs text-ink-1 bg-surface border border-line rounded p-2 whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
                           {l.prompt || '—'}
                         </pre>
                       </div>
                       {issues.length > 0 && (
                         <div>
-                          <div className="text-xs font-medium text-gray-500 mb-1">问题清单</div>
+                          <div className="text-xs font-medium text-ink-2 mb-1">问题清单</div>
                           <ul className="list-disc list-inside space-y-1">
                             {issues.map((iss, j) => (
-                              <li key={j} className="text-sm text-gray-700">{iss}</li>
+                              <li key={j} className="text-sm text-ink-1">{iss}</li>
                             ))}
                           </ul>
                         </div>
                       )}
                       {terms.length > 0 && (
                         <div>
-                          <div className="text-xs font-medium text-gray-500 mb-1">关键词</div>
+                          <div className="text-xs font-medium text-ink-2 mb-1">关键词</div>
                           <div className="flex flex-wrap gap-2">
                             {terms.map((term) => (
-                              <span key={term} className="text-xs px-2 py-0.5 bg-gray-200 rounded text-gray-600">
+                              <span key={term} className="text-xs px-2 py-0.5 bg-line rounded text-ink-2">
                                 {term}
                               </span>
                             ))}
@@ -434,12 +439,12 @@ export function MemoryPage() {
                       )}
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
                         <div>
-                          <span className="text-gray-500">得分：</span>
-                          <span className="text-gray-800">{typeof l.score === 'number' ? l.score : '—'}</span>
+                          <span className="text-ink-2">得分：</span>
+                          <span className="text-ink-1">{typeof l.score === 'number' ? l.score : '—'}</span>
                         </div>
                         <div>
-                          <span className="text-gray-500">命中来源：</span>
-                          <span className="text-gray-800">{lessonSourceLabel(l)}</span>
+                          <span className="text-ink-2">命中来源：</span>
+                          <span className="text-ink-1">{lessonSourceLabel(l)}</span>
                         </div>
                       </div>
                     </div>
@@ -465,7 +470,7 @@ export function MemoryPage() {
         <Card title={t('memory.insightTitle')}>
           <div className="space-y-2">
             {insights.slice(0, 5).map((ins, i) => (
-              <p key={i} className="text-sm text-gray-600">
+              <p key={i} className="text-sm text-ink-2">
                 {ins}
               </p>
             ))}
@@ -480,18 +485,18 @@ export function MemoryPage() {
         ) : (
           <div className="space-y-3">
             {memories.slice(0, 20).map((mem) => (
-              <div key={mem.mem_id || mem.id} className="p-4 bg-gray-50 rounded-lg">
+              <div key={mem.mem_id || mem.id} className="p-4 bg-surface-2 rounded-lg">
                 <div className="flex items-start justify-between mb-2">
                   <Badge variant={memTypeOf(mem) === 'lesson' ? 'warning' : memTypeOf(mem) === 'success' ? 'success' : 'info'}>
                     {memTypeLabel(mem)}
                   </Badge>
-                  <span className="text-xs text-gray-400">{new Date(mem.created_at).toLocaleDateString()}</span>
+                  <span className="text-xs text-ink-3">{new Date(mem.created_at).toLocaleDateString()}</span>
                 </div>
-                <p className="text-gray-700 text-sm">{mem.content}</p>
+                <p className="text-ink-1 text-sm">{mem.content}</p>
                 {(mem.tags || []).length > 0 && (
                   <div className="flex gap-2 mt-2">
                     {(mem.tags || []).map((tag) => (
-                      <span key={tag} className="text-xs px-2 py-0.5 bg-gray-200 rounded text-gray-600">
+                      <span key={tag} className="text-xs px-2 py-0.5 bg-line rounded text-ink-2">
                         #{tag}
                       </span>
                     ))}
@@ -545,11 +550,11 @@ export function MemoryPage() {
 
 function StatCard({ label, value, color }: { label: string; value: number; color: string }) {
   const colorMap: Record<string, string> = {
-    blue: 'bg-blue-100 text-blue-600',
-    yellow: 'bg-yellow-100 text-yellow-600',
-    green: 'bg-green-100 text-green-600',
-    purple: 'bg-purple-100 text-purple-600',
-    gray: 'bg-gray-100 text-gray-600',
+    blue: 'bg-info-subtle text-brand',
+    yellow: 'bg-warning-subtle text-warning-strong',
+    green: 'bg-success-subtle text-success-strong',
+    purple: 'bg-brand-subtle text-brand',
+    gray: 'bg-surface-2 text-ink-2',
   };
   return (
     <Card>
@@ -557,7 +562,7 @@ function StatCard({ label, value, color }: { label: string; value: number; color
         <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${colorMap[color] || colorMap.blue}`}>
           <span className="text-xl font-bold">{value}</span>
         </div>
-        <span className="text-gray-600">{label}</span>
+        <span className="text-ink-2">{label}</span>
       </div>
     </Card>
   );

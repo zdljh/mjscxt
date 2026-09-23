@@ -33,10 +33,10 @@
  * 注：package.json 未声明 "type": "module"，故此处使用 CommonJS 写法，
  * 避免 Node 每次都要重新解析模块类型产生告警。
  */
- 
- /** 把「--token」映射成支持透明度修饰符的 Tailwind 颜色 */
- const token = (name) => `rgb(var(--${name}) / <alpha-value>)`;
- 
+
+/** 把「--token」映射成支持透明度修饰符的 Tailwind 颜色 */
+const token = (name) => `rgb(var(--${name}) / <alpha-value>)`;
+
 module.exports = {
   darkMode: 'class',
   content: [
@@ -49,102 +49,109 @@ module.exports = {
         sans: ['PingFang SC', 'Microsoft YaHei', 'system-ui', 'sans-serif'],
       },
       colors: {
-      canvas: token('bg-canvas'),
-      surface: {
-      DEFAULT: token('bg-surface'),
-      2: token('bg-surface-2'),
-      },
-      line: {
-      DEFAULT: token('border'),
-      strong: token('border-strong'),
-      },
-      ink: {
-      1: token('text-primary'),
-      2: token('text-secondary'),
-      3: token('text-tertiary'),
-      },
-      brand: {
-      DEFAULT: token('brand'),
-      hover: token('brand-hover'),
-      subtle: token('brand-subtle'),
-      },
-      accent: {
-      DEFAULT: token('accent'),
-      subtle: token('accent-subtle'),
-      },
-      action: token('action'),
-      success: {
-      DEFAULT: token('success'),
-      subtle: token('success-subtle'),
-      strong: token('success-strong'),
-      },
-      warning: {
-      DEFAULT: token('warning'),
-      subtle: token('warning-subtle'),
-      strong: token('warning-strong'),
-      },
-      danger: {
-      DEFAULT: token('danger'),
-      subtle: token('danger-subtle'),
-      strong: token('danger-strong'),
-      },
-      info: {
-      DEFAULT: token('info'),
-      subtle: token('info-subtle'),
-      strong: token('info-strong'),
-      },
-      state: {
-      pending: token('state-pending'),
-      'pending-subtle': token('state-pending-subtle'),
-      'pending-strong': token('state-pending-strong'),
-      running: token('state-running'),
-      'running-subtle': token('state-running-subtle'),
-      'running-strong': token('state-running-strong'),
-      done: token('state-done'),
-      'done-subtle': token('state-done-subtle'),
-      'done-strong': token('state-done-strong'),
-      failed: token('state-failed'),
-      'failed-subtle': token('state-failed-subtle'),
-      'failed-strong': token('state-failed-strong'),
-      skipped: token('state-skipped'),
-      'skipped-subtle': token('state-skipped-subtle'),
-      'skipped-strong': token('state-skipped-strong'),
-      attention: token('state-attention'),
-      'attention-subtle': token('state-attention-subtle'),
-      'attention-strong': token('state-attention-strong'),
-      },
+        canvas: token('bg-canvas'),
+        surface: {
+          DEFAULT: token('bg-surface'),
+          2: token('bg-surface-2'),
+        },
+        line: {
+          DEFAULT: token('border'),
+          strong: token('border-strong'),
+        },
+        ink: {
+          1: token('text-primary'),
+          2: token('text-secondary'),
+          3: token('text-tertiary'),
+        },
+        brand: {
+          DEFAULT: token('brand'),
+          hover: token('brand-hover'),
+          subtle: token('brand-subtle'),
+        },
+        accent: {
+          DEFAULT: token('accent'),
+          subtle: token('accent-subtle'),
+        },
+        action: token('action'),
+        // ⚠️ 数据可视化专用（SVG / 图表分类色），UI 层不要引用，详见 index.css
+        viz: {
+          rose: token('viz-rose'),
+          violet: token('viz-violet'),
+          teal: token('viz-teal'),
+          amber: token('viz-amber'),
+        },
+        success: {
+          DEFAULT: token('success'),
+          subtle: token('success-subtle'),
+          strong: token('success-strong'),
+        },
+        warning: {
+          DEFAULT: token('warning'),
+          subtle: token('warning-subtle'),
+          strong: token('warning-strong'),
+        },
+        danger: {
+          DEFAULT: token('danger'),
+          subtle: token('danger-subtle'),
+          strong: token('danger-strong'),
+        },
+        info: {
+          DEFAULT: token('info'),
+          subtle: token('info-subtle'),
+          strong: token('info-strong'),
+        },
+        state: {
+          pending: token('state-pending'),
+          'pending-subtle': token('state-pending-subtle'),
+          'pending-strong': token('state-pending-strong'),
+          running: token('state-running'),
+          'running-subtle': token('state-running-subtle'),
+          'running-strong': token('state-running-strong'),
+          done: token('state-done'),
+          'done-subtle': token('state-done-subtle'),
+          'done-strong': token('state-done-strong'),
+          failed: token('state-failed'),
+          'failed-subtle': token('state-failed-subtle'),
+          'failed-strong': token('state-failed-strong'),
+          skipped: token('state-skipped'),
+          'skipped-subtle': token('state-skipped-subtle'),
+          'skipped-strong': token('state-skipped-strong'),
+          attention: token('state-attention'),
+          'attention-subtle': token('state-attention-subtle'),
+          'attention-strong': token('state-attention-strong'),
+        },
       },
       borderRadius: {
-      sm: '6px',
-      md: '10px',
-      lg: '12px',
-      xl: '16px',
+        sm: '6px',
+        md: '10px',
+        lg: '12px',
+        xl: '16px',
       },
       boxShadow: {
-      xs: '0 1px 2px rgb(15 23 42 / .04)',
-      sm: '0 1px 3px rgb(15 23 42 / .06), 0 1px 2px rgb(15 23 42 / .04)',
-      md: '0 4px 16px rgb(15 23 42 / .08)',
-      lg: '0 12px 32px rgb(15 23 42 / .12)',
+        xs: '0 1px 2px rgb(15 23 42 / .04)',
+        sm: '0 1px 3px rgb(15 23 42 / .06), 0 1px 2px rgb(15 23 42 / .04)',
+        md: '0 4px 16px rgb(15 23 42 / .08)',
+        lg: '0 12px 32px rgb(15 23 42 / .12)',
       },
       fontSize: {
-      xs: ['12px', '18px'],
-      sm: ['13px', '20px'],
-      base: ['14px', '22px'],
-      lg: ['16px', '24px'],
-      xl: ['20px', '28px'],
-      '2xl': ['24px', '32px'],
-      '3xl': ['30px', '38px'],
+        xs: ['12px', '18px'],
+        sm: ['13px', '20px'],
+        base: ['14px', '22px'],
+        lg: ['16px', '24px'],
+        xl: ['20px', '28px'],
+        '2xl': ['24px', '32px'],
+        '3xl': ['30px', '38px'],
       },
       transitionDuration: {
-      DEFAULT: '160ms',
+        DEFAULT: '160ms',
       },
       zIndex: {
-      sticky: 'var(--z-sticky)',
-      dropdown: 'var(--z-dropdown)',
-      drawer: 'var(--z-drawer)',
-      modal: 'var(--z-modal)',
-      toast: 'var(--z-toast)',
-      preview: 'var(--z-preview)',
+        sticky: 'var(--z-sticky)',
+        dropdown: 'var(--z-dropdown)',
+        drawer: 'var(--z-drawer)',
+        modal: 'var(--z-modal)',
+        toast: 'var(--z-toast)',
+        preview: 'var(--z-preview)',
       },
     },
   },
