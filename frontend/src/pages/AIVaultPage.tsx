@@ -22,11 +22,12 @@ const EMPTY_MODULE: ModuleState = {
 };
 
 /** 思考档位下拉的兜底选项（后端会下发 reasoning_effort_options，拿不到时用这份） */
-const FALLBACK_REASONING_OPTIONS = ['', 'low', 'high', 'max'];
+const FALLBACK_REASONING_OPTIONS = ['', 'off', 'low', 'high', 'max'];
 
 /** 档位说明的 i18n 键（键为后端下发的原始值） */
 const REASONING_EFFORT_LABEL_KEYS: Record<string, string> = {
   '': 'vault.reasoning.default',
+  off: 'vault.reasoning.off',
   low: 'vault.reasoning.low',
   high: 'vault.reasoning.high',
   max: 'vault.reasoning.max',

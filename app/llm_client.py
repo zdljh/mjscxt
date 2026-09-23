@@ -88,6 +88,11 @@ MAX_TOKENS_CEILING = 32768
 # 这里按 vLLM Recipe 与 Qubrid 文档采用 chat_template_kwargs 形式，必要时用
 # REASONING_EFFORT_STYLE 切换。
 REASONING_EFFORT_LEVELS = ("low", "high", "max")
+# 「关闭思考」的档位值：语义 = disable_thinking=True（注入 chat_template_kwargs.enable_thinking=false）。
+# 这是标准 OpenAI 兼容协议里真正「关思考」的参数，对 Qwen/vLLM 系有效；对 always-on 模型
+# （agnes/GLM 系）网关会忽略它，但**不会**像非法 reasoning_effort 那样被静默解析成 max 档烧 token
+# （不注入 reasoning_effort，走 disable_thinking 分支）。故单独作为档位暴露给前端。
+REASONING_EFFORT_OFF = "off"
 MIN_TOKENS_WHEN_REASONING_EFFORT = 2048
 # "chat_template_kwargs"（默认，zai/vLLM 风格）| "top_level"（部分网关）
 REASONING_EFFORT_STYLE = "chat_template_kwargs"
@@ -360,12 +365,18 @@ class LLMClient:
         self.last_error = ""
         # 思考模式开关（默认关闭，可由配置项 disable_thinking 覆盖）
         self.disable_thinking = bool(self.config.get("disable_thinking", DISABLE_THINKING_DEFAULT))
-        # 思考档位（思考不可关闭的模型用，如 GLM-5.3）：low / high / max，留空=不注入
+        # 思考档位（思考不可关闭的模型用，如 GLM-5.3）：low / high / max，留空=不注入；
+        # off = 显式「关闭思考」（= disable_thinking=True，走 enable_thinking=false 分支）。
         _re = str(self.config.get("reasoning_effort") or "").strip().lower()
-        self.reasoning_effort = _re if _re in REASONING_EFFORT_LEVELS else ""
-        if _re and not self.reasoning_effort:
+        if _re == REASONING_EFFORT_OFF:
+            self.reasoning_effort = ""
+            self.disable_thinking = True
+        else:
+            self.reasoning_effort = _re if _re in REASONING_EFFORT_LEVELS else ""
+        if _re and not self.reasoning_effort and _re != REASONING_EFFORT_OFF:
             logger.warning(
-                f"reasoning_effort={_re!r} 不是合法档位（仅 {'/'.join(REASONING_EFFORT_LEVELS)}），"
+                f"reasoning_effort={_re!r} 不是合法档位（仅 {'/'.join(REASONING_EFFORT_LEVELS)}，"
+                f"或 {REASONING_EFFORT_OFF!r}=关闭思考），"
                 f"已忽略。注意：部分模型会把非法值静默解析成最高档（最贵），务必用合法值。")
         # 最近一次 chat_json_robust 的诊断信息（attempts / finish_reason / max_tokens / truncated）
         self.last_json_meta = {}

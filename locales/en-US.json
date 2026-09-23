@@ -1126,12 +1126,13 @@
     },
     "reasoning": {
       "default": "Default (do not inject the parameter; let the server decide)",
+      "off": "Turn off thinking (works for Qwen/vLLM; no effect but not costlier on always-on models)",
       "low": "low · Least thinking, fastest and most token-efficient",
       "high": "high · Fairly thorough thinking",
       "max": "max · Most thorough thinking, priciest and slowest"
     },
     "reasoningLabel": "Reasoning effort (optional)",
-    "reasoningHintLead": "Only needed for models whose thinking cannot be turned off (such as GLM-5.3-Flash, which has no switch to disable thinking and can only be dialed down). Leave blank = do not inject the parameter and use the server default;",
+    "reasoningHintLead": "\"Turn off thinking\" only works for models whose thinking can be disabled (Qwen/vLLM); always-on models (such as agnes/GLM) have no off switch, so \"off\" is not costlier but also not cheaper — pick low to save tokens. Leave blank = do not inject the parameter and use the server default;",
     "reasoningHintWarn": "The higher the effort, the more expensive (the default is usually the priciest, max)",
     "reasoningHintTail": ", and low is recommended for long JSON tasks.",
     "testConnection": "Test connection",

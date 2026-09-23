@@ -19,7 +19,8 @@
 - api_key 明文只落盘，永不回显（对外只给 api_key_masked + has_api_key）。
 - 保存时 api_key 留空，或提交回的是脱敏值（含 *），一律视为「不改动原密钥」。
 - reasoning_effort（思考档位）只对「思考不可关闭」的模型有意义（如 GLM-5.3-Flash）：
-  留空 = 不注入该参数，由服务端取默认档；low / high / max 为合法档位。
+  留空 = 不注入该参数，由服务端取默认档；low / high / max 为合法档位；off = 显式关闭思考
+  （= disable_thinking，对 Qwen/vLLM 系有效，对 always-on 模型不会烧更多 token）。
   它与 llm_client 的 disable_thinking 是**互斥的两套机制**：一旦设了档位，就不再尝试关思考。
 - 兼容旧 llm_config.json：首次读取时若 text 模块为空而旧配置存在，自动迁移（不丢原有配置）。
 """
@@ -35,7 +36,7 @@ from datetime import datetime
 
 from llm_client import build_chat_url, mask_key
 from llm_client import load_config as _load_legacy_config
-from llm_client import REASONING_EFFORT_LEVELS
+from llm_client import REASONING_EFFORT_LEVELS, REASONING_EFFORT_OFF
 import secret_store
 
 logger = logging.getLogger(__name__)
@@ -166,10 +167,13 @@ def _empty_config() -> dict:
 def normalize_reasoning_effort(value) -> str:
     """思考档位归一化：合法值原样返回（小写），非法/空值一律返回 ""（=不注入任何档位参数）
 
+    合法值 = low / high / max（思考档位）+ off（显式关闭思考，= disable_thinking）。
     ⚠️ 必须在这里就把非法值挡掉。GLM-5.3 这类模型会把**非法档位静默解析成最高档（最贵）**，
     如果让用户的笔误原样发给服务端，就等于悄悄按 max 档烧 token。
     """
     v = str(value or "").strip().lower()
+    if v == REASONING_EFFORT_OFF:
+        return REASONING_EFFORT_OFF
     return v if v in REASONING_EFFORT_LEVELS else ""
 
 
@@ -487,6 +491,6 @@ def public_view(cfg: dict) -> dict:
         "module_order": list(MODULES),
         "migrated_from": (cfg or {}).get("migrated_from"),
         "updated_at": (cfg or {}).get("updated_at"),
-        # 思考档位可选项（前端下拉）："" = 不注入（服务端默认）、其余为合法档位
-        "reasoning_effort_options": ["", *REASONING_EFFORT_LEVELS],
+        # 思考档位可选项（前端下拉）："" = 不注入（服务端默认）、off = 关闭思考、其余为档位
+        "reasoning_effort_options": ["", REASONING_EFFORT_OFF, *REASONING_EFFORT_LEVELS],
     }

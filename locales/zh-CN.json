@@ -1126,12 +1126,13 @@
     },
     "reasoning": {
       "default": "默认（不注入该参数，由服务端决定）",
+      "off": "关闭思考（对 Qwen/vLLM 系有效；always-on 模型不生效但不会更贵）",
       "low": "low · 思考最少，省 token 最快",
       "high": "high · 思考较充分",
       "max": "max · 思考最充分，最贵最慢"
     },
     "reasoningLabel": "思考档位（可选）",
-    "reasoningHintLead": "仅「思考不可关闭」的模型需要设置（如 GLM-5.3-Flash，它没有关闭思考的开关， 只能调档）。留空 = 不注入该参数、由服务端取默认档；",
+    "reasoningHintLead": "「关闭思考」仅对可关思考的模型（Qwen/vLLM 系）有效；always-on 模型（如 agnes/GLM 系）没有关闭开关，选「关闭」不会更贵、但也不会更省，想省 token 请选 low。留空 = 不注入该参数、由服务端取默认档；",
     "reasoningHintWarn": "档位越高越贵（默认档通常是最贵的 max）",
     "reasoningHintTail": "，长 JSON 任务建议 low。",
     "testConnection": "测试连接",
