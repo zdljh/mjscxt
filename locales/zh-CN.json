@@ -370,7 +370,7 @@
     "styleCatAll": "全部",
     "styleCat3d": "3D",
     "styleCat2d": "2D",
-    "styleCatReal": "写实",
+    "styleCatReal": "真人",
     "styleCustomPlaceholder": "输入自定义风格，例如：国漫3D渲染、偏写实、电影级光影",
     "styleRequired": "请选择或填写风格",
     "listTitle": "项目列表",
@@ -423,11 +423,11 @@
     "selectFile": "请选择文件",
     "style": {
       "custom": "— 自定义 —",
-      "xianxia": "古风仙侠 · 3D动漫渲染 · 热血燃向",
-      "suspense": "都市悬疑 · 写实电影感 · 紧张压抑",
-      "cyberpunk": "科幻未来 · 赛博朋克 · 高饱和明快",
-      "school": "校园青春 · 日式赛璐璐 · 温情治愈",
-      "fantasy": "玄幻热血 · 3D动漫渲染 · 快节奏卡点"
+      "xianxia": "古风仙侠 · 3D写实CG仙侠风 · 热血燃向",
+      "suspense": "都市悬疑 · 现代都市写实风 · 紧张压抑",
+      "cyberpunk": "科幻未来 · 赛博朋克数字插画风格 · 高饱和明快",
+      "school": "校园青春 · 2D赛璐璐动画风 · 温情治愈",
+      "fantasy": "玄幻热血 · 3D写实CG仙侠风 · 快节奏卡点"
     },
     "fileHint": "支持 .txt / .md / .docx / .pdf / .epub，单文件最大 200MB"
   },

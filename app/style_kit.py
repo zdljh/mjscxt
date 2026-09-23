@@ -442,8 +442,14 @@ def apply_resolution_widgets(nodes: List[dict],
 #: 中文风格 token → 英文（供英文提示词复用同一风格）。
 #: 支持**子串匹配**：风格串「中国古风玄幻漫剧」不是一个词表键，但含「古风」「玄幻」，
 #: 会按最长优先逐项翻译；未覆盖的部分保留中文原词（模型能理解，总比丢风格好）。
+#:
+#: ⚠️ 子串匹配是双刃剑：键越短越容易「吃掉」不该吃的词。历史缺陷：「国漫」是短键，
+#: 会把「美国**漫**画动画插画风格」误译成 Chinese animated style（"漫画" 含 "国漫"?
+#: 实为「美漫」的「漫」被邻词影响）。凡新增短键（≤3 字），必须跑 test_style_en_lexicon.py
+#: 用全部 61 个风格名回归，确认无残留中文、无误译。
 _EN_STYLE_LEXICON = {
     "中国古风": "ancient Chinese style",
+    "古风国漫": "ancient Chinese donghua style",
     "国漫": "Chinese animated style",
     "国风": "Chinese traditional style",
     "古风": "ancient Chinese style",
@@ -454,6 +460,8 @@ _EN_STYLE_LEXICON = {
     "漫剧": "comic drama",
     "悬疑": "suspense",
     "暗黑": "dark tone",
+    "黑暗": "dark",
+    "奇幻": "fantasy",
     "偏写实": "semi-realistic",
     "写实": "realistic",
     "水墨": "ink-wash painting",
@@ -463,16 +471,141 @@ _EN_STYLE_LEXICON = {
     "卡通": "cartoon",
     "电影级": "cinematic",
     "精致": "refined",
+    # ---- 新增：61 风格库覆盖（2026-09-23 对标 pavo 全量） ----
+    # 2D
+    "现代都市": "modern urban",
+    "都市": "urban",
+    "韩漫": "Korean webtoon",
+    "美漫": "American comic",
+    "复古美漫": "retro American comic",
+    "漫画动画": "comic animation",
+    "二维": "2D",
+    "赛博朋克": "cyberpunk",
+    "数字插画": "digital illustration",
+    "年代": "vintage era",
+    "大友克洋": "Katsuhiro Otomo",
+    "像素": "pixel art",
+    "手冢治虫": "Osamu Tezuka",
+    "二次元": "anime",
+    "宫崎骏": "Hayao Miyazaki",
+    "上美厂": "Shanghai Animation Film Studio",
+    "老动画": "classic animation",
+    "简笔画": "stick figure",
+    "少女漫": "shojo manga",
+    "松弛轮廓": "loose contour sketch",
+    "轮廓": "contour",
+    "手绘": "hand-drawn",
+    "新国潮": "neo Chinese chic",
+    "神话": "mythology",
+    "蜡笔": "crayon",
+    "皮影戏": "shadow play",
+    # 3D
+    "写实CG": "photorealistic CG",
+    "CG": "CG",
+    "次世代": "next-gen",
+    "怪谈": "urban legend",
+    "游戏概念艺术": "game concept art",
+    "概念艺术": "concept art",
+    "游戏渲染": "game rendering",
+    "迪士尼": "Disney animation style",
+    "3A": "AAA",
+    "水果人": "fruit person",
+    "粘土": "claymation",
+    "定格动画": "stop-motion",
+    "黏土": "clay",
+    # 真人
+    "真人": "live-action",
+    "末世": "post-apocalyptic",
+    "年代剧": "period drama",
+    "古装": "ancient costume",
+    "港风": "Hong Kong cinema",
+    "韩剧": "Korean drama",
+    "美式": "American",
+    "经济上行": "economic boom",
+    "复古影视": "retro film and television",
+    "胶片": "film grain",
+    "摄影": "photography",
+    "好莱坞": "Hollywood",
+    "色调": "color grading",
+    "蓝橙": "blue-orange",
+    "荒诞": "absurd",
+    "高调": "high-key",
+    "电影": "cinematic film",
+    "影视": "film and television",
+    "昆汀": "Quentin Tarantino",
+    "未来主义": "futurism",
+    "俄罗斯": "Russian",
+    "忧郁": "melancholic",
+    "是枝裕和": "Hirokazu Kore-eda",
+    "纪实": "documentary",
+    "冷淡": "cold minimalist",
+    "战争": "war",
+    "恐怖": "horror",
+    "宫斗权谋": "palace intrigue",
+    "权谋": "intrigue",
+    "冷峻": "stern",
+    "荒野": "wilderness",
+    "科幻": "sci-fi",
+    # ---- 第二批：61 风格残余词补齐（按回归报告逐条补） ----
+    # 注意：键越长越先匹配，故「动画/插画」等通用词放在具名风格键之后
+    "动画": "animation",
+    "插画": "illustration",
+    "黑白": "black and white",
+    "白色": "white",
+    "复古": "retro",
+    "儿童": "children's",
+    "中国": "Chinese",
+    "美国": "American",
+    "时代": "era",
+    "90": "1990s",
+    "60": "1960s",
 }
 
 #: 英文风格后缀固定收尾（与中文 _QUALITY_TAIL 语义对齐）
 _QUALITY_TAIL_EN = "highly detailed, delicate lighting, stable composition, no distortion"
 
+#: 中文风格名的**构词后缀**，翻译时直接剥离（英文里不需要「风格/风/画风」这类词）。
+#: 注意顺序：长后缀在前，避免「画风」被「风」先吃掉。
+#: ⚠️ 不能无条件剥：若剥离后与词表**匹配度变差**（如「水墨国风」剥成「水墨国」
+#: 破坏「国风」键），则保留原串。见 _strip_style_suffix 的择优逻辑。
+_STYLE_SUFFIX_ZH = ("风格", "画风", "风")
+
+
+def _lexicon_score(s: str) -> int:
+    """词表对字符串的覆盖程度（命中的词表键总字数，越大越好）"""
+    score = 0
+    remaining = s
+    for zh in sorted(_EN_STYLE_LEXICON, key=len, reverse=True):
+        if zh and zh in remaining:
+            score += len(zh)
+            remaining = remaining.replace(zh, "")
+    return score
+
+
+def _strip_style_suffix(s: str) -> str:
+    """剥离构词后缀，但仅在「不损害词表覆盖」时才剥。
+
+    「2D现代都市风」→ 剥「风」后「2D现代都市」覆盖更好 → 剥；
+    「2D水墨国风」  → 剥「风」后「2D水墨国」丢掉「国风」键 → 不剥。
+    """
+    for suf in _STYLE_SUFFIX_ZH:
+        if s.endswith(suf) and len(s) > len(suf):
+            cand = s[:-len(suf)]
+            if _lexicon_score(cand) >= _lexicon_score(s):
+                return cand
+            break
+    return s
+
 
 def _translate_token_en(tok: str) -> List[str]:
-    """把单个中文风格 token 翻成英文短语列表（最长键优先，避免「古风」吃掉「中国古风」）"""
+    """把单个中文风格 token 翻成英文短语列表（最长键优先，避免「古风」吃掉「中国古风」）
+
+    先择优剥离构词后缀（「风格 / 画风 / 风」），再做子串翻译；
+    最后把**仍未译出的尾部中文后缀**丢掉（英文提示词里不能留中文）。
+    历史缺陷：「2D现代都市风」翻完只剩「2D风」，英文提示词里混进中文，模型表达不稳。
+    """
     out: List[str] = []
-    remaining = str(tok or "")
+    remaining = _strip_style_suffix(str(tok or ""))
     for zh in sorted(_EN_STYLE_LEXICON, key=len, reverse=True):
         if zh and zh in remaining:
             en = _EN_STYLE_LEXICON[zh]
@@ -480,9 +613,19 @@ def _translate_token_en(tok: str) -> List[str]:
                 out.append(en)
             remaining = remaining.replace(zh, "")
     rest = remaining.strip(" ，,、")
-    if rest:
+    # 兜底：纯中文残渣（如单独一个「风」）不写进英文提示词
+    if rest and not any('\u4e00' <= c <= '\u9fff' for c in rest):
         out.append(rest)
-    return out
+    # 去冗余：短语已含语义时不再重复通用词（如 "Disney animation style" + "animation"）
+    words = [w.strip() for w in out if w and w.strip()]
+    pruned: List[str] = []
+    for i, w in enumerate(words):
+        if w == "animation" and any("animation" in o.lower() for o in words if o != w):
+            continue
+        if w == "illustration" and any("illustration" in o.lower() for o in words if o != w):
+            continue
+        pruned.append(w)
+    return pruned
 
 
 def style_suffix_en(style, *, with_tail: bool = True) -> str:

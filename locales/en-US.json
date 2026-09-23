@@ -370,7 +370,7 @@
     "styleCatAll": "All",
     "styleCat3d": "3D",
     "styleCat2d": "2D",
-    "styleCatReal": "Realistic",
+    "styleCatReal": "Real Person",
     "styleCustomPlaceholder": "Enter a custom style, e.g., Chinese 3D render, semi-realistic, cinematic lighting",
     "styleRequired": "Please pick or type a style",
     "listTitle": "Projects",
@@ -423,11 +423,11 @@
     "selectFile": "Please select a file",
     "style": {
       "custom": "-- Custom --",
-      "xianxia": "Ancient Xianxia · 3D Anime Render · Hot-blooded",
-      "suspense": "Urban Suspense · Cinematic Realistic · Tense",
-      "cyberpunk": "Sci-Fi Future · Cyberpunk · High Saturation",
-      "school": "Campus Youth · Japanese Cel-shading · Healing",
-      "fantasy": "Fantasy Action · 3D Anime Render · Fast-paced"
+      "xianxia": "Ancient Xianxia · 3D Realistic CG Xianxia · Hot-blooded",
+      "suspense": "Urban Suspense · Modern Urban Realistic · Tense",
+      "cyberpunk": "Sci-Fi Future · Cyberpunk Digital Illustration · High Saturation",
+      "school": "Campus Youth · 2D Cel-shaded Animation · Healing",
+      "fantasy": "Fantasy Action · 3D Realistic CG Xianxia · Fast-paced"
     },
     "fileHint": "Supports .txt / .docx / .pdf / .epub, max 200MB per file"
   },
