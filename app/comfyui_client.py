@@ -1626,37 +1626,61 @@ class ComfyUIClient:
 
     @staticmethod
     def build_storyboard_prompt(shot: dict, ref_labels: List[str] = None) -> str:
-        """按镜头剧情描述构建分镜图（Qwen Edit 多参考图）中文提示词"""
-        parts = ["根据参考图生成漫剧分镜画面。"]
-        if ref_labels:
-            parts.append("参考图用途：" + "；".join(ref_labels) + "。")
-        location = shot.get("location", "")
+        """按镜头剧情描述构建分镜图（Qwen Edit 多参考图）中文提示词。
+
+        ⚠️ **结构化分节规范（2026-09-24，目标「从源头减少重跑」）**：
+        提示词按固定顺序输出为独立小节，每节用「【节名】」开头、句末用「。」收尾，
+        使模型能逐节定位约束、不再把硬约束淹没在一大段扁平文字里。
+        顺序（见 :ref:`docs/prompt-spec.md`，守卫 verify_storyboard_prompt_spec.py 锁定）：
+          ① 【取景】景别/机位硬约束（最靠前，必须严格遵守）
+          ② 【参考图】各参考图绑定什么（角色/物品/场景，逐条对应）
+          ③ 【画面内容】动作与画面内容 + 说话状态 + 情绪氛围
+          ④ 【光影】光影氛围
+          ⑤ 【风格】画面风格声明
+          ⑥ 【禁令】一致性 + 无文字/水印硬禁令
+        历史教训：分镜图是质检重跑重灾区（教训库 68/73 条），其中「景别」占 45 条——
+        扁平长提示词里景别约束被画面内容稀释。景别/机位是**取景级硬约束**，
+        必须最靠前、独立成段、加粗强调，绝不能混在画面内容之后。
+        """
         camera = str(shot.get("camera") or "中景").strip()
         cam_key = camera_key(camera)        # "" = 本镜没给景别（camera 只有机位/运镜）
         cam_angle = camera_angle(camera)    # 俯拍 / 仰拍 / 平视 / 环绕 …（与景别正交）
         cam_spec = camera_spec(camera)
-        # 景别段：**没给景别时绝不能编一个**硬塞进去。
+
+        sections = []
+
+        # ①【取景】景别/机位硬约束（最靠前）。**没给景别时绝不能编一个**硬塞进去。
         # 实测《蛊真人》ep02 shot_13 camera="俯拍缓推"（description 是脚部俯拍），
         # 旧实现猜成「中景：取景自腰部或膝部以上」→ 与画面描述的脚部俯拍**互斥**，
         # 模型在两条矛盾指令间摇摆，6 次重试出的全是「全景 + 平视」，而质检端又按
         # 中景判它「景别不符」→ 该镜永远过不了。改为把取景交还给画面描述。
+        framing_lines = []
         if cam_key:
-            framing = f"**景别（必须严格遵守）：{cam_key}**——{cam_spec}。"
+            framing_lines.append(f"景别（必须严格遵守）：{cam_key}——{cam_spec}。")
         else:
-            framing = (f"**取景（本镜未指定景别）：严格以「动作与画面内容」里的取景描述为准**"
-                       f"（camera 原值「{camera}」只给了机位/运镜，"
-                       f"不要擅自套用中景/全景等固定景别，也不要把它撑成全景）。")
+            framing_lines.append(
+                f"取景（本镜未指定景别）：严格以【画面内容】里的取景描述为准"
+                f"（camera 原值「{camera}」只给了机位/运镜，"
+                f"不要擅自套用中景/全景等固定景别，也不要把它撑成全景）。"
+            )
         if cam_angle:
-            framing += f"**机位（必须严格遵守）：{_CAMERA_ANGLE_SPECS[cam_angle]}**。"
+            framing_lines.append(f"机位（必须严格遵守）：{_CAMERA_ANGLE_SPECS[cam_angle]}。")
+        sections.append("【取景】" + "".join(framing_lines))
+
+        # ②【参考图】参考图绑定：把每类参考图该锁什么写具体（角色/物品/场景分别对应）。
+        # 历史教训：「角色」「背景」「一致」合计 27 条重跑，根因是参考图用途一句话带过，
+        # 模型分不清「这张图该参考哪个角色的哪部分」。这里改成逐类逐条。
+        if ref_labels:
+            sections.append("【参考图】参考图用途：" + "；".join(ref_labels) + "。")
+        else:
+            sections.append("【参考图】本镜无参考图，画面主体与风格仅依据下方【画面内容】与【风格】生成。")
+
+        # ③【画面内容】动作与画面内容 + 说话状态 + 情绪氛围。
         # 画面内容优先级：
         # 1) storyboard_prompt_zh —— 提示词分析器**专门为该镜分镜图**写的中文提示词。
         #    历史缺陷：这个字段只写不读，用户花了 token 生成却从未生效（白花钱）。
-        #    这里真正接上，但只替换「画面内容」主体，景别/参考图一致/无文字/风格
-        #    等硬约束仍由本函数的确定性脚手架保证，避免模型漏掉关键约束。
         # 2) description —— 剧本自带的画面描述（默认路径）
         # 3) visual_detail —— 剧本阶段保留的扩展画面细节（时间/天气/光源方向/动作过程补全）
-        #    历史缺陷：description 限长 200 字会把画面细节截断，这些信息不会进入分镜图提示词，
-        #    导致「动作完整、光影明确」的要求只能靠模型猜。这里把 visual_detail 作为补充并进画面主体。
         desc = str(shot.get("storyboard_prompt_zh") or "").strip() \
             or (shot.get("description") or "").strip()
         detail = str(shot.get("visual_detail") or "").strip()
@@ -1664,50 +1688,53 @@ class ComfyUIClient:
             # visual_detail 是描述被截断后的剩余细节，合并成完整画面主体。
             # ⚠️ 用类名调用本类 staticmethod（裸名会去模块作用域找 → NameError）。
             desc = ComfyUIClient._merge_visual_detail(desc, detail)
-        parts.append(
-            f"镜头{shot.get('shot_id', 1)}。{framing}"
-            + (f"场景：{location}。" if location else "")
-            + (f"动作与画面内容：{desc}{SHOT_ACTION_SUFFIX}。" if desc else "")
-        )
+        location = shot.get("location", "")
+        content_lines = []
+        content_lines.append(f"镜头{shot.get('shot_id', 1)}")
+        if location:
+            content_lines.append(f"场景：{location}")
+        if desc:
+            content_lines.append(f"动作与画面内容：{desc}{SHOT_ACTION_SUFFIX}")
         if _dlg_text(shot.get("dialogue")):
             # 只给说话状态与口型提示，严禁把台词文本写进提示词（模型会把台词当画面字幕画出来）
-            parts.append(
+            content_lines.append(
                 f"说话状态：{_dlg_speaker(shot.get('dialogue')) or '人物'}正在低声说一句短句，"
-                f"只表现为自然的口型开合与细微表情变化。"
+                f"只表现为自然的口型开合与细微表情变化"
             )
         if shot.get("emotion"):
-            parts.append(f"情绪氛围：{shot['emotion']}。")
-        # 时间/天气/光源引导：从镜头描述里抽取「画面光线」要素，让分镜图光影符合镜头设定。
-        # 历史缺陷：画面描述里的「黄昏/阴雨/烛光」等光影要素没有独立成句，模型容易忽略，
-        # 导致分镜图与视频在光源上不一致（视频有日落、分镜图却是正午平光）。
+            content_lines.append(f"情绪氛围：{shot['emotion']}")
+        if content_lines:
+            sections.append("【画面内容】" + "；".join(content_lines) + "。")
+
+        # ④【光影】时间/天气/光源引导。
         # ⚠️ `_extract_light_hint` 是本类的 @staticmethod，在另一个 staticmethod 里
         # **必须用类名调用**；写成裸名 `_extract_light_hint(shot)` 会去模块作用域找，
         # 直接 NameError → 整集分镜图 100% 生成失败（实测雨夜归人 ep2 连续失败 2 次）。
         light_hint = ComfyUIClient._extract_light_hint(shot)
         if light_hint:
-            parts.append(f"光影氛围：{light_hint}。")
-        # 风格与画幅：一律以镜头自带 style（由剧本阶段注入，来自用户与总控敲定的设定）为准。
-        # 历史缺陷：这里写死「国漫3D渲染风格，竖屏 9:16 构图」，用户换任何风格都不生效；
-        # 现在无风格时**不再硬编码**，改为不声明风格并显式提示（让上游补风格，而不是悄悄
-        # 把用户设定替换成国漫）。style_clause 的拼接仍由 style_kit 负责，保证幂等不重复。
-        style_clause = ""
+            sections.append(f"【光影】光影氛围：{light_hint}。")
+
+        # ⑤【风格】风格与画幅：一律以镜头自带 style 为准（不硬编码国漫）。
         shot_style = style_kit.normalize_style(shot.get("style"))
         if shot_style:
             clause = style_kit.style_suffix(shot_style, head="画面风格", with_tail=False)
-            style_clause = f"{clause}；" if clause else ""
+            style_clause = clause if clause else ""
         else:
-            style_clause = "画面风格以参考图为准，不得自行改变画风；"
+            style_clause = "画面风格以参考图为准，不得自行改变画风"
             logger.warning("镜头 %s 缺少 style（分镜图提示词将不声明风格，建议补齐剧本 style）",
                            shot.get("shot_id"))
-        parts.append(
-            "要求：画面中人物的脸型、发型、服装、配饰与角色参考图完全一致，"
-            "物品的形状、材质、颜色与物品参考图一致，环境氛围与场景参考图一致；"
-            + style_clause +
-            "光影细腻，构图清晰；镜头景别必须与上述规定一致，"
+        sections.append(f"【风格】{style_clause}。")
+
+        # ⑥【禁令】一致性 + 无文字/水印硬禁令（最后一段兜底，措辞最强硬）。
+        sections.append(
+            "【禁令】画面中人物的脸型、发型、服装、配饰与角色参考图完全一致；"
+            "物品的形状、材质、颜色与物品参考图一致；环境氛围与场景参考图一致；"
+            "光影细腻，构图清晰；镜头景别、机位必须与【取景】规定严格一致；"
             "画面中不得出现任何文字、字幕、台词文本、水印、logo 或标识"
             "（尤其不得在右下角出现「AI生成」等生成标识）。"
         )
-        return "".join(parts)
+
+        return "".join(sections)
 
     # ===================== H3 音轨控制（生成阶段不出声，配音统一交给 QwenTTS） =====================
 
