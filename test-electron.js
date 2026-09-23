@@ -1,1 +1,0 @@
-const e = require("electron"); console.log("Type:", typeof e); console.log("Keys:", Object.keys(e || {}).slice(0, 10));

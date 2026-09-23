@@ -1,1 +1,0 @@
-const e = require("electron"); console.log("Type:", typeof e); console.log("Has app:", typeof e.app); console.log("Keys:", Object.keys(e || {}));

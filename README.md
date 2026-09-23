@@ -1,6 +1,6 @@
 # 本地漫剧自动化生成系统
 
-基于 **云端 LLM + ComfyUI（Qwen 2512/2511 + MiniMax H3 + FlashVSR）** 的完整 AI 漫剧生成流程
+基于 **云端 LLM + ComfyUI（QwenImage2.1 + Qwen-Edit 多视角 + MiniMax H3 + FlashVSR）** 的完整 AI 漫剧生成流程
 
 ## 🎯 系统架构
 
@@ -17,17 +17,17 @@
 │  ┌───────────────────────── 图片资产（三类） ─────────────────────┐  │
 │  │                                                              │  │
 │  │  角色 Characters                    物品 Items               │  │
-│  │  ┌──────────┐   ┌──────────────┐   ┌──────────┐              │  │
-│  │  │Qwen 2512 │ → │Qwen Edit 2511│   │Qwen 2512 │              │  │
-│  │  │基础图生成 │   │多视图生成     │   │基础图生成 │              │  │
-│  │  └──────────┘   └──────────────┘   └────┬─────┘              │  │
-│  │   正面/左侧/右侧/背面              ┌────▼──────────────┐       │  │
-│  │                                   │Qwen Edit 2511     │       │  │
+│  │  ┌──────────────┐  ┌─────────────┐  ┌──────────────┐         │  │
+│  │  │QwenImage2.1  │→ │Qwen-Edit    │  │QwenImage2.1  │         │  │
+│  │  │基础图生成(白底)│  │多视图生成    │  │基础图生成(白底)│        │  │
+│  │  └──────────────┘  └─────────────┘  └────┬─────────┘         │  │
+│  │   正面/左侧/右侧/背面              ┌─────▼─────────────┐       │  │
+│  │                                   │Qwen-Edit          │       │  │
 │  │   场景 Scenes                     │3D多视角生成        │       │  │
-│  │   ┌──────────┐   ┌──────────────┐ └───────────────────┘       │  │
-│  │   │Qwen 2512 │ → │Qwen Edit 2511│  正面/左45°/右45°/俯视      │  │
-│  │   │基础图生成 │   │3D多视角生成  │  （物品和场景共用此管线）    │  │
-│  │   └──────────┘   └──────────────┘                              │  │
+│  │   ┌──────────────┐  ┌─────────────┐└──────────────────┘       │  │
+│  │   │QwenImage2.1  │→ │Qwen-Edit    │ 正面/左45°/右45°/俯视     │  │
+│  │   │基础图生成     │  │3D多视角生成  │ （物品和场景共用此管线）   │  │
+│  │   └──────────────┘  └─────────────┘                           │  │
 │  └──────────────────────────────────────────────────────────────┘  │
 │                                                                    │
 │  ┌─────────────────────── 视频生成 ────────────────────────────┐   │
@@ -56,6 +56,14 @@
 | 质检风格达标检测 | `app/qc_client.py` | `find_style_issues`（关键词+否定词兜底）/ `_apply_style_gate`（硬闸门强制 `passed=False`）/ `check_image` + `check_video` 接收 `style` 参数并注入 `{style}` 占位 |
 | 风格不达标→改提示词 | `app/qc_client.py` + `app/prompt_memory.py` | `_qc_gate` 返回 `style_blocked`；`_record_qc_lesson` 注入「严格采用 XX 风格」强化建议；`prompt_memory` 支持「风格/画风」种子词召回 |
 | 视频 worker 补齐反馈 | `app/app.py` `_video_generate_worker` | 重试时调 `learned_prompt(kind="video", ...)` 重写 prompt；保存 `orig_video_prompt` 作为稳定 key |
+
+### 风格选择与质检反馈闭环（建项目可选风格 + 质检即时优化提示词）
+
+| 能力 | 落地位置 | 说明 |
+|------|---------|------|
+| 建项目可选/自定义风格 | `frontend/src/pages/ProjectsPage.tsx` + `app/app.py` | 新建项目弹窗提供 6 个风格预设下拉 + 自定义风格输入；`_project_style` 三级兜底（plan.json > AI 设定面板 > `config.style`），`_style_aspect_confirmed` 认可 config.style 也算「风格已确认」，选风格后不再被 409 拦 |
+| 质检失败即时优化提示词 | `app/app.py` `_optimize_prompt_from_qc` | 出图/出片质检不达标时，把**本次 verdict 的 issues** 喂给文本分析模型即时改写提示词，再重新生成；优先级 即时优化 > 历史召回（`prompt_memory.learned_prompt`）> 仅换种子；未配置模型或调用失败时 best-effort 返回 None 回落，绝不拖垮重试 |
+| 角色/物品纯白背景 | `app/comfyui_client.py` `_ensure_fullbody_prompt` / `_ensure_item_white_bg` | 角色三视图与物品基础图强制纯白背景（无场景、地面、桌面、阴影、背景纹理），物品完整居中、边缘清晰，便于后续分镜/视频参考锁定 |
 
 ### 画面细节与光影（提示词质量）
 
@@ -138,25 +146,26 @@
 > ⚠️ **密钥提醒**：若 `ai_config.json` / `qc_config.json` 曾以明文形式进过 git、云盘同步或被分享，
 > 请到对应平台**轮换密钥**——加密只防未来，已暴露的无法追回。
 
-详见 [`优化方案_对标GitHub开源漫剧项目.md`](优化方案_对标GitHub开源漫剧项目.md) 与 [`deploy/README.md`](deploy/README.md)。
+> 更多部署细节见 [`DESKTOP_SETUP.md`](DESKTOP_SETUP.md)。
 
 ## 📦 图片资产三类规范
 
 ### 1. 角色 Characters（多视图）
 | 视图 | 文件名 | 说明 |
 |------|--------|------|
-| 基础图 | `base.png` | Qwen 2512 文生图，含完整外貌描述 |
+| 基础图 | `base.png` | QwenImage2.1 文生图，含完整外貌描述，**纯白背景** |
 | 正面 | `front.png` | 全身正面，eye-level |
 | 左侧 | `left.png` | 左侧半侧面全身 |
 | 右侧 | `right.png` | 右侧半侧面全身 |
 | 背面 | `back.png` | 背面全身 |
 
 **用途**：H3 视频生成的角色锁定参考图（Ref2VA 模式）
+**画幅**：三视图横排拼版，**基础图/多视图均 1:1 方形**（避免横排贴边粘连）
 
 ### 2. 物品 Items（3D 多视角）
 | 视图 | 文件名 | 说明 |
 |------|--------|------|
-| 基础图 | `base.png` | Qwen 2512 文生图，3D渲染白底展示 |
+| 基础图 | `base.png` | QwenImage2.1 文生图，3D渲染白底展示，**纯白背景无场景/地面/阴影** |
 | 正面 | `front.png` | 正面视角 |
 | 左前45° | `left45.png` | 左前45°视角 |
 | 右前45° | `right45.png` | 右前45°视角 |
@@ -167,7 +176,7 @@
 ### 3. 场景 Scenes（3D 多视角）
 | 视图 | 文件名 | 说明 |
 |------|--------|------|
-| 基础图 | `base.png` | Qwen 2512 文生图，含构图光影 |
+| 基础图 | `base.png` | QwenImage2.1 文生图，含构图光影 |
 | 正面 | `front.png` | 正面视角 |
 | 左前45° | `left45.png` | 左前45°视角 |
 | 右前45° | `right45.png` | 右前45°视角 |
@@ -216,9 +225,9 @@ output/
 | 步骤 | 功能 | 技术 | 工作流模板 |
 |------|------|------|-----------|
 | 1. 剧本生成 | 主题 → 结构化 JSON（角色/物品/场景/镜头） | 文本分析模型（OpenAI 兼容·任意厂商） | — |
-| 2. 角色资产 | 基础图 + 多视图（正/左/右/背） | Qwen 2512 + Qwen Edit 2511 | 角色生成.json + 分镜生成.json |
-| 3. 物品资产 | 基础图 + 3D多视角（正/左45/右45/俯视） | Qwen 2512 + Qwen Edit 2511 | 物品生成.json + 分镜生成.json |
-| 4. 场景资产 | 基础图 + 3D多视角（正/左45/右45/俯视） | Qwen 2512 + Qwen Edit 2511 | 场景生成.json + 分镜生成.json |
+| 2. 角色资产 | 基础图 + 多视图（正/左/右/背） | QwenImage2.1 + Qwen-Edit | 角色生成.json + 分镜生成.json |
+| 3. 物品资产 | 基础图 + 3D多视角（正/左45/右45/俯视） | QwenImage2.1 + Qwen-Edit | 物品生成.json + 分镜生成.json |
+| 4. 场景资产 | 基础图 + 3D多视角（正/左45/右45/俯视） | QwenImage2.1 + Qwen-Edit | 场景生成.json + 分镜生成.json |
 | 5. 视频生成 | 10段无缝视频 + 原生音频 | MiniMax H3 (Ref2VA) + Turbo LoRA | H3信号10段测试001.json |
 | 6. 成片输出 | 合并 + 字幕 | FFmpeg | — |
 
@@ -315,14 +324,14 @@ python app.py
 ### 模型
 ```
 models/diffusion_models/
-├── qwen-image-2512/qwen_image_2512_fp8_e4m3fn.safetensors    # 图像生成
-├── qwen-image/qwen_image_edit_2511_bf16.safetensors           # 图像编辑（多视角）
+├── qwen-image/qwen_image_2.1_fp8.safetensors              # 图像生成（QwenImage2.1）
+├── qwen-image/qwen_image_edit_bf16.safetensors            # 图像编辑（多视角）
 └── minimax-h3/minimax_h3_ref2va_pruned_int8_convrot.safetensors # 视频生成
 
 models/loras/
-├── Qwen-Image-2512-Lightning-4steps-V1.0-fp32.safetensors     # 2512 加速
-├── Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors # 2511 加速
-├── Qwen-Image-Edit-2511-Multiple-Angles-LoRA.safetensors       # 多角度生成
+├── Qwen-Image-Lightning-4steps-V1.0-fp32.safetensors       # 图像生成加速
+├── Qwen-Image-Edit-Lightning-4steps-V1.0-bf16.safetensors  # 图像编辑加速
+├── Qwen-Image-Edit-Multiple-Angles-LoRA.safetensors        # 多角度生成
 └── minimax_h3/minimax_h3_fl2v_lightx2v_turbo_4step_v0.1.safetensors # H3 加速
 
 models/FlashVSR-v1.1/                                           # 超分辨率
@@ -358,4 +367,4 @@ custom_nodes/
 
 ---
 
-**版本**: 2.5.0 | **日期**: 2026-09-19
+**版本**: 2.6.0 | **日期**: 2026-09-24
