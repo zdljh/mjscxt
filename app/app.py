@@ -7039,8 +7039,20 @@ def _qc_lesson_from_record(rec: dict) -> dict:
 
 
 def _record_qc_lesson(project_name: str, kind: str, prompt: str, rec: dict) -> dict:
-    """把一次「质检不达标」沉淀成教训（供下次重试时改写提示词）。"""
+    """把一次「质检不达标」沉淀成教训（供下次重试时改写提示词）。
+
+    风格由 ``_project_style()`` 内部取（plan 的 style > AI 设定 > config.style），
+    这样 6 个调用点不用各自找 style —— 它们本来就都在同一个项目上下文里。
+    """
     lesson_src = _qc_lesson_from_record(rec)
+    # 记录当时的视觉风格：召回时按「同风格加权 / 异风格降权」使用。
+    # 没有它就无法回答「生成相同风格的提示词时有没有参考历史教训」——
+    # 旧教训一律 context={}，跨画风的缺陷会串味（用 A 画风的标准要求 B 画风的图）。
+    try:
+        _qc_style = _project_style(project_name) or ""
+    except Exception as _se:  # noqa: BLE001
+        app.logger.warning("取项目风格失败（教训按无风格记录）：%s", _se)
+        _qc_style = ""
     # 风格不达标：额外注入一条「明确的风格强化指令」，确保召回时能直接指导模型修正风格，
     # 而不是只给一条「风格不符」的缺陷描述。
     # ⚠️ 风格名必须写成占位符 {style}，**不能在记录时把项目风格写死**：
@@ -7058,11 +7070,12 @@ def _record_qc_lesson(project_name: str, kind: str, prompt: str, rec: dict) -> d
         got = prompt_memory.record(project=project_name, kind=kind, prompt=prompt,
                                    issues=lesson_src["issues"], reason=lesson_src["reason"],
                                    score=lesson_src.get("score"),
-                                   root_dir=PROJECT_OUTPUT_DIR)
+                                   root_dir=PROJECT_OUTPUT_DIR, style=_qc_style)
         if got:
-            app.logger.info("[教训库] %s 记录 %d 条缺陷（score=%s）：%s",
-                            project_name, len(lesson_src["issues"]),
-                            lesson_src.get("score"), lesson_src["issues"][:2])
+            app.logger.info("[教训库] %s 记录 %d 条缺陷（kind=%s score=%s style=%s）：%s",
+                            project_name, len(lesson_src["issues"]), kind,
+                            lesson_src.get("score"), _qc_style or "-",
+                            lesson_src["issues"][:2])
         return got or {}
     except Exception as mem_err:  # noqa: BLE001
         app.logger.warning("记录质检教训失败：%s", mem_err)

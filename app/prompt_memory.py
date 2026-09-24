@@ -447,7 +447,7 @@ class PromptMemory:
     # ---------- 记录一条教训 ----------
     def record(self, project: str, kind: str, prompt: str,
                issues: List[str], reason: str = "",
-               score: Optional[int] = None) -> dict:
+               score: Optional[int] = None, style: str = "") -> dict:
         """质检不达标时调用：把「提示词 + 缺陷」沉淀为一条经验，供后续召回。
 
         `category` / `priority` 由 `categorize_issue` / `assess_priority` **自动推断**，
@@ -465,6 +465,10 @@ class PromptMemory:
             "lesson_id": derive_lesson_id(kind, ph, ts),
             "ts": ts,
             "project": project or "",
+            # 记录当时的视觉风格：召回时按「同风格加权 / 异风格降权」使用。
+            # 没有它，「下次生成相同风格的提示词时是否参考历史教训」在数据层面
+            # 就无从回答 —— 旧记录一律 {}，无法按风格区分，跨画风的教训会串味。
+            "style": str(style or "").strip(),
             "kind": kind,
             "category": categorize_issue(defects[0] if defects else (reason or "")),
             "priority": assess_priority(defects, score if isinstance(score, int) else 100),
@@ -485,7 +489,8 @@ class PromptMemory:
     def record_with_context(self, project: str, kind: str, category: str,
                             priority: str, context: dict, prompt: str,
                             issues: List[str], reason: str = "",
-                            score: Optional[int] = None) -> dict:
+                            score: Optional[int] = None,
+                            style: str = "") -> dict:
         """带上下文和分类的记录。
 
         与基础 `record()` 产出同形记录，区别仅在于 `category/priority/context`
@@ -504,6 +509,8 @@ class PromptMemory:
             "lesson_id": derive_lesson_id(kind, ph, ts),
             "ts": ts,
             "project": project or "",
+            # 与 record() 同形：context 里通常带 style，这里显式抽出来做召回加权维度
+            "style": str(style or (context or {}).get("style") or "").strip(),
             "kind": kind,
             "category": category,
             "priority": priority,
@@ -561,13 +568,25 @@ class PromptMemory:
                 proj_bonus = 0.15 if lp == project else -0.10
             else:
                 proj_bonus = 0.0
-            total = sim + min(kw_hit, 3.0) * 0.25 + proj_bonus
+            # 5) 风格归属加权/降权：同一视觉风格的教训才最对症。
+            #    「画面偏写实」「配色偏灰」这类缺陷换了画风后并不成立，
+            #    跨风格照搬等于用 A 画风的标准去要求 B 画风的图。
+            ls = str(l.get("style") or "").strip()
+            if ls and style:
+                style_bonus = 0.15 if ls == style else -0.15
+            else:
+                style_bonus = 0.0
+            total = sim + min(kw_hit, 3.0) * 0.25 + proj_bonus + style_bonus
             if total > 0.2:
                 scored.append((total, l))
         scored.sort(key=lambda x: x[0], reverse=True)
         hints, seen, used_ids = [], set(), set()
         for _, l in scored:
             for iss in (l.get("issues") or []):
+                # 景别冲突防护：给「远景」镜头注入「要求为特写」= 主动把图画错，
+                # 比不给建议更糟。只对明确断言了景别的 issue 生效。
+                if self._framing_conflict(iss, prompt):
+                    continue
                 text = self._render_hint(iss, style)
                 if not text:
                     continue          # 需要风格但本次没给风格 → 丢弃这条，不要误导
@@ -678,15 +697,45 @@ class PromptMemory:
             return ""
         return text.replace(cls.STYLE_PLACEHOLDER, s)
 
-    @staticmethod
-    def _similar(a: str, b: str) -> float:
-        """字符级相似度（不分词），阈值内近似。"""
-        a, b = _norm(a), _norm(b)
+    # 分镜/资产提示词是**同一套模板**拼出来的，「根据参考图生成漫剧分镜画面…景别（必须
+    # 严格遵守）…场景：…动作与画面内容：…」这套套话在每条提示词里都出现。直接用它算
+    # 相似度 → 每条教训都能命中大量 4-gram → 全部封顶 → 相似度失去区分度。
+    # 先剥离这些套话，再比较**真正有区分度的部分**（角色 / 场景 / 动作 / 景别措辞）。
+    _BOILERPLATE = (
+        "根据参考图生成漫剧分镜画面", "参考图用途", "参考图1是角色", "参考图2是角色",
+        "参考图3是场景", "的外貌、服装与发型", "的外貌与服装", "的环境与氛围",
+        "镜头（必须严格遵守）", "景别（必须严格遵守）", "动作与画面内容",
+        "画面要求", "人物造型一致", "无畸变", "画面清晰",
+    )
+
+    @classmethod
+    def _strip_boilerplate(cls, s: str) -> str:
+        t = str(s or "")
+        for b in cls._BOILERPLATE:
+            t = t.replace(b, " ")
+        return _norm(t) or _norm(str(s or ""))
+
+    @classmethod
+    def _similar(cls, a: str, b: str) -> float:
+        """字符级相似度（4-gram Dice 系数，长度归一），阈值内近似。
+
+        ⚠️ 历史缺陷：旧实现是「短串 4-gram 在长串里的命中数 / 8」，
+        **只数命中数、不做长度归一、也没有剥离模板套话**。实测对同一个查询，
+        库里 60 条 storyboard 教训的相似度**全部恒为 0.950** —— 因为查询（~150 字）
+        的 4-gram 几乎都能在教训（~600 字）里找到，命中数远超 8 直接封顶。
+        后果：sim 退化成一个常数，phash 精确命中（1.0）与毫不相干（0.95）只差 0.05，
+        召回排序实际由 kw_hit / proj_bonus 决定 ≈ **随机取样** —— 会给「远景」镜头
+        召到「要求为特写」的教训，属于主动伤害。
+
+        现在改为：先剥离模板套话，再用 Dice 系数 ``2*hit/(len_a+len_b)`` ——
+        长度差异会被惩罚，不同教训之间重新拉开区分度。
+        """
+        a = cls._strip_boilerplate(a)
+        b = cls._strip_boilerplate(b)
         if not a or not b:
             return 0.0
         if a == b:
             return 1.0
-        # 用较长串做滑动窗口子串命中近似
         short, long_ = (a, b) if len(a) <= len(b) else (b, a)
         if len(short) < 4:
             return 1.0 if short in long_ else 0.0
@@ -694,7 +743,51 @@ class PromptMemory:
         for i in range(0, len(short) - 3, 1):
             if short[i:i + 4] in long_:
                 hit += 1
-        return min(hit / 8.0, 0.95)
+        return min(2.0 * hit / (len(a) + len(b)), 0.95)
+
+    # 景别词（长词在前，先匹配长词避免「远景」被「大远景」截走）
+    _FRAMINGS = ("大远景", "远景", "全景", "中景", "近景", "中近景", "特写", "大特写")
+
+    # 「目标景别」引导词：质检缺陷的经典句式是「要求 X，实际画成 Y」
+    # —— 必须取**目标**（X）那一侧的景别，取到「实际」那侧会把最对症的教训误杀。
+    # 例：issue「镜头要求特写，实际为腰部以上中景」对查询「…特写。」是**对症**的，
+    #     若按「文本里第一个景别词」取到「中景」就会判成冲突、过滤掉（历史踩坑）。
+    _FRAMING_TARGET_RE = None  # 延迟编译（模块顶部未 import re 时不炸）
+
+    @classmethod
+    def _framing_of(cls, text: str) -> str:
+        """抽取文本里**断言的目标景别**（用于判断教训与当前镜头是否同类型）。"""
+        import re
+
+        t = str(text or "")
+        if not t:
+            return ""
+        if cls._FRAMING_TARGET_RE is None:
+            cls._FRAMING_TARGET_RE = re.compile(
+                r"(?:要求|应为|目标|必须|需要|严格)[^，。；]{0,10}?"
+                r"(大远景|大特写|中近景|远景|全景|中景|近景|特写)")
+        m = cls._FRAMING_TARGET_RE.search(t)
+        if m:
+            return m.group(1)
+        # 没有引导词 → 退回「第一个出现的景别词」
+        for f in cls._FRAMINGS:
+            if f in t:
+                return f
+        return ""
+
+    @classmethod
+    def _framing_conflict(cls, issue: str, prompt: str) -> bool:
+        """教训里断言的景别与当前提示词要求的景别**明确冲突** → 不能采用。
+
+        这是「主动伤害」防护：给一个远景镜头注入「要求为特写」的建议，
+        会让模型把远景画成特写，比不给建议更糟。
+        只对**明确提到景别**的 issue 生效；没提景别的（构图/清晰度/风格类）一律放行。
+        """
+        want = cls._framing_of(prompt)
+        got = cls._framing_of(issue)
+        if not want or not got:
+            return False
+        return want != got
 
     # ---------- 拼装带经验的提示词 ----------
     def learned_prompt(self, kind: str, prompt: str,
@@ -993,22 +1086,29 @@ def get_enhanced_memory(root_dir: str) -> PromptMemory:
 
 
 def record(project: str, kind: str, prompt: str, issues: List[str],
-           reason: str = "", score: Optional[int] = None, root_dir: str = "") -> dict:
-    """关键便捷入口：由生成链路内部直接调用，记录一条经验。"""
+           reason: str = "", score: Optional[int] = None, root_dir: str = "",
+           style: str = "") -> dict:
+    """关键便捷入口：由生成链路内部直接调用，记录一条经验。
+
+    ``style``：记录当时的视觉风格，供召回时「同风格加权 / 异风格降权」。
+    """
     if not root_dir:
         return {}
-    return get_memory(root_dir).record(project, kind, prompt, issues, reason, score)
+    return get_memory(root_dir).record(project, kind, prompt, issues, reason, score,
+                                       style=style)
 
 
 def record_with_context(project: str, kind: str, category: str,
                         priority: str, context: dict, prompt: str,
                         issues: List[str], reason: str = "",
-                        score: Optional[int] = None, root_dir: str = "") -> dict:
+                        score: Optional[int] = None, root_dir: str = "",
+                        style: str = "") -> dict:
     """增强版记录入口（统一后落到底层唯一实例）。"""
     if not root_dir:
         return {}
     return get_enhanced_memory(root_dir).record_with_context(
-        project, kind, category, priority, context, prompt, issues, reason, score
+        project, kind, category, priority, context, prompt, issues, reason, score,
+        style=style
     )
 
 
