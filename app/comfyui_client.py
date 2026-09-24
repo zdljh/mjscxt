@@ -887,8 +887,18 @@ class ComfyUIClient:
                 raise  # 中止信号必须穿透，不能被轮询的通用 except 吞掉
             except Exception as e:
                 logger.debug(f"轮询历史失败: {e}")
-            # ② 可被打断的短休眠（3s 轮询间隔），暂停时最多 0.25s 即有反应
-            cancellation.sleep(3)
+            # ② 可被打断的短休眠（3s 轮询间隔），暂停时最多 0.25s 即有反应。
+            # ⚠️ 关键：`cancellation.sleep` 在收到中止信号时**直接抛 Cancelled**，
+            # 会绕过循环顶部的 `should_stop()` 分支 —— 也就是说「点暂停」时
+            # **不会执行 self.interrupt()，ComfyUI 上的任务会继续白跑**
+            # （用户反馈「暂停要同步停止 comfyui 的任务」的直接原因）。
+            # 因此这里自己捕获并补上远端中断，再原样抛出。
+            try:
+                cancellation.sleep(3)
+            except cancellation.Cancelled:
+                logger.warning(f"退避期间收到中止信号，主动打断远端任务 {prompt_id}")
+                self.interrupt(prompt_id)
+                raise
         # ③ 超时（非中止）：仍清理远端，避免本地判超时而远端白跑
         # B-21 P1-13：超时 interrupt 定向到指定 prompt_id（不再误伤队列中其他任务）
         logger.warning(f"等待超时: {prompt_id}（清理远端队列）")

@@ -32,6 +32,7 @@ from config import (
     TASKS_DB_PATH, TASK_QUEUE_CONCURRENCY, TASK_UNIT_MIN_BYTES,
     KEYFRAME_CHAIN_MODE, WORKFLOW_TEMPLATE,
     CHARACTER_SHEET_VIEWS, ASSET_VIEW_STEMS,
+    PROJECT_DEFAULT_CONFIG,
 )
 from script_generator import ScriptGenerator
 from comfyui_client import (ComfyUIClient, camera_spec as _camera_spec,
@@ -86,6 +87,7 @@ import dub_mix
 import dialogue_utils
 import h3_prompt_kit
 import autonomous
+import cancellation
 import ai_memory
 import prompt_memory
 from ai_memory import get_memory_system
@@ -3814,6 +3816,38 @@ def _project_style(project_name: str = "") -> str:
     return style_kit.normalize_style(brief)
 
 
+def _project_subtitle_enabled(project_name: str = "") -> bool:
+    """该项目的成片「硬字幕」开关（config.json 的 subtitle_enabled），默认 False。
+
+    2026-09-24（用户明确要求「不要生成字幕」）：
+    成片阶段有两处会往视频里烧硬字幕（pipeline.step_final / video_postprocess.finalize_episode），
+    此前无条件执行。现在统一从这里取值：读不到 / 非 true → 视为关闭，直接不烧字幕。
+    这样「H3 提示词不诱导字幕」+「成片不烧字幕」两层都封死，
+    确需硬字幕的老项目可在其 config.json 里显式写 "subtitle_enabled": true 单独放开。
+    """
+    proj = _safe_project(project_name or "")
+    default = bool(PROJECT_DEFAULT_CONFIG.get("subtitle_enabled", False))
+    try:
+        rec = project_store.get_project(proj)
+        if rec:
+            cfg = project_store.read_config(rec["dir_key"])
+            if "subtitle_enabled" not in cfg:
+                return default
+            val = cfg.get("subtitle_enabled")
+            # 宽容解析：字符串 "false"/"0"/"no"/"off" 不能被 bool() 误判为「开」
+            if isinstance(val, str):
+                s = val.strip().lower()
+                if s in ("true", "1", "yes", "on"):
+                    return True
+                if s in ("false", "0", "no", "off", "none", "null", ""):
+                    return False
+                return default
+            return bool(val)
+    except Exception as e:  # noqa: BLE001  开关读取失败按「关闭」处理（安全侧）
+        app.logger.warning(f"读取项目 config.subtitle_enabled 失败（按关闭处理）：{e}")
+    return default
+
+
 def _style_aspect_confirmed(project_name: str) -> dict:
     """生成前置确认门判据：用户是否已与总控 AI 确认「风格」与「视频比例」。
 
@@ -4128,6 +4162,59 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
       ① 补齐镜头 style 字段（剧本未注入时的兜底），使提示词带上风格；
       ② 解析画幅并覆写 H3 分辨率（竖屏 9:16 真正落地，而非模板死板的 16:9）。
     """
+    # ⚠️ 关键：本 worker 是**裸线程**（见 /api/videos/generate 的 threading.Thread），
+    # 运行在 Flask 请求线程之外 —— contextvars 不会从请求线程继承过来，因此
+    # `comfyui_client.wait_for_completion` 轮询里的 `cancellation.should_stop()`
+    # 在过去**恒为 False**：前端点「暂停」只停了托管的下一步，**正在跑的 ComfyUI
+    # 渲染任务不会被打断**（用户反馈「暂停要同步停止 comfyui 的任务」的根因）。
+    # 这里显式把中止判定器注册进本线程的执行上下文：
+    #   - 托管暂停（autopilot.is_paused）→ 立即中断远端
+    #   - 进程退出（autopilot._STOP / 解释器与用户交互无关的关停）→ 一并中断
+    # 判定器自身异常在 cancellation.should_stop 里 fail-open 处理，不影响生产。
+    _cancel_token = cancellation.push(_video_should_stop)
+    try:
+        _video_generate_worker_body(
+            task_id, project_name, shots, character_refs, scene_refs, storyboards,
+            use_storyboard, mode, timeout_per_segment, episode_tag, episode_no,
+            chain_mode, style, overwrite)
+    except cancellation.Cancelled as e:
+        # 协作式中止：不是失败，落到「已取消」态，前端展示为已停止而非报错
+        app.logger.info("[视频] 任务因中止信号停止（task=%s）：%s", task_id, e)
+        with lock:
+            _st = generation_state.get(task_id)
+            if isinstance(_st, dict):
+                _st.update({"status": "cancelled", "phase": "已停止",
+                            "error": "已收到中止信号，ComfyUI 远端任务已中断（已完成镜头保留，可续跑）"})
+    finally:
+        cancellation.reset(_cancel_token)
+
+
+def _video_should_stop() -> bool:
+    """视频 worker 的中止判定器：托管暂停 或 进程退出 → 停。
+
+    刻意与 `autopilot._halt_requested` 同口径，但**不 import autopilot**（app.py 与
+    autopilot 相互 import 会成环）。两者判的其实是同一件事：
+    - `autopilot.is_paused()`：前端「暂停」/总控 pause 的全局开关；
+    - `autopilot._STOP`：进程退出标志（`_video_should_stop` 只读它的 set 状态）。
+    用惰性 import 规避循环依赖，且失败时 fail-open（不停），避免判定器自身把生产带停。
+    """
+    try:
+        import autopilot
+        if autopilot.is_paused():
+            return True
+        stop_ev = getattr(autopilot, "_STOP", None)
+        if stop_ev is not None and stop_ev.is_set():
+            return True
+    except Exception as e:  # noqa: BLE001  判定器故障不得影响生产
+        app.logger.debug("视频中止判定器读取失败（按不中止处理）：%s", e)
+    return False
+
+
+def _video_generate_worker_body(task_id, project_name, shots, character_refs,
+                                scene_refs, storyboards, use_storyboard, mode,
+                                timeout_per_segment, episode_tag, episode_no=None,
+                                chain_mode="auto", style="", overwrite=False):
+    """视频生成的实际业务体（外壳见 :func:`_video_generate_worker`，负责注册中止信号）"""
     try:
         # 风格/画幅：整集共用一次解析
         # G19：风格串未含画幅关键词时以默认 9:16 为底，不再静默回落模板 16:9

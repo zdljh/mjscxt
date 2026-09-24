@@ -41,6 +41,29 @@ def _episode_no_of(script: dict, fallback=None) -> int:
         return 1
 
 
+def _subtitle_enabled_for(project: str) -> bool:
+    """项目级成片字幕开关（config.json 的 subtitle_enabled），**默认 False**。
+
+    2026-09-24 用户要求「视频不要生成字幕」：本模块的 finalize_episode /
+    generate_final_video 旧路径此前**无条件**烧硬字幕（产出 epNN_final_subtitles.mp4）。
+    这里统一取值：非 true 一律不烧。
+    读取失败 / 项目不存在 → 返回 False（安全侧：宁可不烧字幕，也不要产出一条带字幕的成片）。
+    """
+    try:
+        import project_store  # 延迟导入，避免与 project_store 形成循环依赖
+        cfg = project_store.read_config(project or "")
+        val = (cfg or {}).get("subtitle_enabled", False)
+        if isinstance(val, str):
+            s = val.strip().lower()
+            if s in ("true", "1", "yes", "on"):
+                return True
+            return False
+        return bool(val)
+    except Exception as e:  # noqa: BLE001  开关读取失败按「关闭」处理
+        logger.warning(f"读取项目 config.subtitle_enabled 失败（按关闭处理）：{e}")
+        return False
+
+
 def _ep_videos_dir(project: str, ep: int) -> str:
     """该集视频片段目录（第 1 集 = 平铺目录，第 2 集起 epNN/）"""
     base = os.path.join(PROJECT_OUTPUT_DIR, "videos", project)
@@ -637,6 +660,15 @@ class VideoPostProcessor:
             return ""
 
         # 添加字幕（dialogue 兼容结构化 [{speaker,text}] 与旧字符串）
+        # 2026-09-24 用户明确要求「视频不要生成字幕」：默认不再烧硬字幕。
+        # 开关 = 项目 config.subtitle_enabled（默认 false）；读取失败按关闭处理。
+        # 注意：本函数在旧接口路径（非 pipeline 托管）下调用，无法依赖宿主模块 app，
+        # 故这里直接读配置文件，保证「界面点生成成片」这条路同样不烧字幕。
+        if not _subtitle_enabled_for(project_name):
+            logger.info(f"字幕已关闭（config.subtitle_enabled=false），跳过烧制：{output_path}")
+            logger.info(f"第 {ep} 集最终视频: {output_path}")
+            return output_path
+
         from dialogue_utils import dialogue_text
         subtitles = []
         current_time = 0

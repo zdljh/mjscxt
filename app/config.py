@@ -159,6 +159,11 @@ PROJECT_DEFAULT_CONFIG = {
     "duration_per_shot": 5,             # 单镜头默认秒数
     "voice_map": {},                    # 角色→音色映射（按项目隔离）
     "qc_enabled": False,                # 质检开关（按项目隔离）
+    # 成片硬字幕开关（按项目隔离）：默认关闭。
+    # 2026-09-24：H3 提示词已不再往画面里引导字幕（旧版「严禁出现字幕」反而诱导模型自绘），
+    # 但成片合成阶段仍会额外烧一层字幕（pipeline.step_final / video_postprocess.finalize_episode）。
+    # 用户既然明确要求「不要生成字幕」，则默认不再烧；确需硬字幕的老项目可显式置 true。
+    "subtitle_enabled": False,
 }
 
 # ===================== 跨集连贯性（相邻两章转剧本改进 A/B/C/D） =====================
