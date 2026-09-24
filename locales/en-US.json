@@ -618,7 +618,15 @@
     "stepFinal": "Final cut",
     "stepTts": "Voice-over",
     "stepMix": "Mixing",
-    "stepUpscale": "Upscale"
+    "stepUpscale": "Upscale",
+    "assetPrompt": "Generation prompt",
+    "assetPromptPlaceholder": "Edit the generation prompt here (Chinese)",
+    "assetPromptHint": "Click Regenerate to re-render this asset with the edited prompt",
+    "assetRegenerate": "Regenerate",
+    "assetRegenerating": "Regenerating…",
+    "assetRegenerateStarted": "Regeneration submitted; refresh shortly to see the new image",
+    "assetRegenerateFailed": "Regeneration failed",
+    "assetPromptRequired": "Prompt cannot be empty"
   },
   "settings": {
     "title": "Settings",

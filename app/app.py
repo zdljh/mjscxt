@@ -1034,6 +1034,7 @@ def api_project_asset_detail(pid):
         "regenerate": {"endpoint": "/api/assets/generate", "method": "POST",
                        "payload": {"asset_type": asset_type,
                                    "project_name": hit_dir["project_dir"] or key,
+                                   "overwrite": True,
                                    "assets": [{"name": name,
                                                "reference_prompt_zh": meta.get("reference_prompt_zh") or "",
                                                "reference_prompt_en": meta.get("reference_prompt_en") or "",

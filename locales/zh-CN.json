@@ -618,7 +618,15 @@
     "stepFinal": "成片合成",
     "stepTts": "配音合成",
     "stepMix": "音画混音",
-    "stepUpscale": "超分"
+    "stepUpscale": "超分",
+    "assetPrompt": "生成提示词",
+    "assetPromptPlaceholder": "在此修改生成提示词（中文）",
+    "assetPromptHint": "修改后点击「重新生成」将按新提示词重出此资产图",
+    "assetRegenerate": "重新生成",
+    "assetRegenerating": "重新生成中…",
+    "assetRegenerateStarted": "已提交重新生成，稍后刷新可见新图",
+    "assetRegenerateFailed": "重新生成失败",
+    "assetPromptRequired": "提示词不能为空"
   },
   "settings": {
     "title": "设置",

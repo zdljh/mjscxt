@@ -752,7 +752,12 @@ function OverviewTab({
               </div>
             );
           })}
-          <AssetPreviewModal preview={preview} onClose={() => setPreview(null)} />
+          <AssetPreviewModal
+            preview={preview}
+            projectKey={projectKey}
+            onClose={() => setPreview(null)}
+            onRegenerated={onRefreshAssets}
+          />
         </>
       )}
 
@@ -968,16 +973,54 @@ function AssetCard({
 // 与全站 Modal 的观感和层级都对不上。本组件只保留资产预览自己的业务：多视角切换 + 下载。
 function AssetPreviewModal({
   preview,
+  projectKey,
   onClose,
+  onRegenerated,
 }: {
   preview: { item: AssetItem; type: 'character' | 'item' | 'scene' } | null;
+  projectKey: string;
   onClose: () => void;
+  onRegenerated?: () => void;
 }) {
   const { t } = useApp();
+  const toast = useToast();
   const [active, setActive] = useState(0);
   const isOpen = !!preview;
 
-  useEffect(() => { setActive(0); }, [preview]);
+  // —— 提示词：打开时拉取详情接口（/api/projects/<pid>/asset-detail），展示可编辑的
+  //    生成提示词，支持「改提示词 → 单点重新生成」。此前详情接口后端早已返回
+  //    meta.prompt_zh 与 regenerate 模板，但前端从未渲染，用户只能看整图无从改起。
+  const [promptZh, setPromptZh] = useState('');
+  const [promptEn, setPromptEn] = useState('');
+  const [promptLoading, setPromptLoading] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+
+  useEffect(() => {
+    setActive(0);
+    setPromptZh('');
+    setPromptEn('');
+    if (!preview) return;
+    let alive = true;
+    setPromptLoading(true);
+    fetch(
+      `/api/projects/${encodeURIComponent(projectKey)}/asset-detail` +
+        `?kind=${encodeURIComponent(preview.type)}&name=${encodeURIComponent(preview.item.name)}`
+    )
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d) => {
+        if (!alive) return;
+        setPromptZh(d?.meta?.prompt_zh || '');
+        setPromptEn(d?.meta?.prompt_en || '');
+      })
+      .catch(() => {
+        if (alive) {
+          setPromptZh('');
+          setPromptEn('');
+        }
+      })
+      .finally(() => { if (alive) setPromptLoading(false); });
+    return () => { alive = false; };
+  }, [preview, projectKey]);
 
   const gallery = React.useMemo(() => {
     if (!preview) return [] as { url: string; view?: string; size?: number }[];
@@ -1011,6 +1054,44 @@ function AssetPreviewModal({
     a.click();
   };
 
+  // 单点重新生成：用当前编辑后的提示词覆盖重新出图（overwrite=true）。
+  const regenerate = async () => {
+    if (!preview || regenerating) return;
+    const zh = promptZh.trim();
+    if (!zh) {
+      toast.warning(t('wb.assetPromptRequired'));
+      return;
+    }
+    setRegenerating(true);
+    try {
+      const res = await fetch('/api/assets/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          asset_type: preview.type,
+          project_name: projectKey,
+          overwrite: true,
+          assets: [{
+            name: item?.name,
+            reference_prompt_zh: zh,
+            reference_prompt_en: promptEn.trim(),
+          }],
+        }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || !d.task_id) {
+        toast.error(d?.error || t('wb.assetRegenerateFailed'));
+      } else {
+        toast.success(t('wb.assetRegenerateStarted'));
+        onRegenerated?.();
+      }
+    } catch {
+      toast.error(t('wb.assetRegenerateFailed'));
+    } finally {
+      setRegenerating(false);
+    }
+  };
+
   return (
     <Modal
       isOpen={isOpen}
@@ -1021,6 +1102,14 @@ function AssetPreviewModal({
         <div className="flex w-full items-center gap-2">
           <Button size="sm" variant="secondary" onClick={downloadCurrent}>
             {t('wb.downloadCurrent')}
+          </Button>
+          <Button
+            size="sm"
+            variant="brand"
+            onClick={regenerate}
+            disabled={regenerating || promptLoading || !promptZh.trim()}
+          >
+            {regenerating ? t('wb.assetRegenerating') : t('wb.assetRegenerate')}
           </Button>
           {current?.size && (
             <span className="text-xs text-ink-3">{(current.size / 1024).toFixed(0)} KB</span>
@@ -1064,6 +1153,25 @@ function AssetPreviewModal({
               })}
             </div>
           )}
+
+          {/* 生成提示词：可编辑 + 单点重新生成 */}
+          <div className="border border-line rounded-lg p-3 space-y-2">
+            <h4 className="text-sm font-semibold text-ink-1">{t('wb.assetPrompt')}</h4>
+            {promptLoading ? (
+              <div className="text-xs text-ink-3">{t('common.loading')}</div>
+            ) : (
+              <>
+                <textarea
+                  value={promptZh}
+                  onChange={(e) => setPromptZh(e.target.value)}
+                  rows={4}
+                  placeholder={t('wb.assetPromptPlaceholder')}
+                  className={`w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink-1 resize-y ${FOCUS_RING}`}
+                />
+                <p className="text-[11px] text-ink-3">{t('wb.assetPromptHint')}</p>
+              </>
+            )}
+          </div>
         </div>
     </Modal>
   );
