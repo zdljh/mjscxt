@@ -350,7 +350,8 @@ def chapters_of(novel_meta: dict) -> list:
     return chapters_and_text(novel_meta)[0]
 
 
-def episode_units(chapters: list, plan: dict = None, text: str = "") -> list:
+def episode_units(chapters: list, plan: dict = None, text: str = "",
+                  fixed_parts: int = None) -> list:
     """把选中章节展开成**拍摄单元**（一个单元 = 一集；一章可拆成多集）。
 
     为什么需要这一层：整集视频走 H3 连续渲染，单集镜头数超过
@@ -358,6 +359,10 @@ def episode_units(chapters: list, plan: dict = None, text: str = "") -> list:
     所以「一章 = 一集」不再是硬约束 —— 字数过大的章会被
     :func:`novel_to_script.split_chapter_for_episodes` 按语义边界切成多段，
     每段独立成一集，各自镜头数都在上限内。
+
+    ⚠️ 另外还有一条**固定份数**规则（``novel_to_script.EPISODES_PER_CHAPTER``，当前 =2）：
+    用户要求「一章拆成 2 集」，所以**短章也拆**（超限规则在短章上不触发）。
+    两条规则取更碎的那个，因此「一章 = 一集」不再成立，**集号 ≠ 章号**。
 
     两条关键约定
     ------------
@@ -389,7 +394,7 @@ def episode_units(chapters: list, plan: dict = None, text: str = "") -> list:
     for ch in chapters:
         idx = int(ch.get("index") or 0)
         try:
-            segs = nts.split_chapter_for_episodes(ch, text or "")
+            segs = nts.split_chapter_for_episodes(ch, text or "", fixed_parts=fixed_parts)
         except Exception as e:  # noqa: BLE001
             logger.warning("第%s章拆章失败（按不拆处理）：%s", idx, e)
             segs = [{"part": 1, "parts": 1, "start": ch.get("start") or 0,
@@ -414,7 +419,7 @@ def episode_units(chapters: list, plan: dict = None, text: str = "") -> list:
 
 
 def find_episode_unit(chapters: list, plan: dict, episode_no: int,
-                      text: str = "") -> dict:
+                      text: str = "", fixed_parts: int = None) -> dict:
     """按集号取回该集的拍摄单元（找不到返回 {}）。
 
     替代历史写法 ``next((c for c in chapters if c["index"] == ep), {})`` ——
@@ -424,7 +429,7 @@ def find_episode_unit(chapters: list, plan: dict, episode_no: int,
         want = int(episode_no)
     except (TypeError, ValueError):
         return {}
-    for u in episode_units(chapters, plan, text):
+    for u in episode_units(chapters, plan, text, fixed_parts=fixed_parts):
         if int(u.get("episode_no") or 0) == want:
             return u
     return {}

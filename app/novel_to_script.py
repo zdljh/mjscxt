@@ -94,6 +94,22 @@ SHOTS_PER_CHUNK_MIN = 6       # 单块分镜数下限（再短的块也至少这
 # 超限处理：不丢原文 —— 按该集总字数等比收紧**每块的镜头额度**（每镜承载更多原文），
 # 全部子块仍然逐块送模型、原文覆盖率不受影响，只是镜头密度变稀。
 MAX_SHOTS_PER_EPISODE = 78
+
+# ---- 每章固定拆成的集数（用户要求：一章拆成 2 集）----
+# MAX_SHOTS_PER_EPISODE 只是「兜底硬上限」—— 章节短（如 2500 字 / 预估 20 镜）时它根本
+# 不触发，一章仍然只出一集。用户明确要求「一章拆成 2 集」，所以这里再加一条**固定份数**
+# 规则：无论章节长短，都按语义边界均分成 EPISODES_PER_CHAPTER 集。
+#
+# 两个规则取**更碎的那个**（parts = max(固定份数, 超限算出的份数)），
+# 因此短章也会拆，超长章会更碎 —— 两种情况下每段都不会超过硬上限。
+#
+# 设为 1 = 关闭固定拆分，退回「只有预估镜头超 MAX_SHOTS_PER_EPISODE 才拆」的旧行为。
+# 环境变量：MJSCXT_EPISODES_PER_CHAPTER
+try:
+    EPISODES_PER_CHAPTER = max(1, int(os.environ.get("MJSCXT_EPISODES_PER_CHAPTER", "2") or 2))
+except (TypeError, ValueError):
+    EPISODES_PER_CHAPTER = 2
+
 # ---- 分镜阶段的 token 预算（必须给「思考」留预留量）----
 # ⚠️ always-on reasoning 模型（agnes-3.0-flash / GLM 系）在写分镜前会先输出一大段思考，
 # 实测该任务的思考量 ≈16K token。若 max_tokens 低于思考量，模型会「只吐思考、正文为空」，
@@ -1589,13 +1605,26 @@ def _snap_cut(text: str, ideal: int, lo: int, hi: int, prev: int) -> int:
 
 
 def split_chapter_for_episodes(chapter: dict, text: str = "",
-                               max_shots: int = None) -> list:
-    """把一章按预估镜头数拆成 1..N 个「拍摄单元」（一个单元 = 一集）。
+                               max_shots: int = None,
+                               fixed_parts: int = None) -> list:
+    """把一章拆成 1..N 个「拍摄单元」（一个单元 = 一集）。
+
+    两条拆分规则，**取更碎的那个**
+    ------------------------------
+    1. **固定份数** ``fixed_parts``（默认取全局 ``EPISODES_PER_CHAPTER``，当前 =2）：
+       用户要求「一章拆成 2 集」，所以**不管章节长短都拆**。章节短（预估 20 镜）时
+       ``MAX_SHOTS_PER_EPISODE`` 那条规则根本不触发，只有这条能保证一定拆开。
+    2. **超限份数**：按 ``estimate_episode_shots`` 的预估镜头数除以 ``max_shots``
+       （默认 ``MAX_SHOTS_PER_EPISODE``=78）向上取整，保证每段不跑到 H3 崩溃点。
+
+    ``parts = max(固定份数, 超限份数)`` —— 短章拆成 2 集，超长章自然更碎。
 
     设计要点
     --------
-    - **不拆时零影响**：预估不超过上限 → 返回单段且 `start/end` 原样不变，
-      老项目（一章一集）行为完全不变。
+    - **关闭固定拆分时零影响**：``fixed_parts=1`` 且预估不超限 → 返回单段且
+      `start/end` 原样不变，老项目（一章一集）行为完全不变。
+    - **过短章不拆**：章字数 < ``CHAPTER_MIN_CHARS``（300）时拆开没有意义（每段
+      只剩一两百字），直接退回 1 集。
     - **不丢字、不重叠**：各段首尾相接，`[start, end)` 逐段连续覆盖原章区间。
     - **切点吸附语义边界**（段落空行 > 换行 > 句末标点，在理想切点 ±span/12 内找），
       避免把一句话 / 一段动作劈到两集（跨集是独立生成，劈开会导致语义断裂）。
@@ -1613,6 +1642,11 @@ def split_chapter_for_episodes(chapter: dict, text: str = "",
         cap = MAX_SHOTS_PER_EPISODE
     est = estimate_episode_shots(n_chars)
     parts = 1 if est <= cap else max(2, int(math.ceil(est / float(cap))))
+    # 「每章固定 N 集」：短章也要拆（超限规则在短章上不触发）。
+    # 取更碎的那个，超长章自然比 N 更碎，仍然保证每段 ≤ cap。
+    n_fixed = EPISODES_PER_CHAPTER if fixed_parts is None else int(fixed_parts or 0)
+    if n_fixed > 1 and n_chars >= CHAPTER_MIN_CHARS:
+        parts = max(parts, n_fixed)
     total = seg_end - seg_start
     if parts <= 1 or total <= 0:
         return [{"part": 1, "parts": 1, "start": seg_start, "end": seg_end,
