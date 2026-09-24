@@ -5090,6 +5090,51 @@ def _upscale_worker(task_id: str, video_path: str, project_name: str, params: di
                                          progress_cb=progress, **params)
         result["output_url"] = _upscale_url_for_path(result.get("output_path") or "")
         result["input_url"] = _upscale_url_for_path(video_path)
+
+        # —— 超分成品质检（2026-09-24 补上，此前超分是唯一「产出后零质检」的环节）——
+        # 超分是成品链路的最后一环（4K 输出），若不质检，超分导致的闪烁/撕裂/糊化会直接
+        # 进成片无人拦。这里对「超分后的成品」跑一次视频质检（抽帧 + 多模态判定）。
+        # 口径与整集视频质检一致，但**不阻断**（fail-open）：超分是增值环节，质检接口
+        # 未就绪 / 成品不达标时只标记 qc_passed=False 并留痕，不把任务判 error ——
+        # 用户仍能拿到超分成品，同时能看到质检结论。
+        _qc_result = {"checked": False, "passed": None, "reason": ""}
+        try:
+            _qc_cfg = _qc_load_cfg()
+            if qc_client.video_qc_ready(_qc_cfg):
+                _out_path = result.get("output_path") or ""
+                _before = probe_video_info(video_path) or {}
+                _dur = _before.get("duration")
+                _style = _project_style(project_name)
+                _verdict = qc_client.check_video(
+                    _out_path, "超分成品质检（对超分后的成品抽帧，检查是否引入闪烁/撕裂/糊化/色块）",
+                    _qc_cfg, style=_style,
+                    expected_duration=float(_dur) if _dur else None)
+                _gate = _qc_gate(_verdict)
+                _qc_result["checked"] = bool(_verdict.get("ok"))
+                _qc_result["passed"] = bool(_gate.get("accept", False))
+                _qc_result["reason"] = (_gate.get("reason") or _verdict.get("reason")
+                                        or _verdict.get("error") or "")
+                _qc_result["score"] = _verdict.get("score")
+                if _verdict.get("ok"):
+                    try:
+                        _qc_record_verdict(
+                            project_name, "video", "upscale", "超分成品质检",
+                            1, None, _out_path, _verdict, style=_style)
+                    except Exception as _re:  # noqa: BLE001 质检记录失败不影响超分交付
+                        app.logger.warning("超分质检落盘失败（不影响交付）：%s", _re)
+                if _qc_result["passed"] is False:
+                    app.logger.warning("[超分质检] 成品未通过质检：%s", _qc_result["reason"])
+                else:
+                    app.logger.info("[超分质检] 成品质检%s：%s",
+                                    "通过" if _qc_result["passed"] else "未执行/不可判定",
+                                    _qc_result["reason"])
+            else:
+                app.logger.info("[超分质检] 视频质检未就绪（开关/接口），跳过（fail-open）")
+        except Exception as _qe:  # noqa: BLE001 质检自身异常绝不拖垮超分交付
+            _qc_result["reason"] = f"质检异常：{_qe}"
+            app.logger.warning("[超分质检] 质检异常（不影响交付）：%s", _qe)
+        result["qc"] = _qc_result
+
         with upscale_lock:
             upscale_tasks[task_id].update({
                 "status": "done", "progress": 100, "message": "超分完成",
