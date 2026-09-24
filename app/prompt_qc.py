@@ -103,10 +103,17 @@ _MIN_LEAK_LEN = 4
 #: 资产提示词最短长度（中英混排按字符计）
 _ASSET_MIN_LEN = 12
 
-#: 时间码：与 h3_prompt_kit.fmt_ts / build_detailed_description 的写法一致
+#: 时间码：与 h3_prompt_kit.fmt_ts / build_detailed_description 的写法一致。
+#: 2026-09-24 对齐本地模板后，时间码有两种合法落法：
+#:   ① 首镜 ``[Shot 1] ...``（本身不带时间码，以 00:00.000 为隐含起点）
+#:   ② 后续镜 ``At 00:03.500, the camera cuts to ...``
+#: 故这里同时接受「[Shot N] 紧跟时间码」与「裸 MM:SS.mmm」两种形态。
 _TS_RE = re.compile(r"\[Shot\s+(\d+)\]\s+(\d{1,2}):(\d{2})\.(\d{3})")
-#: 台词标记：(S1) 说：[Chinese] 台词
-_SPOKEN_RE = re.compile(r"\(S\d+\)\s*[^：:]{0,6}[：:]\s*\[[A-Za-z\-]+\]")
+#: 裸时间码（新格式的 At 00:03.500 与首码判据用）
+_BARE_TS_RE = re.compile(r"(?<![\d:])(\d{1,2}):(\d{2})\.(\d{3})")
+#: 台词标记（本地模板同格式）：``... rate (S1): <d>[Chinese] 台词</d>``。
+#: 兼容历史写法 ``(S1) 说：[Chinese] 台词``——两者都算「有台词标记」。
+_SPOKEN_RE = re.compile(r"\(S\d+\)\s*[^：:\n]{0,6}[：:]\s*(?:<d>\s*)?\[[A-Za-z\-]+\]")
 #: 连续标点（含全角/半角混排）
 _PUNCT_RUN = re.compile(r"[，、,;。；！？!?]{2,}")
 
@@ -323,9 +330,17 @@ def _check_h3(prompt: str, ctx, style, expect_refs: Optional[bool] = None,
 
     marks = [(int(m.group(1)), int(m.group(2)) * 60 + int(m.group(3)) + int(m.group(4)) / 1000.0)
              for m in _TS_RE.finditer(prompt)]
-    if not marks:
+    # 2026-09-24 对齐本地模板：后续镜的时间码内嵌在句子里（``At 00:03.500, ...``），
+    # 不再跟在 ``[Shot N]`` 后面。故 ``marks`` 为空时退化用裸时间码判时间轴是否存在。
+    bare = [(int(m.group(1)) * 60 + int(m.group(2)) + int(m.group(3)) / 1000.0)
+            for m in _BARE_TS_RE.finditer(prompt)]
+    # 单节拍提示词（时长 ≤ BEAT_MAX_SEC）本身**不需要**时间码：只有 ``[Shot 1]``，
+    # 起点天然是 00:00.000，模板同样不写时间码。只有在出现 ≥2 个节拍时，时间码
+    # 才是判断时间轴是否连续的必需信息。
+    multi_beat = prompt.count("[Shot ") > 1 or "camera cuts to" in prompt
+    if not marks and not bare and multi_beat:
         issues.append("缺少 [Shot N] MM:SS.mmm 时间码：节拍无时间轴，长镜头会空转")
-    else:
+    elif marks:
         nums = [n for n, _ in marks]
         if nums[0] != 1 or nums != list(range(1, len(nums) + 1)):
             issues.append(f"时间码编号不连续（{[n for n in nums][:8]}）：节拍顺序被打乱")
@@ -334,17 +349,26 @@ def _check_h3(prompt: str, ctx, style, expect_refs: Optional[bool] = None,
             issues.append("首个时间码不是 00:00.000：视频开头会缺画面")
         if any(b < a for a, b in zip(times, times[1:])):
             issues.append("时间码非递增：节拍时间轴倒流")
+    else:
+        # 新格式：首镜无时间码（隐含 00:00.000），后续镜为 At 时间码。
+        # 断言递增即可；首码 00:00.000 由「首镜 [Shot 1] 开头」隐含保证。
+        if any(b < a for a, b in zip(bare, bare[1:])):
+            issues.append("时间码非递增：节拍时间轴倒流")
 
     if _dialogue_texts(ctx) and not _SPOKEN_RE.search(prompt):
-        issues.append("镜头有台词但缺少「(S1) 说：[Chinese] 台词」标记：口型与配音可能对不上")
+        issues.append("镜头有台词但缺少「(S1): <d>[Chinese] 台词</d>」标记：口型与配音可能对不上")
 
     if expect_refs and "<Picture 1>" not in prompt:
         issues.append("期望使用参考图但缺少 <Picture 1> 标签：H3 拿不到参考图语义")
 
     if not style_declared(prompt, style):
         issues.append("未声明画面风格：全片画风可能被参考图带偏")
-    if H3_NO_TEXT not in prompt:
-        issues.append("缺少「严禁出现文字/字幕/水印」约束")
+    # ⚠️ 2026-09-24：**取消**「必须含无文字/字幕约束」这条检查。对齐本地模板后
+    # 提示词里不再写「严禁出现文字/字幕/水印」——该措辞会把「字幕/文字」两个词
+    # 引入提示词，反而诱导 H3 把台词画成字幕（实测视频出字幕）。
+    # 改为检查「无台词的节拍是否显式声明 No dialogue」，这才是防字幕的有效手段。
+    if not _SPOKEN_RE.search(prompt) and "No dialogue" not in prompt:
+        issues.append("无台词且未显式声明「No dialogue」：模型可能自补台词并画成字幕")
     return {"issues": issues, "fatal": fatal}
 
 
@@ -352,14 +376,45 @@ def _repair_h3(prompt: str, ctx, style) -> Tuple[str, List[str]]:
     """H3 提示词只做「安全追加」类自愈。
 
     结构缺段（六段不全）**不在这里重建** —— 重建需要参考图语义（每张图的用途），
-    只有生成端 ``comfyui_client.resolve_h3_prompt`` 掌握。这里只补无文字约束这种
-    与上下文无关的固定句，其余交给生成端重建（见 verdict.rebuild_hint）。
+    只有生成端 ``comfyui_client.resolve_h3_prompt`` 掌握。
+
+    ⚠️ 2026-09-24：**不再补写**「严禁出现文字/字幕/水印」约束。对齐本地手跑模板后，
+    该约束被视为有害（在提示词里引入「字幕/文字」两个词，反而诱导 H3 画出字幕）。
+    现在只补「No dialogue」这类与上下文无关、且真正有利于防字幕的固定句。
     """
     repairs: List[str] = []
     out = prompt
-    if out and H3_NO_TEXT not in out:
-        out = out.rstrip() + "\n" + H3_NO_TEXT_FULL
-        repairs.append("补写「严禁出现文字/字幕/水印」约束")
+    if out and not _SPOKEN_RE.search(out) and "No dialogue" not in out:
+        # 无台词镜：在 detailed_description 段内**最后一条 [Shot 节拍** 上补 No dialogue。
+        # ⚠️ 不能简单取「下一段名之前的最后一行」—— 那行往往是全片风格声明
+        #（「全片画面风格统一为…」），补在后面既语义错位、也识别不到节拍。
+        # 这里从段尾向前找最近一条真正的节拍行（以 ``[Shot`` 或 ``At `` 开头）。
+        lines = out.split("\n")
+        idx = None
+        for i, ln in enumerate(lines):
+            if ln.strip().lower().startswith("detailed_description"):
+                idx = i
+                break
+        if idx is not None:
+            end = len(lines)
+            for j in range(idx + 1, len(lines)):
+                if lines[j].strip().lower().rstrip(":：") in (
+                        h3_prompt_kit.REF_SECTIONS + h3_prompt_kit.BASE_SECTIONS):
+                    end = j
+                    break
+            beat = None
+            for j in range(end - 1, idx, -1):
+                s = lines[j].lstrip()
+                if s.startswith("[Shot") or s.startswith("At "):
+                    beat = j
+                    break
+            if beat is not None:
+                lines[beat] = lines[beat].rstrip() + " No dialogue."
+                out = "\n".join(lines)
+                repairs.append("补写「No dialogue」（防模型自补台词被画成字幕）")
+        else:
+            out = out.rstrip() + " No dialogue."
+            repairs.append("补写「No dialogue」（防模型自补台词被画成字幕）")
     return out, repairs
 
 

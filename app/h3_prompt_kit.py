@@ -306,10 +306,22 @@ _DEFAULT_MUSIC_BY_EMOTION = {
 
 
 def build_soundscape(shot: dict, scene_hint: str = "") -> str:
-    """``overall_soundscape``：环境音 + 动作音 + 非语言人声（画面内可闻）"""
+    """``overall_soundscape``：环境音 + 动作音 + 台词混响（画面内可闻）
+
+    本地模板的写法是**把画面内所有可闻声音按时间顺序铺开**，并在有台词时
+    顺带描述「台词的音色与混响」（例如 ``Her spoken words reverberate cleanly
+    against the obsidian platform, the echo of "娶我" lingering for a full second``）。
+    这既补齐了配音的空间感，也**再次向模型确认「人物确实在说话」**——对驱动口型
+    有正面作用。
+
+    ⚠️ 历史实现结尾固定写「全程无解说、无旁白念白」，本意是防旁白，但副作用是
+    在同一段里同时出现「台词」与「无念白」两种相反信号，模型可能因此把台词
+    降级成画外音（口不动）。现改为只在**确实没有台词**时才声明无念白。
+    """
     loc = str(shot.get("location") or scene_hint or "").strip()
     sfx = _clean_sfx(shot.get("audio_cues") or "")
     emotion = str(shot.get("emotion") or "").strip()
+    lines = dialogue_lines(shot.get("dialogue"))
     parts: List[str] = []
     if sfx:
         parts.append(sfx)
@@ -320,11 +332,37 @@ def build_soundscape(shot: dict, scene_hint: str = "") -> str:
     if not parts:
         parts.append("安静环境底噪，人物呼吸与衣料摩擦清晰可闻")
     body = "，".join(parts).rstrip("。；;，,")
-    return f"{body}。全程无解说、无旁白念白，声音随镜头推进自然增强或减弱。"
+    if lines:
+        said = _strip_end(lines[-1].get("text"))[:12]
+        tail = (f"人物的说话声在{loc or '场景'}中自然扩散，混响清晰、"
+                f"与口型同步，句尾余韵短暂回荡后归于环境底噪。")
+        if said:
+            tail = f"「{said}」的余韵短暂回荡后归于环境底噪。人物的说话声在{loc or '场景'}中自然扩散，与口型同步。"
+        return f"{body}。{tail}"
+    return f"{body}。全程无旁白念白，声音随镜头推进自然增强或减弱。"
 
 
 def build_music(shot: dict, style: str = "") -> str:
-    """``non_diegetic_music``：画面外配乐（角色听不到）"""
+    """``non_diegetic_music``：画面外配乐（角色听不到）
+
+    本地模板在**不需要画外配乐**时直接写 ``N/A``（该段名仍必须存在，
+    :func:`validate` 靠段名判合规）。镜头显式标了 ``music: false`` /
+    ``no_music`` 或情绪为空时，跟随模板输出 ``N/A``，避免凭空引导出一段配乐。
+    """
+    raw_flag = shot.get("non_diegetic_music")
+    if raw_flag is None:
+        raw_flag = shot.get("music")
+    # 显式关闭配乐：布尔 False / 字符串 "false"/"none"/"n/a"/"无" 一律视为 N/A
+    if raw_flag is not None and not isinstance(raw_flag, str):
+        if raw_flag is False:
+            return "N/A"
+    if isinstance(raw_flag, str) and raw_flag.strip().lower() in (
+            "false", "none", "n/a", "na", "no", "off", "无", "不要", "不需要"):
+        return "N/A"
+    if isinstance(raw_flag, str) and raw_flag.strip() and raw_flag.strip() not in ("true", "yes", "on"):
+        # 调用方直接给了配乐描述 → 尊重它
+        return _strip_end(raw_flag) + "，始终保持在画面之外，不出现人声演唱。"
+
     emotion = str(shot.get("emotion") or "").strip()
     for key, desc in _DEFAULT_MUSIC_BY_EMOTION.items():
         if key and key in emotion:
@@ -352,9 +390,11 @@ def _beats(shot: dict, duration: float) -> List[Tuple[float, float, str]]:
     # 直接 join 会让同一句细节在视频提示词里出现两遍 → 重复的那份丢掉。
     if detail and detail in desc:
         detail = ""
-    body = "，".join(x for x in (desc, detail) if x)
+    # ⚠️ 每段各自去掉句末标点再 join：LLM 常在 description 末尾带「。」，
+    # 直接拼会产出「。，」连排（视频模型会把它当断句，浪费提示词预算）。
+    body = "，".join(x for x in (_strip_end(desc), _strip_end(detail)) if x)
     if not body:
-        body = str(shot.get("prompt_h3") or "").strip() or "画面延续上一镜的构图与光影"
+        body = _strip_end(str(shot.get("prompt_h3") or "")) or "画面延续上一镜的构图与光影"
 
     dur = max(1.0, float(duration or 5.0))
     if dur <= BEAT_MAX_SEC:
@@ -368,11 +408,14 @@ def _beats(shot: dict, duration: float) -> List[Tuple[float, float, str]]:
         if i == 0:
             text = body
         elif i == n - 1:
-            text = "动作收束，画面在情绪落点上短暂停留，为下一镜留出衔接"
+            # 本地模板的收尾写法是「动作推进 → 说话 → 收束」，最后一拍必须
+            # **为台词留出明确的开口时机**（「and then speaks」），否则 H3 会把
+            # 台词当成背景旁白、人物嘴唇不动。
+            text = "动作收束、姿态转为稳定，画面前后衔接自然"
             if narration:
                 text += f"；画外音延续：「{narration[:30]}」"
         else:
-            text = f"动作持续推进，保持人物外观、服装与场景光照与前一刻完全一致"
+            text = "动作持续推进，保持人物外观、服装与场景光照与前一刻完全一致"
         beats.append((start, span, text))
     return beats
 
@@ -382,25 +425,78 @@ def _strip_end(text: str) -> str:
     return str(text or "").strip().rstrip("。．.；;，,！!？?")
 
 
-def _spoken_clause(lines: Sequence[Dict[str, str]], slots: Dict[str, str]) -> str:
-    """把台词渲染成 H3 要求的「(S1) 说：[Chinese] 台词」形式"""
+#: 说话动作的前导语（按性别/未知各一句）。这段**必须显式描述「开口说话」的
+#: 物理动作**，否则 H3 会把台词只当成音轨去配音、画面里人物嘴唇不动（实测现象）。
+#: 本地手跑模板（H3信号10段测试001.json）里每句台词前都有
+#: ``speaks — a clear, resonant female voice with ... at a measured declarative rate``，
+#: 那正是模型据此驱动口型的依据，不能省。
+_SPEAK_LEAD = {
+    "male": "turns his head and speaks — a clear male voice at a measured spoken rate",
+    "female": "turns her head and speaks — a clear female voice at a measured spoken rate",
+    "": "speaks — a clear voice at a measured spoken rate",
+}
+
+
+def _guess_voice(form: str) -> str:
+    """从说话人署名猜音色性别键（女帝/娘… → female；男/爷… → male；判不出返回 ``""``）"""
+    t = str(form or "")
+    if re.search(r"女|娘|妃|后|母|妹|姐|婆|妈", t):
+        return "female"
+    if re.search(r"男|爷|父|兄|弟|帝|王|公|叔|伯", t):
+        return "male"
+    return ""
+
+
+def _spoken_clause(lines: Sequence[Dict[str, str]], slots: Dict[str, str],
+                   speak_lead: str = "") -> str:
+    """把台词渲染成**本地模板同格式**的 H3 台词句
+
+    本地手跑模板（``H3信号10段测试001.json``）的写法是::
+
+        She holds still, breathing slowly, and then speaks — a clear, resonant
+        female voice with sharp regal timbre and unwavering pitch, at a measured
+        declarative rate (S1): <d>[Chinese] 我，穆兰圣女……</d> She closes her lips
+        after the final word.
+
+    历史实现写成 ``(S1) 说：[Chinese] 台词。对白的口型、语气与情绪必须与台词语义一致。``，
+    与本地格式有本质差别，会导致两个问题：
+
+    1. **人物不开口** —— 旧写法只声明「说」，没有「开口/口型开合」的动作描述，
+       H3 倾向只出配音、不做唇部动画（实测现象）。
+    2. 中文指令「说：」夹在英文描述里，与模板的英文语境不一致。
+
+    现按模板改为：先写英语「开口说话」动作 + 音色语速，再用 ``(SN): <d>[Chinese] 台词</d>``
+    包住台词，最后补一句「说完合上嘴唇」收口。
+    """
     spoken: List[str] = []
     for ln in lines:
-        text = _strip_end(ln.get("text"))
+        text = str(ln.get("text") or "").strip()
         if not text:
             continue
         tag = lang_tag(text) or "Chinese"
-        slot = slots.get(ln.get("speaker") or "", "")
-        who = f"({slot}) " if slot else ""
-        spoken.append(f"{who}说：[{tag}] {text}")
+        speaker = str(ln.get("speaker") or "").strip()
+        slot = slots.get(speaker, "")
+        who = f"({slot}): " if slot else ""
+        lead = speak_lead or _SPEAK_LEAD.get(_guess_voice(speaker), "") or _SPEAK_LEAD[""]
+        spoken.append(f"{lead} {who}<d>[{tag}] {text}</d>")
     if not spoken:
         return ""
-    return "；".join(spoken) + "。对白的口型、语气与情绪必须与台词语义一致。"
+    return " ".join(spoken) + " After the final word the lips close and the mouth returns to a still, closed position."
 
 
 def build_detailed_description(shot: dict, duration: float, style: str = "",
                                picture_refs: Optional[Dict[str, str]] = None) -> str:
-    """``detailed_description``：按 ``[Shot N] MM:SS.mmm`` 逐节拍写画面"""
+    """``detailed_description``：按 ``[Shot N]`` 逐节拍写画面（本地模板同格式）
+
+    与本地手跑模板（``H3信号10段测试001.json``）对齐的要点：
+
+    - 首镜用 ``[Shot 1]``，**后续镜用 ``At MM:SS.mmm, the camera cuts to ...``** 起头，
+      时间码内嵌在句子里（不再是「[Shot N] 00:03.500 中景：」）。
+    - 无台词的镜头必须**显式写 ``No dialogue``** —— 留空会让模型自行「补台词」，
+      进而把台词画成字幕；模板里每个无台词节拍都明确标注。
+    - 结尾**不再追加**「画面中严禁出现任何文字、字幕…」这类中文禁令：模板里没有，
+      而且它本身就在提示词里引入了「字幕/文字」这两个词，反而更容易诱发字幕。
+    """
     camera = str(shot.get("camera") or "中景").strip()
     lines = dialogue_lines(shot.get("dialogue"))
     slots = speaker_slots(lines)
@@ -419,16 +515,26 @@ def build_detailed_description(shot: dict, duration: float, style: str = "",
         # 否则历史超长描述会把 detailed_description 整段撑爆。
         clause = _clamp(clause, MAX_DETAIL_CHARS, "build_detailed_description.detail")
         if idx == 1 and first_ref:
-            clause += f"，构图、景别与人物位置以 {first_ref} 为基准"
-        line = f"[Shot {idx}] {fmt_ts(start)} {camera}：{clause}。"
+            clause += f"；构图、景别与人物位置以 {first_ref} 为基准"
+        # 统一补句号收口（clause 已 strip 掉原句末标点，不会出现「。。」）
+        clause += "。"
+        # 模板格式：首镜 [Shot 1]，后续镜「At 时间码, the camera cuts to」。
+        # 景别只在首镜点明，后续由画面内容承接（模板同样不逐镜重复景别词）。
+        if idx == 1:
+            head = f"[Shot 1] {camera}：" if camera else "[Shot 1] "
+        else:
+            head = f"At {fmt_ts(start)}, the camera cuts to a new framing of {camera}：" if camera \
+                else f"At {fmt_ts(start)}, the camera cuts to a new framing："
         # 台词落在最后一个节拍，符合「动作推进→开口说话」的时序直觉
         if idx == len(beats) and spoken:
-            line += " " + spoken
+            line = head + clause + " " + spoken
+        else:
+            # 无台词节拍显式标注，避免模型自补台词 → 画成字幕
+            line = head + clause + " No dialogue."
         out.append(line)
 
     if style:
         out.append(f"全片画面风格统一为「{style}」，光影细腻，构图稳定。")
-    out.append("画面中严禁出现任何文字、字幕、台词文本、水印、logo 或标识。")
     return "\n".join(out)
 
 
@@ -461,7 +567,11 @@ def _retention_analysis(picture_defs: Sequence[Tuple[str, str]],
     lines.append("- 保留参考图的光照方向与整体色调，只推进动作与时间，不改变场景结构")
     if style:
         lines.append(f"- 画面风格严格锁定为「{style}」，不得被参考图之外的画风带偏")
-    lines.append("- 不得叠加滤镜式风格转换、不得添加文字/字幕/水印/logo；不得改变画幅比例")
+    # ⚠️ 本地模板的 retention_analysis **不含任何「禁止文字/字幕」的否定指令**，
+    # 只描述「哪些内容必须保留」。历史实现在这里写「不得添加文字/字幕/水印/logo」，
+    # 副作用是：提示词里凭空出现「字幕」「文字」两个词，H3 反而更容易把它们画进画面
+    # （实测视频生成出了字幕）。故删掉该行，改用「必须保留」的正向表述。
+    lines.append("- 构图、画幅比例、人物外观与场景结构逐镜保持一致，前后镜头连续")
     return "\n".join(lines)
 
 
