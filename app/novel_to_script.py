@@ -80,6 +80,20 @@ SYSTEM_BIBLE = ("你是资深漫剧编剧与 AI 绘画提示词工程师，精�
 
 CHARS_PER_SHOT = 120          # 每个镜头承载的原文字数基准（镜头数随内容体量自动扩展，收紧以承载细节）
 SHOTS_PER_CHUNK_MIN = 6       # 单块分镜数下限（再短的块也至少这么多镜）
+
+# ---- 单集镜头数硬上限（H3 连续渲染的资源红线，2026-09-24 实测）----
+# ⚠️ 背景：整集视频走 H3 连续工作流（84 段一个 prompt，全程约 7 小时）。实测渲染到
+# **第 78 段**时 ComfyUI 崩溃：
+#     aimdo: xfer_file_read_at: GetOverlappedResult failed error=1450
+#     RuntimeError: HostBuffer.read_file_slice failed
+# error=1450 = Windows ERROR_NO_SYSTEM_RESOURCES —— 长跑把系统资源（尤其是 ComfyUI 默认
+# pin 住的 ram*0.40 ≈ 12.9GB 锁定页）耗尽，异步重叠 I/O 读不进模型权重。
+# 根因是**长跑累积**（时间相关，不是段号本身），但表现为「跑到 78 段左右必崩」。
+# 因此在剧本阶段就设硬上限：单集分镜数 ≤ MAX_SHOTS_PER_EPISODE，从源头不让任务长到会崩。
+# 配套：ComfyUI 侧可加 --disable-pinned-memory 进一步降低资源压力（见项目记忆）。
+# 超限处理：不丢原文 —— 按该集总字数等比收紧**每块的镜头额度**（每镜承载更多原文），
+# 全部子块仍然逐块送模型、原文覆盖率不受影响，只是镜头密度变稀。
+MAX_SHOTS_PER_EPISODE = 78
 # ---- 分镜阶段的 token 预算（必须给「思考」留预留量）----
 # ⚠️ always-on reasoning 模型（agnes-3.0-flash / GLM 系）在写分镜前会先输出一大段思考，
 # 实测该任务的思考量 ≈16K token。若 max_tokens 低于思考量，模型会「只吐思考、正文为空」，
@@ -627,12 +641,15 @@ def _fallback_bible(outlines: list, novel_title: str, style: str) -> dict:
 
 def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots_target: int,
                           events: list = None, depth: int = 0,
-                          continuity_ctx: dict = None, cache_dir: str = "") -> list:
+                          continuity_ctx: dict = None, cache_dir: str = "",
+                          shots_hard_cap: int = 0) -> list:
     """③ 单块写分镜（截断时自动提高 max_tokens；仍截断则把该块再二分后合并）
 
     continuity_ctx 非空时（跨集连贯性方案 A②③ / C⑦⑧）：注入上集摘要卡、衔接契约、
     项目级风格指南、人物口吻词典、金句保留清单与运镜术语表。
     cache_dir 非空时启用断点缓存：命中即跳过模型调用（见文件上方缓存说明）。
+    shots_hard_cap > 0 时收紧本块镜头数上限（单集硬上限 MAX_SHOTS_PER_EPISODE 的分配额度）——
+    只压上限、不动下限，避免与 SHOTS_PER_CHUNK_MIN 打架（下限由调用方按预算调低）。
     """
     char_brief = [
         {"name": c.get("name"), "appearance": (c.get("appearance") or "")[:40]}
@@ -642,7 +659,15 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
                   for i in (bible.get("items") or [])[:5] if isinstance(i, dict)]
     scene_brief = [{"name": s.get("name"), "appearance": (s.get("appearance") or "")[:40]}
                    for s in (bible.get("scenes") or [])[:6] if isinstance(s, dict)]
-    shots_cap = max(int(shots_target), min(120, int(shots_target) * 2 + 3))
+    _hard = int(shots_hard_cap or 0)
+    shots_target = int(shots_target)
+    if _hard > 0:
+        # 单集镜头数硬上限是**权威**：目标也不得超过它。否则 prompt 会自相矛盾
+        #（「至少 25 个、上限 6 个」），模型只会照目标超额产出 → 硬上限形同虚设。
+        shots_target = max(1, min(shots_target, _hard))
+    shots_cap = max(shots_target, min(120, shots_target * 2 + 3))
+    if _hard > 0:
+        shots_cap = min(shots_cap, max(shots_target, _hard))
     speech_budget = SHOT_SPEECH_BUDGET_CHARS
     prompt = f"""【任务】为漫剧《{bible.get('title') or ''}》的「{chunk.get('title')}」（第 {chunk['index']}/{chunk['total']} 段）编写分镜：至少 {shots_target} 个、上限 {shots_cap} 个，必须完整承载下方原文的全部情节。
 {REWRITE_RULES.format(chars_per_shot=CHARS_PER_SHOT)}
@@ -1579,6 +1604,22 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
     # 全量覆盖：镜头数随内容体量自动扩展（约每 CHARS_PER_SHOT 字 1 镜），不再为凑固定时长砍内容
     est_shots_total = sum(estimate_shots_for_chars(c.get("char_count") or 0) for c in all_chunks)
 
+    # ---- 单集镜头数硬上限（见 MAX_SHOTS_PER_EPISODE 的注释）----
+    # 超过上限时不删原文，只按比例收紧**每块的镜头额度**：全部子块照样送模型、原文覆盖率不变，
+    # 只是每镜承载的原文变多（镜头密度变稀）。真正的保底在下方对最终 shots 的硬截断。
+    per_chunk_cap = 0                      # 0 = 不限制
+    if est_shots_total > MAX_SHOTS_PER_EPISODE:
+        _n_sampled = max(1, len(sampled))
+        per_chunk_cap = max(1, -(-MAX_SHOTS_PER_EPISODE // _n_sampled))   # 向上取整均分
+        warnings.append(
+            f"本章预计 {est_shots_total} 镜，超过单集硬上限 {MAX_SHOTS_PER_EPISODE} 镜"
+            f"（整集 H3 连续渲染跑到约 {MAX_SHOTS_PER_EPISODE} 段后会因系统资源耗尽崩溃，"
+            f"已实测）→ 每块镜头额度收紧为 {per_chunk_cap} 镜。原文不删减，但镜头密度变稀；"
+            f"**建议把本章拆成 2 集分别生成**以保留画面细节。")
+        logger.warning("第%s集：镜头预算超限（预计 %d > 上限 %d），每块额度收紧为 %d：%s",
+                       episode_no, est_shots_total, MAX_SHOTS_PER_EPISODE, per_chunk_cap,
+                       chapter_title)
+
     total_steps = len(sampled) + 2 + len(sampled)
     report("prepare", 0, total_steps,
            f"第{episode_no}集《{chapter_title}》：{len(seg)} 字，二次分块 {len(all_chunks)} 块，"
@@ -1642,6 +1683,9 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
     for i, chunk in enumerate(sampled):
         chunk_chars_i = chunk.get("char_count") or len(chunk.get("text") or "")
         per_chunk = estimate_shots_for_chars(chunk_chars_i)
+        if per_chunk_cap:
+            # 单集硬上限生效：本块额度不得超预算（原文不丢，只是每镜承载更多）
+            per_chunk = max(1, min(int(per_chunk), int(per_chunk_cap)))
         report("shots", len(sampled) + 2 + i, total_steps,
                f"第{episode_no}集 编写分镜（子块 {chunk['index']}/{chunk['total']}，"
                f"{chunk_chars_i} 字 → {per_chunk} 镜）…",
@@ -1658,7 +1702,8 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
             all_shots.extend(build_shots_for_chunk(client, bible, ol, chunk, per_chunk,
                                                    events=trunc_events,
                                                    continuity_ctx=continuity_ctx,
-                                                   cache_dir=cache_dir))
+                                                   cache_dir=cache_dir,
+                                                   shots_hard_cap=per_chunk_cap))
         except LLMTruncatedError as e:
             fb = _fallback_shots_for_chunk(chunk, per_chunk, bible)
             all_shots.extend(fb)
@@ -1678,6 +1723,23 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
             logger.warning(f"第 {chunk['index']} 子块分镜失败，已兜底 {len(fb)} 镜：{e}")
 
     shots = _norm_shots(all_shots, bible, 1)
+
+    # ---- 单集镜头数硬上限（保底截断）----
+    # 上面的额度收紧只是「引导」，模型仍可能超产。这里做**最终保证**：整集镜头数绝不超过
+    # MAX_SHOTS_PER_EPISODE，否则整集 H3 连续渲染会跑到崩溃点（见常量注释）。
+    # 截断会丢失尾部情节 → 必须响亮记录（写进 metadata.warnings + error 日志），
+    # 并明确指引「拆成 2 集重新生成」，不能静默吞掉。
+    if len(shots) > MAX_SHOTS_PER_EPISODE:
+        _dropped = len(shots) - MAX_SHOTS_PER_EPISODE
+        shots = shots[:MAX_SHOTS_PER_EPISODE]
+        warnings.append(
+            f"⚠ 本集生成 {len(shots) + _dropped} 镜，超过单集硬上限 {MAX_SHOTS_PER_EPISODE} 镜，"
+            f"已截断末尾 {_dropped} 镜（**尾部情节会缺失**）。请把本章拆成 2 集重新生成，"
+            f"以完整覆盖原文。")
+        logger.error("第%s集：镜头数 %d 超上限 %d，已硬截断 %d 镜（%s）—— 建议拆章分集",
+                     episode_no, len(shots) + _dropped, MAX_SHOTS_PER_EPISODE, _dropped,
+                     chapter_title)
+
     for sh in shots:
         sh["episode"] = int(episode_no)
     if not shots:

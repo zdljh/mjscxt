@@ -33,7 +33,7 @@ from datetime import datetime
 from config import (
     PROJECT_OUTPUT_DIR, SCRIPT_DIR, ASSETS_DIR, CHARACTERS_DIR, ITEMS_DIR, SCENES_DIR,
     STORYBOARDS_DIR, VIDEOS_DIR, FINAL_DIR, UPSCALE_DIR, DUB_DIR, QC_DIR,
-    KEYFRAMES_DIR, CONTINUITY_DIR, DUB_MIX_DIR, WATERMARK_DIR,
+    KEYFRAMES_DIR, CONTINUITY_DIR, DUB_MIX_DIR, WATERMARK_DIR, H3_SFX_DIR,
     PROJECTS_DIR, PROJECT_INDEX_PATH, PROJECT_TRASH_DIR, PROJECT_MIGRATE_REPORT,
     PROJECT_DEFAULT_CONFIG, AI_CHAT_DIR, AI_SETTINGS_PATH, AI_CHAT_HISTORY_PATH,
     NOVELS_DIR, TASKS_DB_PATH,
@@ -524,6 +524,9 @@ def project_kind_roots() -> list:
         ("continuity", CONTINUITY_DIR),
         ("final_dub", DUB_MIX_DIR),
         ("watermark", WATERMARK_DIR),
+        # 分离音效产物 output/sfx/<项目>/（H3_SFX_DIR）此前漏登记 → 实测删项目后
+        # output/sfx/<项目>/ 会残留（其它 22 类都收走了，只有它留下）。
+        ("sfx", H3_SFX_DIR),
         # 下面几个是「两层」结构：comic_drama/{characters,scenes}/<项目>
         ("comic_characters", os.path.join(out, "comic_drama", "characters")),
         ("comic_scenes", os.path.join(out, "comic_drama", "scenes")),
