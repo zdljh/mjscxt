@@ -160,27 +160,30 @@ def _cache_put(cache_dir: str, kind: str, prompt: str, payload: dict) -> None:
 
 
 REWRITE_RULES = (
-    "【改写规则（这是改编，不是缩写：严禁删减原文内容）】\n"
+    "【改写规则（这是改编，不是缩写：关键情节严禁删减）】\n"
     "1) 原文的叙述、心理描写、场景描写、对话、人物动作必须全部落到镜头里，"
     "分别体现为画面描述（description）、台词（dialogue，含角色自语/心声）、"
     "动作与情绪（emotion）、音效与配乐（audio_cues）；\n"
     "2) 允许体裁形式改写：心理活动改写成该角色本人的自语台词（speaker 写角色名）"
     "或可拍的表情/动作，叙述改写成画面动作描述，环境描写改写成画面与音效，"
     "但不得改变情节、不得删减人物；\n"
-    "3) 严禁删除情节、删除人物、跳过段落、合并概括、只挑重点写；"
-    "原文内容越多，镜头就要越多（约每 {chars_per_shot} 字 1 个镜头，情节密集处更多）；\n"
+    "3) 严禁删除情节、删除人物、跳过段落；关键情节、人物动作、对话、金句**一个都不能少**。"
+    "但**过渡句、环境补叙、次要描写可以合并进相邻镜头**（写成该镜 description / visual_detail 的一部分），"
+    "不必为每一处次要描写单独拆镜头——画面信息不丢，只是归并到相邻镜头承载"
+    "（约每 {chars_per_shot} 字 1 镜为参考，关键情节密集处更多，次要描写可合并后略少）；\n"
     "4) 原文对话尽量原样写进对应角色的 dialogue.text，禁止改写成概括式引述；\n"
     "5) 镜头按原文时间顺序排列，块首镜头自然衔接上一块结尾，不得跳段、不得重复；\n"
-    "6) 【细节零删减·最高优先级】原文单句内的修饰细节（外貌、衣着、神态、动作过程、心理活动、"
-    "环境与光线、器物声响）都必须落到镜头里：外貌/器物/环境/神态写进 description（画面描述），"
+    "6) 【关键细节零删减·最高优先级】关键情节里的修饰细节（外貌、衣着、神态、关键动作过程、心理活动、"
+    "关键环境与光线、器物声响）都必须落到镜头里：外貌/器物/环境/神态写进 description（画面描述），"
     "心理活动转成可拍的表情动作或角色自语台词，动作过程写进 description，"
-    "对话与自语写进 dialogue，器物声响写进 audio_cues；\n"
-    "7) 【措辞尽量原样】承载细节时优先沿用原文措辞，只做体裁转换与必要的镜头化补白，"
+    "对话与自语写进 dialogue，器物声响写进 audio_cues；过渡句与次要环境描写合并进相邻镜头即可，不单独拆镜；\n"
+    "7) 【措辞尽量原样】承载关键细节时优先沿用原文措辞，只做体裁转换与必要的镜头化补白，"
     "严禁改写成笼统概括；\n"
     "8) 【本系统不产出旁白】成片没有画外音解说：原文里的背景补叙、环境描写一律靠画面呈现，"
     "心理活动靠角色神态动作或自语台词呈现，**禁止**用任何「旁白/画外音」形式复述原文；\n"
-    "9) 自检：写完一块后逐句回看原文，确认每一句（含背景补叙、过渡句、环境句）都能在某条镜头的 "
-    "description / visual_detail / dialogue / audio_cues 中找到对应承载，不允许出现「没写到」的句子。"
+    "9) 自检：写完一块后逐句回看原文，确认每一句都能在某条镜头的 description / visual_detail / "
+    "dialogue / audio_cues 中找到对应承载（可以合并到相邻镜头，但不允许「整句消失」）；"
+    "关键情节与金句不得遗漏，次要描写允许归并但不得整句丢弃。"
 )
 
 
@@ -639,7 +642,7 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
                   for i in (bible.get("items") or [])[:5] if isinstance(i, dict)]
     scene_brief = [{"name": s.get("name"), "appearance": (s.get("appearance") or "")[:40]}
                    for s in (bible.get("scenes") or [])[:6] if isinstance(s, dict)]
-    shots_cap = max(int(shots_target), min(120, int(shots_target) * 3 + 6))
+    shots_cap = max(int(shots_target), min(120, int(shots_target) * 2 + 3))
     speech_budget = SHOT_SPEECH_BUDGET_CHARS
     prompt = f"""【任务】为漫剧《{bible.get('title') or ''}》的「{chunk.get('title')}」（第 {chunk['index']}/{chunk['total']} 段）编写分镜：至少 {shots_target} 个、上限 {shots_cap} 个，必须完整承载下方原文的全部情节。
 {REWRITE_RULES.format(chars_per_shot=CHARS_PER_SHOT)}
@@ -655,9 +658,9 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
 {{"shots": [{{"camera": "景别+运镜（必须取自上方运镜术语表，如 中景跟拍/特写推入，10 字以内）", "location": "所属场景名（必须来自可用场景）", "description": "画面内容描述（80 字以内，写清人物动作、表情与关键构图；四个要素缺一不可：①人物动作过程（谁做了什么、怎么做的）②外貌衣着细节（发型/瞳色/服装材质/配饰）③环境与光线（时间、天气、光源方向、色调）④构图与景别（人物在画面中的位置、前中后景关系）；尽量沿用原文措辞）", "visual_detail": "画面补充细节（可选；当 description 之外还有更细的时间/天气/光源方向/动作过程/环境细节时写在这里，80 字以内；没有多余细节时写空字符串）", "dialogue": [{{"speaker": "说话角色名（必须与可用角色完全一致）", "text": "该角色台词（≤30 字；原文对话尽量原样保留；角色的自语/心声写成该角色本人的台词）"}}], "emotion": "情绪（8 字以内）", "audio_cues": "音效/配乐提示（60 字以内，只写环境音/音效/配乐，不写人声）", "characters_in_shot": ["出场角色名"], "items_in_shot": ["出场物品名"]}}]}}
 【禁止输出 prompt_h3 字段】视频提示词由程序在生成阶段按 H3 规范自动构建（它会结合当次实际传入的参考图，生成 subject_definitions / summary / retention_analysis / detailed_description / overall_soundscape / non_diegetic_music 六段）。你在剧本阶段并不知道最终配几张参考图，写出来的英文提示词缺少 <Picture N> 标签，反而会覆盖规范提示词导致出片偏离设定。因此**不要写 prompt_h3、不要写英文提示词**；把画面信息全部写进 description 即可。
 【台词要求】dialogue 必须是数组，数组元素为 {{"speaker": 角色名, "text": 台词}}；speaker 必须精确等于「可用角色」中的名字，禁止写“旁白/众人”等未登记角色；无台词的镜头 dialogue 写 []（空数组），禁止写成字符串或 null。角色的心理活动改写成该角色**本人**的自语台词时，speaker 仍写角色名（不要写成「旁白」，本系统没有旁白角色）。
-【台词预算（防成片截断）】单个镜头的 dialogue **合计不超过 {speech_budget} 字**（≈6.7 秒配音）。台词再多就**拆成更多镜头**，不要塞进同一个镜头——配音是按镜头时间轴铺的，单镜台词超出镜头时长会被成片尾部静默截掉。
+【台词预算（防成片截断）】单个镜头的 dialogue **合计不超过 {speech_budget} 字**（≈6.7 秒配音）。台词过多时**先精简冗余语气词与重复表述**，仍超预算才拆成相邻镜头——配音是按镜头时间轴铺的，单镜台词超出镜头时长会被成片尾部静默截掉。
 【音轨说明（本系统不产出旁白）】成片没有画外音解说，配音链路**只读 dialogue**：audio_cues 里写「雨声」「风声」这类音效**不会产生人声**。因此：① 有对话或自语的镜头必须写 dialogue，禁止把台词塞进 description / visual_detail / audio_cues；② 纯画面/纯动作镜头允许没有台词（该镜成片留白，由音效与配乐铺底），但**必须**在 audio_cues 写明音效/配乐提示；③ **严禁**凭空编造原文里没有的台词来「凑人声」——宁可留白，也不要无中生有。
-【硬性约束】shots 数组元素个数必须在 {shots_target} ~ {shots_cap} 之间：上方原文的全部情节都要落到镜头里，不得删减情节、不得跳过段落、不得合并概括（内容多时用更多镜头承载，而不是少写镜头）；name 字段必须与上面「可用角色/物品/场景」中的名字完全一致，不要新造名字。若上方给出「本集必须出现的原文金句」，必须把每句**原样**写进对应角色的 dialogue.text（不得改写、不得拆分、不得省略）。上一集已发生的事件禁止在本集重演。
+【硬性约束】shots 数组元素个数必须在 {shots_target} ~ {shots_cap} 之间：上方原文的**关键情节全部**都要落到镜头里，不得删减情节、不得跳过段落；过渡句与次要环境描写可合并进相邻镜头（不单独拆镜），但不得整句丢弃。name 字段必须与上面「可用角色/物品/场景」中的名字完全一致，不要新造名字。若上方给出「本集必须出现的原文金句」，必须把每句**原样**写进对应角色的 dialogue.text（不得改写、不得拆分、不得省略）。上一集已发生的事件禁止在本集重演。
 【逐句归属自检（细节零删减）】逐句回看原文，确保每一句（含背景补叙、过渡句、环境句）都落在某条镜头的 description / visual_detail / dialogue / audio_cues 里；短句可合并到相邻镜头，但不得整句丢弃。记住：本系统没有旁白，背景补叙与环境描写靠画面承载，心理活动靠神态动作或角色自语承载。"""
     label = f"shots#{chunk.get('index')}"
     hit = _cache_get(cache_dir, "shots", prompt, events, label)
