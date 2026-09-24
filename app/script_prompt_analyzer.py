@@ -129,32 +129,51 @@ def build_shot_prompt(script: dict, shot: dict, ref_mode: str = "character_scene
 情绪：{shot.get('emotion') or ''}　音效：{shot.get('audio_cues') or ''}
 出场角色：{json.dumps(chars, ensure_ascii=False)}
 出场物品：{json.dumps(items, ensure_ascii=False)}
-【prompt_h3 结构要求】必须严格按下面**六段**排版，段名逐字一致、顺序不可调换，缺一不可：
+【prompt_h3 结构要求】必须严格按下面**六段**排版，段名逐字一致、顺序不可调换，缺一不可。
+⚠️ **六段正文一律用英文书写**（与本地手跑模板一致）；角色的中文名、台词原文、场景中文名
+按模板惯例**原样嵌入英文句子里**，不要转写成拼音/罗马字。
 subject_definitions:
-<Picture 1> - 说明该参考图在本镜中的作用（构图/场景/人物姿态基准）
-<Picture 2> - 说明该参考图在本镜中的作用（人物外观锚点）
-<Subject 1> - 角色名：该角色在本镜头中的外观与服装（与参考图一致，不得改服装）
+<Picture 1> is the reference image defining the appearance, costume and style of 角色名, and serves as the composition anchor for their on-screen shots: <该参考图的用途说明>
+<Picture 2> is the reference image defining the environment, materials and lighting mood of the scene: <该参考图的用途说明>
+<Subject 1> is 角色名 in <Picture 1> — <该角色在本镜头中的外观与服装，中文原样保留>; the on-screen appearance and costume must stay consistent with this reference image.
 
 summary:
-2~4 句话概述这段约 {duration} 秒的视频内容、主体与情绪基调。
+必须以 [reference generation] 开头（这是 Ref2VA 模式声明，不可省略）。随后 2~4 句英文概述这段约 {duration} 秒的视频内容、主体与情绪基调。
 
 retention_analysis:
-- 必须保留 <Picture 1> 中的哪些元素（构图、景别、机位、环境）
-- 必须保留 <Picture 2> 中角色的哪些元素（五官、发型、服装、配饰）
-- 哪些改造**不允许**发生（不得换人、不得改服装、不得加文字水印）
+逐条以「<Subject N> 角色名 (appears in [Shot 1]): fully_preserved - …」或
+「<Picture N> (appears in [Shot 1]): fully_preserved - …」句式声明**必须保留**什么：
+- 主体参考图（角色）→ 写 costume / palette / hairstyle 的保留项
+- 场景参考图 → 写 scene structure / materials / lighting 的保留项
+- 结尾统一声明：光照方向与整体色调沿用参考图，只推进动作与时间，不改变场景结构
+⚠️ 只做**正向**「必须保留」表述；**不要**写「不得添加文字/字幕/水印」这类否定指令 ——
+该措辞会把「字幕」「文字」两个词引入提示词，反而诱导模型把它们画进画面（实测踩过）。
 
 detailed_description:
-[Shot 1] 00:00.000 {shot.get('camera') or '中景'}：写清主体动作与表情、环境与光线、镜头运动方式与节奏。台词必须带语言标记写成「(S1) 说：[Chinese] 台词原文」（语言按原文，中文写 Chinese）。时间码格式固定为 MM:SS.mmm；时长超过 6 秒时拆成 2~3 个时间码节拍，总时长必须等于 {duration} 秒。
+**首句先写全片风格**，模板句式：`The target video uses a <风格英文短语> style, with a shallow depth of field that keeps the speaking faces as the sharp focal plane while the background falls into soft bokeh.`
+随后逐节拍写画面。**首镜**用 `[Shot 1] <英文景别短语>: …`（如 `A medium shot:` / `A close-up:`），
+**后续镜**用 `At MM:SS.mmm, the camera cuts to <小写英文景别>: …`（时间码内嵌句中、景别在句中压小写）。
+时长超过 6 秒时拆成 2~3 个节拍，总时长必须等于 {duration} 秒。
+台词必须写成模板格式：先写英语「开口说话」动作 + 音色语速，再包住台词原文：
+`… and then speaks — a clear female voice at a measured spoken rate (S1): <d>[Chinese] 台词原文</d> After the final word the lips close and the mouth returns to a still, closed position.`
+（语言标记按原文语言，中文写 Chinese。⚠️ 只写「说：」而**不带「开口说话」的动作描述**，
+模型只会配音、画面里人物嘴唇不动 —— 这句话是驱动口型的关键，不可省。）
+**没有台词**的节拍必须显式写 `No dialogue.`，否则模型会自补台词并画成字幕。
 
 overall_soundscape:
-一段连贯散文，描述全程环境音、动作音与非语言人声（角色听得到的声音）。
+一段连贯**英文**散文，按时间顺序描述全程环境音、动作音与非语言人声（角色听得到的声音）。
+有台词时顺带描述台词的音色与混响，再次确认「人物确实在说话」；只在**确实无台词**时才声明
+「No narration or voice-over throughout」。
 
 non_diegetic_music:
-一段连贯散文，描述画面外配乐（配器、速度、情绪走向），始终保持在画面之外、无人声演唱。
+**默认直接写 `N/A`**（模板 10 段里 9 段都是 N/A，配乐交由后期处理）。
+只有在剧本明确要求画外配乐时，才写一段英文散文描述配器、速度与情绪走向，并注明始终保持在画面之外、无人声演唱。
 
 【输出要求】严格只输出一个 JSON 对象，不要 markdown 代码块、不要解释文字：
-{{"prompt_h3": "完整六段式 H3 Ref2VA 提示词（六段段名齐全、按上述顺序，用 \\n 换行）", "storyboard_prompt_zh": "该镜头分镜图的中文提示词（80 字以内，写构图、景别、人物姿态、环境与光线，可直接用于分镜图生成）"}}
-【硬性约束】六段段名必须原样出现在输出中；画面里严禁出现任何文字、字幕、水印、logo；不要写与画面无关的抽象词（cinematic / beautiful 之类），改成具体视觉与听觉细节。"""
+{{"prompt_h3": "完整六段式 H3 Ref2VA 提示词（六段段名齐全、按上述顺序、正文英文，用 \\n 换行）", "storyboard_prompt_zh": "该镜头分镜图的中文提示词（80 字以内，写构图、景别、人物姿态、环境与光线，可直接用于分镜图生成）"}}
+【硬性约束】六段段名必须原样出现在输出中；summary 必须以 [reference generation] 开头；
+**不要**写「严禁出现任何文字/字幕/水印」类否定指令（有害，见上）；不要写与画面无关的抽象词
+（cinematic / beautiful 之类），改成具体视觉与听觉细节。"""
 
 
 def _missing_sections(text: str) -> list:

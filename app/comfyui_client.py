@@ -2141,6 +2141,12 @@ class ComfyUIClient:
             storyboard_ref 非空 → <Picture 1> = 分镜图（构图/景别/机位/人物姿态基准）
                                   <Picture 2> = 主角外观锚点
             否则                 → <Picture 1..n> = 角色外观锚点，其后为场景环境参考
+
+        ⚠️ ``subjects`` 里的 ``picture`` 字段是给 ``h3_prompt_kit`` 用的**归属声明**：
+        ``<Subject N> is X in <Picture M>`` 与 retention_analysis 的保留项措辞
+        （主体图写 costume/palette、场景图写 scene structure/lighting）都靠它分流。
+        历史实现不写该字段 → 场景参考图会被误写成「the costume … follow the reference
+        image exactly」（语义错位的假声明，2026-09-24 二次对齐时发现）。
         """
         picture_defs: List[tuple] = []
         subjects: List[Dict[str, str]] = []
@@ -2162,16 +2168,19 @@ class ComfyUIClient:
                     f"必须与 <Picture 1> 保持同一人物"))
             for ref in (char_refs or [])[:1]:
                 subjects.append({"name": ref.get("name", "主角"),
-                                 "appearance": _appearance(ref)})
+                                 "appearance": _appearance(ref),
+                                 "picture": "<Picture 2>" if picture_defs else "<Picture 1>"})
             return picture_defs, subjects
 
         for ref in (char_refs or [])[:2]:
             name = ref.get("name", f"角色{len(picture_defs) + 1}")
+            label = f"<Picture {len(picture_defs) + 1}>"
             picture_defs.append((
-                f"<Picture {len(picture_defs) + 1}>",
+                label,
                 f"{name} 的外观参考，定义其五官、发型、服装与画风，"
                 f"并作为其出场镜头的构图锚点"))
-            subjects.append({"name": name, "appearance": _appearance(ref)})
+            subjects.append({"name": name, "appearance": _appearance(ref),
+                             "picture": label})
         for ref in (scene_refs or [])[:1]:
             name = ref.get("name", f"场景{len(picture_defs) + 1}")
             picture_defs.append((

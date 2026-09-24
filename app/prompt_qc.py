@@ -114,6 +114,22 @@ _BARE_TS_RE = re.compile(r"(?<![\d:])(\d{1,2}):(\d{2})\.(\d{3})")
 #: 台词标记（本地模板同格式）：``... rate (S1): <d>[Chinese] 台词</d>``。
 #: 兼容历史写法 ``(S1) 说：[Chinese] 台词``——两者都算「有台词标记」。
 _SPOKEN_RE = re.compile(r"\(S\d+\)\s*[^：:\n]{0,6}[：:]\s*(?:<d>\s*)?\[[A-Za-z\-]+\]")
+#: 「开口说话」动作描述（2026-09-24 二次对齐）：模板每句台词前都有
+#: ``speaks — a clear, resonant female voice with …, at a measured declarative rate``。
+#: **没有这句就没有唇部动画**（H3 只配音、不开口，实测现象），故升级为硬检查。
+_SPEAK_ACTION_RE = re.compile(r"speaks\s*[—\-–][^.]{0,120}?voice", re.IGNORECASE)
+#: ``detailed_description`` 首句风格声明（模板：``The target video uses a … style …``）。
+#: ⚠️ 必须同时接受历史中文写法（「全片画面风格统一为…」），否则存量项目重出视频时
+#: 会被新规则统一判缺陷（假红）。
+_STYLE_OPENING_RE = re.compile(r"^The target video uses .{0,200}?style\b",
+                               re.IGNORECASE | re.MULTILINE)
+#: 历史中文风格声明（存量项目按旧格式生成）—— 有它即认为风格已声明，不再报「缺风格首句」。
+_DD_CN_STYLE_RE = re.compile(r"全片画面风格统一为")
+#: 中文景别写进镜头行（``[Shot 1] 中景：`` / ``cuts to a new framing of 近景：``）。
+#: 模板一律用英文景别短语，故命中即报。
+_CN_CAMERA_RE = re.compile(
+    r"\[Shot \d+\]\s*(?:大?远景|全景|大?中景|中近景|近景|大?特写|微距)[：:]"
+    r"|camera cuts to[^:：\n]{0,24}(?:大?远景|全景|大?中景|中近景|近景|大?特写|微距)[：:]")
 #: 连续标点（含全角/半角混排）
 _PUNCT_RUN = re.compile(r"[，、,;。；！？!?]{2,}")
 
@@ -201,6 +217,29 @@ def style_declared(text: str, style) -> bool:
         return True
     hay = text.lower()
     return any(t.lower() in hay for t in toks)
+
+
+def _section_body(prompt: str, name: str) -> str:
+    """取 H3 提示词里某一段的正文（下一个顶层段名之前的内容）
+
+    ⚠️ 段名必须以**行首 ``name:`` 独占一行**识别（与 build_ref2va 的输出格式一致），
+    否则正文里出现的同名英文词会被误当作段边界。找不到段名时返回空串。
+    """
+    lines = str(prompt or "").split("\n")
+    start = None
+    for i, ln in enumerate(lines):
+        if ln.strip().lower().rstrip(":：") == name.lower():
+            start = i + 1
+            break
+    if start is None:
+        return ""
+    end = len(lines)
+    for j in range(start, len(lines)):
+        if lines[j].strip().lower().rstrip(":：") in (
+                h3_prompt_kit.REF_SECTIONS + h3_prompt_kit.BASE_SECTIONS):
+            end = j
+            break
+    return "\n".join(lines[start:end]).strip()
 
 
 def _dialogue_texts(ctx) -> List[str]:
@@ -337,7 +376,14 @@ def _check_h3(prompt: str, ctx, style, expect_refs: Optional[bool] = None,
     # 单节拍提示词（时长 ≤ BEAT_MAX_SEC）本身**不需要**时间码：只有 ``[Shot 1]``，
     # 起点天然是 00:00.000，模板同样不写时间码。只有在出现 ≥2 个节拍时，时间码
     # 才是判断时间轴是否连续的必需信息。
-    multi_beat = prompt.count("[Shot ") > 1 or "camera cuts to" in prompt
+    #
+    # ⚠️ 2026-09-24 二次对齐：多节拍判据必须只看**节拍行**（行首 ``[Shot N]`` / ``At …``），
+    # 不能用 ``prompt.count("[Shot ")`` —— retention_analysis 段里的
+    # ``(appears in [Shot 1], [Shot 2])`` 归属声明也会被计入，导致**单节拍镜被
+    # 误判成多节拍**，进而误报「缺少时间码」（实测踩过）。
+    beat_lines = [ln.lstrip() for ln in prompt.split("\n")
+                  if ln.lstrip().startswith("[Shot ") or ln.lstrip().startswith("At ")]
+    multi_beat = len(beat_lines) > 1 or "camera cuts to" in prompt
     if not marks and not bare and multi_beat:
         issues.append("缺少 [Shot N] MM:SS.mmm 时间码：节拍无时间轴，长镜头会空转")
     elif marks:
@@ -358,6 +404,14 @@ def _check_h3(prompt: str, ctx, style, expect_refs: Optional[bool] = None,
     if _dialogue_texts(ctx) and not _SPOKEN_RE.search(prompt):
         issues.append("镜头有台词但缺少「(S1): <d>[Chinese] 台词</d>」标记：口型与配音可能对不上")
 
+    # ⚠️ 2026-09-24 二次对齐模板：台词若只被 <d> 包住、**台词前没有「开口说话」的
+    # 动作描述**，H3 会把台词当成背景配音、画面里人物嘴唇不动（实测现象）。
+    # 模板每句台词前都有 ``speaks — a clear … voice … at a measured … rate``，
+    # 这正是驱动口型的依据。这里把它升级为硬性检查（原先只在守卫里断言）。
+    if _dialogue_texts(ctx) and _SPOKEN_RE.search(prompt) and not _SPEAK_ACTION_RE.search(prompt):
+        issues.append("台词缺少「开口说话」动作描述（speaks — … voice …）："
+                      "人物可能只出配音、嘴唇不动")
+
     if expect_refs and "<Picture 1>" not in prompt:
         issues.append("期望使用参考图但缺少 <Picture 1> 标签：H3 拿不到参考图语义")
 
@@ -369,6 +423,34 @@ def _check_h3(prompt: str, ctx, style, expect_refs: Optional[bool] = None,
     # 改为检查「无台词的节拍是否显式声明 No dialogue」，这才是防字幕的有效手段。
     if not _SPOKEN_RE.search(prompt) and "No dialogue" not in prompt:
         issues.append("无台词且未显式声明「No dialogue」：模型可能自补台词并画成字幕")
+
+    # ------------------------------------------------------------------ #
+    # 2026-09-24 二次对齐本地模板：以下四项是模板 10 段**无一例外**都有的格式特征，
+    # 缺失即为「与参考工作流不一致」。全部按 issue 报（不阻断），便于观察灰度。
+    # ⚠️ 中文格式一律**不报**（存量项目按旧格式生成、重出视频时不应被新规则判缺陷）。
+    # ------------------------------------------------------------------ #
+    v_mode = (v.get("mode") or "") if isinstance(v, dict) else ""
+    if v_mode == "ref":
+        # ① Ref2VA 模式声明（模板段段以 [reference generation] 起头）
+        if "[reference generation]" not in prompt:
+            issues.append("summary 缺「[reference generation]」模式声明："
+                          "未显式告知 H3 本段以参考图为基础生成")
+        # ② retention_analysis 的保留句式
+        if "fully_preserved" not in prompt:
+            issues.append("retention_analysis 未使用模板的「fully_preserved」句式："
+                          "保留项表述与参考工作流不一致")
+    # ③ detailed_description 首句风格声明（模板：The target video uses … style …）。
+    # ⚠️ 必须同时放行历史中文写法（「全片画面风格统一为…」/段首即 `[Shot 1]`），
+    # 否则存量项目会统一假红 —— 只在「已经写了英文描述、却没有风格首句」时报。
+    _dd = _section_body(prompt, "detailed_description")
+    if _dd and not _STYLE_OPENING_RE.search(_dd) and not _DD_CN_STYLE_RE.search(_dd) \
+            and not re.search(r"(?m)^\[Shot \d+\]\s*[^\n]{0,12}[：:]?\s*[\u4e00-\u9fff]", _dd):
+        issues.append("detailed_description 未以风格句（The target video uses … style …）开头："
+                      "画风锚定权重不足")
+    # ④ 景别必须是英文短语；模板不出现「[Shot 1] 中景：」这类中文景别
+    if _CN_CAMERA_RE.search(prompt):
+        issues.append("镜头行使用中文景别（如「[Shot 1] 中景：」）："
+                      "模板为英文景别短语（A medium shot / a close-up）")
     return {"issues": issues, "fatal": fatal}
 
 
@@ -415,6 +497,60 @@ def _repair_h3(prompt: str, ctx, style) -> Tuple[str, List[str]]:
         else:
             out = out.rstrip() + " No dialogue."
             repairs.append("补写「No dialogue」（防模型自补台词被画成字幕）")
+
+    # ------------------------------------------------------------------ #
+    # 2026-09-24 二次对齐：补两处「安全追加」型的模板特征。
+    # ⚠️ 两者都只在**提示词本来就是英文格式**时补 —— 中文格式的存量提示词不碰
+    #（在中文句里塞英文标记反而更乱，且存量数据不应在重出视频时被改写）。
+    # ------------------------------------------------------------------ #
+    verdict = h3_prompt_kit.validate(out)
+    is_ref = verdict.get("mode") == "ref"
+    looks_en = bool(_STYLE_OPENING_RE.search(_section_body(out, "detailed_description"))
+                    or re.search(r"(?m)^\[Shot \d+\] [A-Z]", out))
+    if is_ref and looks_en and "[reference generation]" not in out:
+        # ① 在 summary 段正文前补模式声明（模板段段都有）
+        lines = out.split("\n")
+        for i, ln in enumerate(lines):
+            if ln.strip().lower().rstrip(":：") == "summary":
+                for j in range(i + 1, len(lines)):
+                    if lines[j].strip():
+                        lines[j] = "[reference generation] " + lines[j].lstrip()
+                        repairs.append("补写「[reference generation]」模式声明")
+                        break
+                    if lines[j].strip().lower().rstrip(":：") in (
+                            h3_prompt_kit.REF_SECTIONS + h3_prompt_kit.BASE_SECTIONS):
+                        break
+                break
+        out = "\n".join(lines)
+    if is_ref and looks_en and "fully_preserved" not in out:
+        # ② retention_analysis 的保留句式：把中文「必须保留 X 中的：Y」换成模板句式。
+        #    只做**段落级**保守改写，识别不出格式时不动（宁可不修，不可改坏）。
+        lines = out.split("\n")
+        start = end = None
+        for i, ln in enumerate(lines):
+            if ln.strip().lower().rstrip(":：") == "retention_analysis":
+                start = i + 1
+                break
+        if start is not None:
+            end = len(lines)
+            for j in range(start, len(lines)):
+                if lines[j].strip().lower().rstrip(":：") in (
+                        h3_prompt_kit.REF_SECTIONS + h3_prompt_kit.BASE_SECTIONS):
+                    end = j
+                    break
+            conv: List[str] = []
+            changed = False
+            for ln in lines[start:end]:
+                m = re.match(r"^\s*-\s*必须保留\s*(<Picture \d+>)\s*中的[：:]\s*(.+?)\s*$", ln)
+                if m:
+                    conv.append(f"{m.group(1)}: fully_preserved - {m.group(2)}")
+                    changed = True
+                else:
+                    conv.append(ln)
+            if changed:
+                lines[start:end] = conv
+                out = "\n".join(lines)
+                repairs.append("retention_analysis 改写为模板的 fully_preserved 句式")
     return out, repairs
 
 

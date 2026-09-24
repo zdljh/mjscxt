@@ -33,6 +33,16 @@
 - 每个镜头行以 ``[Shot N] MM:SS.mmm`` 时间码开头（毫秒三位）
 - 台词必须带语言标记，如 ``[Chinese] 台词原文``，说话人以 ``(S1)`` 标注
 - 与画面无关的抽象词（cinematic / beautiful）尽量少用，改用具体视觉与听觉细节
+
+正文语言（2026-09-24 二次对齐）
+--------------------------------------------------------------------------
+本地手跑模板 ``H3信号10段测试001.json`` 的**六段正文全部是英文散文**，
+只有台词本体用 ``<d>[Chinese] 原文</d>`` 包裹。本模块此前把六段写成中文，
+与模板不一致；实测 H3 对英文长句的理解与权重分配更稳，故正文统一改为英文产出。
+
+中文输入（``description`` / ``emotion`` / ``audio_cues`` 等）**原样嵌进英文句子**
+（模板同样把角色名、台词、符文名等中文原样保留，不做罗马字转写）；
+只有「风格」走 :func:`style_kit.style_suffix_en` 给出确定性的英文风格短语。
 """
 from __future__ import annotations
 
@@ -308,7 +318,7 @@ _DEFAULT_MUSIC_BY_EMOTION = {
 def build_soundscape(shot: dict, scene_hint: str = "") -> str:
     """``overall_soundscape``：环境音 + 动作音 + 台词混响（画面内可闻）
 
-    本地模板的写法是**把画面内所有可闻声音按时间顺序铺开**，并在有台词时
+    本地模板的写法是**把画面内所有可闻声音按时间顺序铺开**（英文散文），并在有台词时
     顺带描述「台词的音色与混响」（例如 ``Her spoken words reverberate cleanly
     against the obsidian platform, the echo of "娶我" lingering for a full second``）。
     这既补齐了配音的空间感，也**再次向模型确认「人物确实在说话」**——对驱动口型
@@ -316,7 +326,7 @@ def build_soundscape(shot: dict, scene_hint: str = "") -> str:
 
     ⚠️ 历史实现结尾固定写「全程无解说、无旁白念白」，本意是防旁白，但副作用是
     在同一段里同时出现「台词」与「无念白」两种相反信号，模型可能因此把台词
-    降级成画外音（口不动）。现改为只在**确实没有台词**时才声明无念白。
+    降级成画外音（口不动）。现改为只在**确实没有台词**时才声明无旁白。
     """
     loc = str(shot.get("location") or scene_hint or "").strip()
     sfx = _clean_sfx(shot.get("audio_cues") or "")
@@ -326,28 +336,41 @@ def build_soundscape(shot: dict, scene_hint: str = "") -> str:
     if sfx:
         parts.append(sfx)
     if loc:
-        parts.append(f"{loc}的环境底噪")
+        parts.append(f"the ambient room tone of {loc}")
+    elif emotion:
+        parts.append("a quiet ambient room tone")
     if emotion:
-        parts.append(f"与「{emotion}」情绪相符的呼吸与衣料摩擦声")
+        parts.append(f"breathing and fabric rustle matched to the 「{emotion}」 mood")
     if not parts:
-        parts.append("安静环境底噪，人物呼吸与衣料摩擦清晰可闻")
-    body = "，".join(parts).rstrip("。；;，,")
+        parts.append("a quiet ambient room tone, with breathing and fabric rustle clearly audible")
+    body = ", ".join(parts).rstrip("。；;，,")
     if lines:
         said = _strip_end(lines[-1].get("text"))[:12]
-        tail = (f"人物的说话声在{loc or '场景'}中自然扩散，混响清晰、"
-                f"与口型同步，句尾余韵短暂回荡后归于环境底噪。")
+        where = loc or "the scene"
         if said:
-            tail = f"「{said}」的余韵短暂回荡后归于环境底噪。人物的说话声在{loc or '场景'}中自然扩散，与口型同步。"
-        return f"{body}。{tail}"
-    return f"{body}。全程无旁白念白，声音随镜头推进自然增强或减弱。"
+            tail = (f'The echo of "{said}" lingers for a moment before dissolving into the '
+                    f'ambient tone; the spoken voice spreads naturally through {where}, '
+                    f'synced to the lip movement.')
+        else:
+            tail = (f"The spoken voice spreads naturally through {where}, synced to the "
+                    f"lip movement, the echo dissolving into the ambient tone.")
+        return f"{body}. {tail}"
+    return (f"{body}. No narration or voice-over throughout; the sound rises and falls "
+            f"naturally with the camera movement.")
 
 
 def build_music(shot: dict, style: str = "") -> str:
     """``non_diegetic_music``：画面外配乐（角色听不到）
 
-    本地模板在**不需要画外配乐**时直接写 ``N/A``（该段名仍必须存在，
-    :func:`validate` 靠段名判合规）。镜头显式标了 ``music: false`` /
-    ``no_music`` 或情绪为空时，跟随模板输出 ``N/A``，避免凭空引导出一段配乐。
+    本地模板 10 段里 **9 段直接写 ``N/A``**（只有 1 段写了说明性 N/A）—— 即
+    默认**不生成**画外配乐，配乐由后期另行处理。故本函数默认也返回 ``N/A``：
+
+    - 显式关闭（``music: false`` / ``"false"`` / ``"无"`` 等）→ ``N/A``
+    - 调用方给了**具体配乐描述** → 尊重它，并包成英文句
+    - 其余情况（含情绪已知）→ 跟随模板写 ``N/A``
+
+    ⚠️ 历史实现会按情绪**凭空生成**一段配乐描述，与模板「默认 N/A」不一致。
+    ``N/A`` 段名仍在（:func:`validate` 靠段名判合规），六段结构不受影响。
     """
     raw_flag = shot.get("non_diegetic_music")
     if raw_flag is None:
@@ -360,14 +383,11 @@ def build_music(shot: dict, style: str = "") -> str:
             "false", "none", "n/a", "na", "no", "off", "无", "不要", "不需要"):
         return "N/A"
     if isinstance(raw_flag, str) and raw_flag.strip() and raw_flag.strip() not in ("true", "yes", "on"):
-        # 调用方直接给了配乐描述 → 尊重它
-        return _strip_end(raw_flag) + "，始终保持在画面之外，不出现人声演唱。"
-
-    emotion = str(shot.get("emotion") or "").strip()
-    for key, desc in _DEFAULT_MUSIC_BY_EMOTION.items():
-        if key and key in emotion:
-            return f"{desc}，始终保持在画面之外，不出现人声演唱。"
-    return "持续低音铺底，配器克制，随画面节奏缓慢起伏，始终保持在画面之外，不出现人声演唱。"
+        # 调用方直接给了配乐描述 → 尊重它（包成英文句，与模板语言一致）
+        return (f"Non-diegetic score: {_strip_end(raw_flag)}; it stays strictly outside "
+                f"the frame, with no sung vocals.")
+    # 默认跟随模板：本段不生成音乐，配乐交由后期处理
+    return "N/A"
 
 
 # --------------------------------------------------------------------------- #
@@ -379,6 +399,10 @@ def _beats(shot: dict, duration: float) -> List[Tuple[float, float, str]]:
 
     时长 ≤ ``BEAT_MAX_SEC`` 时只有一个节拍；更长时按 2~3 个节拍铺满，
     避免「描述只有一瞬、视频却要演 12 秒」的空转。
+
+    ⚠️ 节拍描述以**英文**产出（对齐本地模板）。``description`` / ``visual_detail``
+    里的中文原文按模板惯例**原样保留**（模板同样把中文台词、角色名嵌在英文句里），
+    只把「衔接语」写成英文。
     """
     desc = str(shot.get("description") or "").strip()
     # narration 是**旧剧本遗留字段**（本系统自 2026-09-19 起剧本阶段不再产出旁白）。
@@ -392,9 +416,10 @@ def _beats(shot: dict, duration: float) -> List[Tuple[float, float, str]]:
         detail = ""
     # ⚠️ 每段各自去掉句末标点再 join：LLM 常在 description 末尾带「。」，
     # 直接拼会产出「。，」连排（视频模型会把它当断句，浪费提示词预算）。
-    body = "，".join(x for x in (_strip_end(desc), _strip_end(detail)) if x)
+    body = ", ".join(x for x in (_strip_end(desc), _strip_end(detail)) if x)
     if not body:
-        body = _strip_end(str(shot.get("prompt_h3") or "")) or "画面延续上一镜的构图与光影"
+        body = _strip_end(str(shot.get("prompt_h3") or "")) or \
+            "the framing continues from the previous shot with the same composition and lighting"
 
     dur = max(1.0, float(duration or 5.0))
     if dur <= BEAT_MAX_SEC:
@@ -411,11 +436,13 @@ def _beats(shot: dict, duration: float) -> List[Tuple[float, float, str]]:
             # 本地模板的收尾写法是「动作推进 → 说话 → 收束」，最后一拍必须
             # **为台词留出明确的开口时机**（「and then speaks」），否则 H3 会把
             # 台词当成背景旁白、人物嘴唇不动。
-            text = "动作收束、姿态转为稳定，画面前后衔接自然"
+            text = ("the movement settles and the posture stabilises, with the framing "
+                    "cutting cleanly from the previous moment")
             if narration:
-                text += f"；画外音延续：「{narration[:30]}」"
+                text += f'; the voice-over continues: "{narration[:30]}"'
         else:
-            text = "动作持续推进，保持人物外观、服装与场景光照与前一刻完全一致"
+            text = ("the action continues to advance, keeping the characters' appearance, "
+                    "wardrobe and scene lighting exactly consistent with the previous moment")
         beats.append((start, span, text))
     return beats
 
@@ -484,12 +511,85 @@ def _spoken_clause(lines: Sequence[Dict[str, str]], slots: Dict[str, str],
     return " ".join(spoken) + " After the final word the lips close and the mouth returns to a still, closed position."
 
 
+#: 景别中文 → 英文（对齐模板：``A full shot`` / ``a medium close-up`` …）。
+#: 模板把景别写成**英文名词短语**，历史实现直接嵌中文「中景：」，与模板不一致。
+_CAMERA_EN = {
+    "大远景": "A wide establishing shot",
+    "远景": "A wide shot",
+    "全景": "A full shot",
+    "大全景": "A very wide shot",
+    "中景": "A medium shot",
+    "中近景": "A medium close-up",
+    "近景": "A close-up",
+    "特写": "A close-up",
+    "大特写": "An extreme close-up",
+    "微距": "A macro close-up",
+}
+
+
+def _camera_en(camera: str) -> str:
+    """景别 → 英文短语；认不出时返回空串（交由调用方退化为无景别写法，不瞎猜）"""
+    t = str(camera or "").strip()
+    if not t:
+        return ""
+    if t in _CAMERA_EN:
+        return _CAMERA_EN[t]
+    # 子串兜底：「中近景仰拍」这类带修饰的写法也能命中
+    for zh in sorted(_CAMERA_EN, key=len, reverse=True):
+        if zh in t:
+            return _CAMERA_EN[zh]
+    # 已经是英文（调用方直接给了英文景别）→ 原样用
+    if re.match(r"^[A-Za-z]", t):
+        return t
+    return ""
+
+
+def _mid_sentence(clause: str) -> str:
+    """把句首大写压成小写（用于「At 00:06.000, the camera cuts to a medium shot」这种句中位置）
+
+    ⚠️ 不处理 ``An extreme close-up`` 这类**首字母即元音 A** 的写法：直接小写会得到
+    「a extreme」，需要用 ``an``。这里一并纠正冠词。
+    """
+    s = str(clause or "").strip()
+    if not s:
+        return ""
+    if s.startswith("An "):
+        return "an " + s[3:]
+    if s.startswith("A "):
+        return "a " + s[2:]
+    return s[0].lower() + s[1:] if s[:1].isupper() else s
+
+
+def _style_opening(style: str) -> str:
+    """``detailed_description`` 的首句风格声明（对齐模板 ``The target video uses …``）
+
+    模板首句是 ``The target video uses a Chinese xianxia cultivation drama style with
+    cool moonlit silver-and-teal palette, soft frontal moonlight and a shallow depth of
+    field …``。这里用 :func:`style_kit.style_suffix_en` 把中文风格串翻成确定性的
+    英文短语，再套上模板句式。
+
+    ⚠️ 风格已在此处（段**首**）声明，故 :func:`build_detailed_description` 不再于
+    段尾追加中文「全片画面风格统一为…」—— 同一风格声明两遍会放大其权重。
+    """
+    from style_kit import style_suffix_en  # 延迟导入：避免模块级循环依赖
+
+    suffix = style_suffix_en(style, with_tail=False) if style else ""
+    body = suffix[len("Style: "):].strip() if suffix.startswith("Style: ") else suffix
+    if not body:
+        return ("The target video keeps a consistent visual style across the whole "
+                "segment, with delicate lighting and stable composition.")
+    return (f"The target video uses a {body} style, with a shallow depth of field that "
+            f"keeps the speaking faces as the sharp focal plane while the background "
+            f"falls into soft bokeh.")
+
+
 def build_detailed_description(shot: dict, duration: float, style: str = "",
                                picture_refs: Optional[Dict[str, str]] = None) -> str:
     """``detailed_description``：按 ``[Shot N]`` 逐节拍写画面（本地模板同格式）
 
     与本地手跑模板（``H3信号10段测试001.json``）对齐的要点：
 
+    - **首句写全片风格**（``The target video uses … style … bokeh.``），景别用英文短语。
     - 首镜用 ``[Shot 1]``，**后续镜用 ``At MM:SS.mmm, the camera cuts to ...``** 起头，
       时间码内嵌在句子里（不再是「[Shot N] 00:03.500 中景：」）。
     - 无台词的镜头必须**显式写 ``No dialogue``** —— 留空会让模型自行「补台词」，
@@ -498,6 +598,7 @@ def build_detailed_description(shot: dict, duration: float, style: str = "",
       而且它本身就在提示词里引入了「字幕/文字」这两个词，反而更容易诱发字幕。
     """
     camera = str(shot.get("camera") or "中景").strip()
+    camera_en = _camera_en(camera)
     lines = dialogue_lines(shot.get("dialogue"))
     slots = speaker_slots(lines)
     picture_refs = picture_refs or {}
@@ -508,23 +609,25 @@ def build_detailed_description(shot: dict, duration: float, style: str = "",
     beats = _beats(shot, duration)
     spoken = _spoken_clause(lines, slots)
 
-    out: List[str] = []
+    out: List[str] = [_style_opening(style)]
     for idx, (start, _span, text) in enumerate(beats, start=1):
         clause = _strip_end(text)
         # A-5：单节拍的画面细节（description + visual_detail）也设闸门，
         # 否则历史超长描述会把 detailed_description 整段撑爆。
         clause = _clamp(clause, MAX_DETAIL_CHARS, "build_detailed_description.detail")
         if idx == 1 and first_ref:
-            clause += f"；构图、景别与人物位置以 {first_ref} 为基准"
+            clause += f"; the composition, framing and character placement follow {first_ref}"
         # 统一补句号收口（clause 已 strip 掉原句末标点，不会出现「。。」）
-        clause += "。"
+        clause += "."
         # 模板格式：首镜 [Shot 1]，后续镜「At 时间码, the camera cuts to」。
         # 景别只在首镜点明，后续由画面内容承接（模板同样不逐镜重复景别词）。
         if idx == 1:
-            head = f"[Shot 1] {camera}：" if camera else "[Shot 1] "
+            head = f"[Shot 1] {camera_en}: " if camera_en else "[Shot 1] "
         else:
-            head = f"At {fmt_ts(start)}, the camera cuts to a new framing of {camera}：" if camera \
-                else f"At {fmt_ts(start)}, the camera cuts to a new framing："
+            # ⚠️ 句中位置必须压小写：``cuts to A medium shot`` 是错的。
+            cam_mid = _mid_sentence(camera_en)
+            head = (f"At {fmt_ts(start)}, the camera cuts to {cam_mid}: " if cam_mid
+                    else f"At {fmt_ts(start)}, the camera cuts to a new framing: ")
         # 台词落在最后一个节拍，符合「动作推进→开口说话」的时序直觉
         if idx == len(beats) and spoken:
             line = head + clause + " " + spoken
@@ -533,8 +636,6 @@ def build_detailed_description(shot: dict, duration: float, style: str = "",
             line = head + clause + " No dialogue."
         out.append(line)
 
-    if style:
-        out.append(f"全片画面风格统一为「{style}」，光影细腻，构图稳定。")
     return "\n".join(out)
 
 
@@ -543,55 +644,131 @@ def build_detailed_description(shot: dict, duration: float, style: str = "",
 # --------------------------------------------------------------------------- #
 
 def _subject_definitions(picture_defs: Sequence[Tuple[str, str]],
-                         subjects: Sequence[Dict[str, str]]) -> str:
+                         subjects: Sequence[Dict[str, str]],
+                         style: str = "") -> str:
+    """``subject_definitions``：逐张参考图声明用途 + 逐主体描述外观（英文句式）
+
+    模板写法::
+
+        <Picture 1> is the reference image defining the appearance, costume and style
+        of the Male Lead 韩立, and serves as the composition anchor for his on-screen shots.
+        <Subject 1> is 韩立 in <Picture 1> — a young Chinese male with ...
+
+    ⚠️ 中文外观描述按模板惯例**原样嵌进英文句子**（模板同样保留中文人名/术语）。
+    """
     lines: List[str] = []
-    for label, desc in picture_defs:
-        lines.append(f"{label} - {desc}")
+    # 主体 → 其参考图标签（用于 ``<Subject N> ... in <Picture M>`` 的归属声明）
+    subj_pics: Dict[str, str] = {}
     for i, sub in enumerate(subjects, start=1):
-        name = str(sub.get("name") or f"主体{i}").strip()
+        name = str(sub.get("name") or "").strip()
+        pic = str(sub.get("picture") or "").strip()
+        if not pic:
+            pic = f"<Picture {min(i, max(1, len(picture_defs)))}>"
+        if name:
+            subj_pics[name] = pic
+
+    for label, desc in picture_defs:
+        # 找出该参考图对应的主体名（有则写进句子，便于模型建立图-人绑定）
+        owner = ""
+        for name, pic in subj_pics.items():
+            if pic == label:
+                owner = name
+                break
+        if owner:
+            lines.append(
+                f"{label} is the reference image defining the appearance, costume and "
+                f"style of {owner}, and serves as the composition anchor for their "
+                f"on-screen shots: {desc}.")
+        else:
+            lines.append(
+                f"{label} is the reference image defining the environment, materials and "
+                f"lighting mood of the scene: {desc}.")
+    for i, sub in enumerate(subjects, start=1):
+        name = str(sub.get("name") or f"Subject {i}").strip()
         appearance = str(sub.get("appearance") or "").strip()
-        lines.append(f"<Subject {i}> - {name}：{appearance}（本镜头外观、服装必须与该参考图一致）")
-    return "\n".join(lines) if lines else "<Picture 1> - 本镜头的画面参考图"
+        pic = subj_pics.get(name, f"<Picture {min(i, max(1, len(picture_defs)))}>")
+        lines.append(
+            f"<Subject {i}> is {name} in {pic} — {appearance}; the on-screen appearance "
+            f"and costume must stay consistent with this reference image.")
+    return "\n".join(lines) if lines else \
+        "<Picture 1> is the reference image defining the appearance and composition of this shot."
 
 
 def _retention_analysis(picture_defs: Sequence[Tuple[str, str]],
-                        subjects: Sequence[Dict[str, str]], style: str = "") -> str:
+                        subjects: Sequence[Dict[str, str]], style: str = "",
+                        shots: str = "") -> str:
+    """``retention_analysis``：逐主体声明必须保留的外观项（英文句式）
+
+    模板写法::
+
+        <Subject 2> (appears in [Shot 1], [Shot 2]): fully_preserved - her long black
+        hair, pale teal-blue silk veil, ... are all retained without change.
+        <Picture 2> ([Shot 2] composition anchor): fully_preserved - ...
+
+    历史实现写成中文「必须保留 …」bullet 列表，与模板的
+    ``fully_preserved`` 句式不一致（P-3 对齐项）。
+    """
     lines: List[str] = []
+    appear = f" (appears in {shots})" if shots else ""
+    for i, sub in enumerate(subjects, start=1):
+        name = str(sub.get("name") or f"Subject {i}").strip()
+        appearance = str(sub.get("appearance") or "").strip()
+        item = appearance or "their facial features, hairstyle and costume"
+        lines.append(f"<Subject {i}> {name}{appear}: fully_preserved - {item}, all "
+                     f"retained without change.")
+    # ⚠️ 参考图要按**用途**分开写保留项：主体参考图管「costume / palette / hairstyle」，
+    # 场景参考图管「scene structure / materials / lighting」。若不分流，场景图也会被
+    # 写成「the costume … follow the reference image exactly」——语义错位的假声明。
+    subj_pics = {str(s.get("picture") or "").strip() for s in subjects}
+    subj_pics.discard("")
     for label, desc in picture_defs:
-        lines.append(f"- 必须保留 {label} 中的：{desc}")
-    for sub in subjects:
-        name = str(sub.get("name") or "").strip()
-        if name:
-            lines.append(f"- {name} 的五官、发型、发色、服装与配饰逐项保持与参考图一致，"
-                         f"不得替换人物、不得改变服装款式与颜色")
-    lines.append("- 保留参考图的光照方向与整体色调，只推进动作与时间，不改变场景结构")
+        is_env = label not in subj_pics if subj_pics else False
+        if is_env:
+            lines.append(f"{label}{appear}: fully_preserved - {desc}; the scene "
+                         f"structure, materials and lighting follow the reference image exactly.")
+        else:
+            lines.append(f"{label}{appear}: fully_preserved - {desc}; the costume, palette "
+                         f"and hairstyle follow the reference image exactly.")
+    lines.append("Lighting direction and overall colour grading are retained from the "
+                 "reference images; only the action and time advance, with no change to "
+                 "the scene structure.")
     if style:
-        lines.append(f"- 画面风格严格锁定为「{style}」，不得被参考图之外的画风带偏")
+        lines.append(f"The visual style stays locked to {style} and is not pulled off "
+                     f"course by anything outside the reference images.")
     # ⚠️ 本地模板的 retention_analysis **不含任何「禁止文字/字幕」的否定指令**，
     # 只描述「哪些内容必须保留」。历史实现在这里写「不得添加文字/字幕/水印/logo」，
     # 副作用是：提示词里凭空出现「字幕」「文字」两个词，H3 反而更容易把它们画进画面
     # （实测视频生成出了字幕）。故删掉该行，改用「必须保留」的正向表述。
-    lines.append("- 构图、画幅比例、人物外观与场景结构逐镜保持一致，前后镜头连续")
+    lines.append("Composition, aspect ratio, character appearance and scene structure "
+                 "stay consistent from shot to shot, keeping the sequence continuous.")
     return "\n".join(lines)
 
 
 def build_summary(shot: dict, duration: float, subjects: Sequence[Dict[str, str]] = ()) -> str:
-    """``summary``：2~4 句目标视频概述"""
+    """``summary``：2~4 句目标视频概述
+
+    模板 10 段**无一例外**都以 ``[reference generation]`` 开头 —— 这是 Ref2VA
+    模式的显式声明，告诉模型「本段以参考图为基础生成」（P-1 对齐项）。
+    历史实现缺此前缀，与模板不一致。
+    """
     desc = str(shot.get("description") or "").strip()
     emotion = str(shot.get("emotion") or "").strip()
     loc = str(shot.get("location") or "").strip()
-    names = "、".join(str(s.get("name") or "").strip() for s in subjects if s.get("name"))
+    names = ", ".join(str(s.get("name") or "").strip() for s in subjects if s.get("name"))
     bits: List[str] = []
-    bits.append(f"一段约 {float(duration or 5):.0f} 秒的漫剧镜头" + (f"，场景为{loc}" if loc else "") + "。")
+    bits.append(f"The target video is a comic-drama shot of about "
+                f"{float(duration or 5):.0f} seconds" + (f", set in {loc}" if loc else "") + ".")
     if names:
-        bits.append(f"画面主体为{names}。")
+        bits.append(f"The on-screen subjects are {names}.")
     if desc:
-        bits.append(f"主要内容：{_strip_end(desc)}。")
+        bits.append(f"Main content: {_strip_end(desc)}.")
     if emotion:
-        bits.append(f"整体情绪基调为「{emotion}」。")
+        bits.append(f"The overall emotional tone is 「{emotion}」.")
     if len(bits) < 2:
-        bits.append("镜头保持单一连续动作，起幅与落幅明确。")
-    return "".join(bits)
+        bits.append("The shot keeps a single continuous action with a clear start and end.")
+    # ⚠️ 句间必须补空格：bits 各自已带句末「.」，直接 "".join 会产出
+    # 「…12 seconds, set in X.The on-screen subjects…」这种粘连句（模型会当断句错误）。
+    return "[reference generation] " + " ".join(bits)
 
 
 # --------------------------------------------------------------------------- #
@@ -610,10 +787,16 @@ def build_ref2va(shot: dict, picture_defs: Sequence[Tuple[str, str]],
         dur_f = 5.0
     pic_map = {label: desc for label, desc in picture_defs}
 
+    # retention_analysis 里声明「本段出现在哪些镜头」，与模板 ``(appears in [Shot 1]…)``
+    # 同构。单次调用只知道这一个 shot，故按节拍数折算（单节拍即 [Shot 1]）。
+    n_beats = len(_beats(shot, dur_f))
+    shots = ", ".join(f"[Shot {i}]" for i in range(1, n_beats + 1))
+
     sections = [
-        ("subject_definitions", _subject_definitions(list(picture_defs), list(subjects))),
+        ("subject_definitions", _subject_definitions(list(picture_defs), list(subjects), style)),
         ("summary", build_summary(shot, dur_f, subjects)),
-        ("retention_analysis", _retention_analysis(list(picture_defs), list(subjects), style)),
+        ("retention_analysis", _retention_analysis(list(picture_defs), list(subjects),
+                                                    style, shots)),
         ("detailed_description", build_detailed_description(shot, dur_f, style, pic_map)),
         ("overall_soundscape", build_soundscape(shot)),
         ("non_diegetic_music", build_music(shot, style)),
