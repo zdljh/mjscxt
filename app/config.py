@@ -202,6 +202,30 @@ UPSCALE_DEFAULT_PARAMS = {
     "timeout": 3600,                # 单次超分等待上限（秒）
 }
 
+# ===================== 模型常驻（生成完成后不卸载） =====================
+def _env_bool(key: str, default: bool) -> bool:
+    """布尔型环境变量：1/true/yes/on 为真；0/false/no/off 为假；未设置取 default。"""
+    raw = os.getenv(key)
+    if raw is None or str(raw).strip() == "":
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+# 生成完成后**保留模型**在内存里，不向 ComfyUI 发 /free（unload_models）。
+#
+# 为什么要默认开：ComfyUI 的 /free(unload_models=True) 会走 unload_all_models()
+# → free_memory(1e30) → cleanup_models_gc() → gc.collect()，把模型**连 RAM 里的权重
+# 一起释放**，不只是腾显存。下一次生成就得从磁盘重读 19.5GB 的 H3 模型（每次几分钟），
+# 批量生产下这项开销被放大几十倍，是「每次生成都要重新加载模型」的根因。
+#
+# 关掉卸载**不会**造成显存不够：ComfyUI 自己的显存管理会在下一个任务需要显存时，
+# 把暂不用的模型自动 offload 到 RAM（load_models_gpu → free_memory），
+# 只是不再把权重丢回磁盘。真正吃紧时它仍会按需腾挪。
+#
+# 仍想保留旧行为（例如 8G 显存 + 大内存压力）：MJSCXT_KEEP_MODEL_LOADED=0
+KEEP_MODEL_LOADED = _env_bool("MJSCXT_KEEP_MODEL_LOADED", True)
+
+
 # ===================== 超分引擎：TE-Speed-flashVSR 加速链路（默认） =====================
 # 模板来源（只读解析，不修改 ComfyUI 原始工作流文件）：
 #   D:\ComfyUI_portable_TE_v260619\ComfyUI\ComfyUI\user\default\workflows\TE-Speed-flashVSR 视频超分放大加速工作流.json
@@ -235,7 +259,7 @@ TE_UPSCALE_DEFAULT_PARAMS = {
     "quality_value": 3,             # TESpeedVideoCombine 压缩质量档（1-8）
     "frame_load_cap": 0,            # 0 = 全部帧
     "skip_first_frames": 0,
-    "free_vram": True,              # 提交前请求 ComfyUI /free 释放已缓存模型（8G 显存友好）
+    "free_vram": not KEEP_MODEL_LOADED,   # 提交前请求 ComfyUI /free（默认关：见 KEEP_MODEL_LOADED）
     "seed": 0,
     "timeout": 3600,                # 单次超分等待上限（秒）
 }
@@ -277,7 +301,7 @@ TTS_DEFAULT_PARAMS = {
     # 情绪化配音：把剧本每镜的 emotion 送进 TTS，有情绪时自动切 VoiceDesign 模式。
     # 关掉则退回「每个角色一个固定 preset 音色」的老行为（所有台词一个调）。
     "emotion_aware": True,
-    "keep_model_loaded": False,     # 批次结束后卸载模型，避免与 H3 抢显存
+    "keep_model_loaded": KEEP_MODEL_LOADED,   # 批次结束后保留模型（默认开：见 KEEP_MODEL_LOADED）
     "timeout": 1800,                # 单批配音等待上限（秒）
 }
 

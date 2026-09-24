@@ -29,7 +29,7 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Dict, List, Optional, Tuple
 
-from config import COMFYUI_URL, MODELS_DIR, TTS_DEFAULT_PARAMS
+from config import COMFYUI_URL, MODELS_DIR, TTS_DEFAULT_PARAMS, KEEP_MODEL_LOADED
 from dialogue_utils import (
     normalize_lines as _norm_dlg_lines, dialogue_text as _dlg_text,
     dialogue_speaker as _dlg_speaker,
@@ -602,6 +602,15 @@ class QwenTTSClient:
 
     # ---------- 低层 ----------
 
+    def _keep_loaded(self) -> bool:
+        """是否需要「模型常驻」：批次结束后不卸载、也不发 /free。
+
+        读取顺序：显式传入的 params > 全局 config.KEEP_MODEL_LOADED
+        （环境变量 MJSCXT_KEEP_MODEL_LOADED，默认 True）。
+        """
+        v = self.params.get("keep_model_loaded", KEEP_MODEL_LOADED)
+        return bool(v)
+
     def _unload_model(self, self_task_id: str = "") -> None:
         """请求 ComfyUI 卸载已缓存的 TTS 模型（释放 GPU 显存）
 
@@ -612,7 +621,16 @@ class QwenTTSClient:
 
         B-01 P1-12：/free 互斥守卫——本进程有其它 running GPU 任务时**跳过** /free，
         避免卸掉分镜/视频/关键帧等其它任务正在使用的模型（反复换入换出）。
+
+        ⚠️ 默认已不再调用本方法（config.KEEP_MODEL_LOADED=True，见 config 注释）：
+        /free 的 unload_models 会走 unload_all_models() → cleanup_models_gc() →
+        gc.collect()，把模型**连 RAM 里的权重一起释放**，下次生成要从磁盘重读
+        19.5GB 模型。显存不够时 ComfyUI 会自行把暂不用的模型 offload 到 RAM。
         """
+        # 模型常驻开关：默认保留模型，不再走 /free
+        if self._keep_loaded():
+            logger.info("QwenTTS 模型常驻（keep_model_loaded），跳过 /free 卸载")
+            return
         # B-01 P1-12：/free 互斥守卫
         try:
             import gpu_task_gate
@@ -704,7 +722,7 @@ class QwenTTSClient:
     # ---------- 高层 ----------
 
     def _node_inputs(self, text: str, voice: dict, is_last: bool) -> Dict:
-        unload = not self.params.get("keep_model_loaded", False) and is_last
+        unload = (not self._keep_loaded()) and is_last
         common = {
             "model_choice": voice.get("model_choice") or self.params["model_choice"],
             "device": self.params.get("device", "auto"),
@@ -746,10 +764,12 @@ class QwenTTSClient:
         # G-03：try/finally 确保 ComfyUI TTS 模型卸载。_wait 抛 TTSError（超时/执行失败）时，
         # 前面已加载的模型未卸载（只有最后一句节点设了 unload_model_after_generate）。
         # 批量 TTS 高频运行，显存累积泄漏 → 后续 OOM。成功时最后一句已卸载，/free 无副作用。
+        # ⚠️ 模型常驻（keep_model_loaded）时整段跳过：不卸载 = 下一批直接复用已加载的
+        # 权重，省掉每批一次的模型加载（Qwen3-TTS 加载一次几十秒）。
         try:
             history = self._wait(prompt_id, timeout, progress_cb=lambda m: None)
         finally:
-            if not self.params.get("keep_model_loaded", False):
+            if not self._keep_loaded():
                 self._unload_model()
         outputs = history.get("outputs") or {}
 

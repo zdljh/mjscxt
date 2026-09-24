@@ -32,7 +32,7 @@ from config import (
     COMFYUI_URL, COMFYUI_OUTPUT_DIR, PROJECT_OUTPUT_DIR, UPSCALE_DIR,
     FLASHVSR_MODEL_DIR, FLASHVSR_REQUIRED_FILES, UPSCALE_DEFAULT_PARAMS,
     TE_UPSCALE_DEFAULT_PARAMS, UPSCALE_ENGINE, UPSCALE_TE_TEMPLATE_PATH,
-    UPSCALE_CALIBRATION_PATH,
+    UPSCALE_CALIBRATION_PATH, KEEP_MODEL_LOADED,
 )
 from comfyui_client import ComfyUIClient
 
@@ -599,7 +599,16 @@ class VideoUpscaler:
              f"mode={used_mode}，scale={scale}）", 10)
 
         # 3.5) 释放 ComfyUI 已缓存模型显存（8G 笔记本显存紧张，避免超分 OOM）
-        if overrides.get("free_vram", True):
+        # 默认已改为**不发 /free**（config.KEEP_MODEL_LOADED=True）：/free 的
+        # unload_models 会把模型连 RAM 权重一起释放，下次生成要从磁盘重读
+        # 19.5GB 模型，是「每次都要重新加载」的根因。显存不够时 ComfyUI 会自行
+        # 把暂不用的模型 offload 到 RAM，不需要我们提前卸。需要旧行为请显式传
+        # free_vram=True 或设 MJSCXT_KEEP_MODEL_LOADED=0。
+        _free_vram_default = (
+            TE_UPSCALE_DEFAULT_PARAMS if used_engine == "te-speed-flashvsr"
+            else UPSCALE_DEFAULT_PARAMS
+        ).get("free_vram", not KEEP_MODEL_LOADED)
+        if overrides.get("free_vram", _free_vram_default):
             # B-01 P1-12：/free 互斥守卫 —— 本进程无其它 running GPU 任务时才发，
             # 避免卸掉分镜/视频/关键帧等其它任务正在使用的模型（反复换入换出）。
             try:
