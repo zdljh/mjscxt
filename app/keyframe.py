@@ -193,6 +193,23 @@ def generate_end_frame(start_frame: str, prompt: str, out_path: str,
         os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
         if os.path.abspath(files[0]) != os.path.abspath(out_path):
             shutil.copy2(files[0], out_path)
+            # ★ 用户需求：尾帧源图（ComfyUI output/comic_drama_kf/<prefix>_00001_.png）
+            # 是本链路**唯一还在用 copy2** 的图片落盘（其余链路已改 move），不清理就是
+            # 每镜尾帧在 ComfyUI output 留一份、只增不减。copy2 已成功 → 删源无副作用。
+            try:
+                _src = os.path.normpath(os.path.abspath(files[0]))
+                import config as _cfg
+                _comfy = os.path.normpath(os.path.abspath(_cfg.COMFYUI_OUTPUT_DIR or ""))
+                # 只删落在 ComfyUI output 目录内的源（越界一律不动）
+                if _comfy and os.path.isfile(_src) and _src.startswith(_comfy + os.sep):
+                    if os.stat(_src).st_nlink == 1:
+                        os.remove(_src)
+                        logger.warning("[尾帧清理] 已删除 ComfyUI 侧尾帧源图：%s", _src)
+                    else:
+                        logger.warning("[尾帧清理] 尾帧源为硬链接，跳过：%s", _src)
+            except Exception as _re:  # noqa: BLE001  清理失败绝不影响尾帧交付
+                logger.warning("尾帧源图清理失败（忽略，不影响交付）：%s: %s",
+                               type(_re).__name__, _re)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"尾帧落盘失败：{e}"}
     return {"ok": True, "path": out_path, "raw": files[0],

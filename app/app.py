@@ -21,6 +21,7 @@ from werkzeug.exceptions import BadRequest, HTTPException
 from config import (
     COMFYUI_URL, PROJECT_ROOT_DIR, PROJECT_OUTPUT_DIR, SCRIPT_DIR,
     CHARACTERS_DIR, ITEMS_DIR, SCENES_DIR, STORYBOARDS_DIR, KEYFRAMES_DIR, VIDEOS_DIR, FINAL_DIR,
+    PROJECT_TRASH_DIR,
     NOVELS_DIR, LLM_CONFIG_PATH, NOVEL_CHUNK_CHARS, NOVEL_MAX_CHUNKS,
     NOVEL_DEFAULT_SHOTS, NOVEL_PREVIEW_CHARS, NOVEL_BRIEF_CHARS, LLM_REQUEST_TIMEOUT,
     QC_CONFIG_PATH, QC_DIR,
@@ -303,6 +304,233 @@ def _cleanup_scratch_dir(dir_path: str, logger=None) -> None:
         _log.info("已清理 scratch 目录：%s", dir_path)
     except OSError as e:
         _log.warning("清理 scratch 目录失败：%s", e)
+
+
+# ===================== 质检不合格产物：统一移入回收站（可恢复） =====================
+# 需求（用户原话）：「质检不合格的图片、提示词或视频要删除，不要留存在本地（包括
+# ComfyUI 目录下的）」。这里统一收敛为**移入回收站**而非硬删 —— 误删好图好片是不可逆
+# 事故，移入 `output/projects/_trash/qc_reject/<时间戳>_<项目>/` 可人工恢复/复核。
+#
+# ⚠️ 红线（缺一不可）：
+#   1) 调用方必须用 `verdict.get("ok") is True and not gate["accept"]` 作为删除条件。
+#      `ok=False`（接口故障/超时/鉴权失败）、`skipped=True`（质检未开启）、
+#      `qc_declared 但 qc_on=False`（接口未就绪）**都不是产物不合格** —— 那些删下去会
+#      把好图好片删光。本工具只负责「安全地移」，判定由调用方提供，工具内不再猜。
+#   2) 路径必须落在 PROJECT_OUTPUT_DIR / COMFYUI_OUTPUT_DIR 之内；
+#   3) 显式排除 PROJECT_TRASH_DIR（避免把自己的回收站再搬一层）；
+#   4) 硬链接（st_nlink > 1）不释放空间、且可能被他处引用 → 拒绝移动。
+_PURGE_REJECTED_ENV = "MJSCXT_PURGE_REJECTED"
+
+
+def _purge_rejected_enabled() -> bool:
+    """不合格产物清理开关。默认开启；设 `MJSCXT_PURGE_REJECTED=0` 时只记日志不移走。"""
+    v = str(os.environ.get(_PURGE_REJECTED_ENV, "1")).strip().lower()
+    return v not in ("0", "false", "no", "off", "")
+
+
+def _reject_artifact(paths, project: str = "", reason: str = "", kind: str = "") -> dict:
+    """质检不合格产物 → 移入回收站（可恢复），**绝不硬删**。
+
+    返回 ``{"moved": [...], "skipped": [...], "failed": [...]}``，三态都带
+    `{"src":..., "why":...}`（moved 项另带 `dst`）。
+
+    安全闸（任一不满足即跳过并记日志，绝不抛异常）：
+      · 只接受绝对路径（相对路径无法可靠判边界，直接拒绝）；
+      · `os.path.normpath(os.path.abspath(p))` 归一 —— 本项目已知坑：混合分隔符
+        （`/` 与 `\\`）会让外部 API 静默匹配失败，必须先归一；
+      · 必须落在 PROJECT_OUTPUT_DIR 或 COMFYUI_OUTPUT_DIR 之内（越界拒绝）；
+      · 显式排除 PROJECT_TRASH_DIR（含 `_backup_*` / `_watermark_backup` 同理越界/排除）；
+      · `os.path.lexists` 判存在 —— episode 成片 `move` 后 src 已消失是常态，
+        不存在即跳过，**不能当异常**；
+      · `os.stat().st_nlink == 1` 校验（硬链接不释放空间，见 disk_reclaim.py 的教训）；
+      · 文件与目录都支持（目录走 shutil.move）。
+
+    全程 try/except：清理是优化而非功能，**任何失败都不阻断主流程**，只 logger.warning。
+    """
+    res = {"moved": [], "skipped": [], "failed": []}
+    if isinstance(paths, (str, bytes, os.PathLike)):
+        paths = [paths]
+    paths = [p for p in (paths or []) if p]
+    if not paths:
+        return res
+
+    # 归一化的边界根（含尾分隔符，防止 /output 误匹配 /output2）
+    def _root_ok(p: str) -> bool:
+        cands = []
+        for root in (PROJECT_OUTPUT_DIR, COMFYUI_OUTPUT_DIR):
+            if root:
+                try:
+                    cands.append(os.path.normpath(os.path.abspath(root)) + os.sep)
+                except Exception:  # noqa: BLE001
+                    pass
+        return any(p == c.rstrip(os.sep) or p.startswith(c) for c in cands)
+
+    trash_abs = ""
+    try:
+        if PROJECT_TRASH_DIR:
+            trash_abs = os.path.normpath(os.path.abspath(PROJECT_TRASH_DIR))
+    except Exception:  # noqa: BLE001
+        trash_abs = ""
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    trash_root = os.path.join(PROJECT_TRASH_DIR, "qc_reject",
+                              f"{stamp}_{_safe_project(project or 'project')}")
+    enabled = _purge_rejected_enabled()
+
+    for raw in paths:
+        try:
+            if not os.path.isabs(raw):
+                res["skipped"].append({"src": str(raw), "why": "非绝对路径"})
+                app.logger.warning(
+                    "[质检清理] 跳过：非绝对路径（project=%s kind=%s reason=%s path=%s）",
+                    project, kind, reason, raw)
+                continue
+            p = os.path.normpath(os.path.abspath(raw))
+            if trash_abs and (p == trash_abs or p.startswith(trash_abs + os.sep)):
+                res["skipped"].append({"src": p, "why": "回收站内，跳过"})
+                continue
+            if not _root_ok(p):
+                res["skipped"].append({"src": p, "why": "越界（不在 output/ComfyUI 目录内）"})
+                app.logger.warning(
+                    "[质检清理] 拒绝越界路径（project=%s kind=%s reason=%s path=%s）",
+                    project, kind, reason, p)
+                continue
+            if not os.path.lexists(p):
+                res["skipped"].append({"src": p, "why": "不存在"})
+                continue
+            try:
+                if os.stat(p).st_nlink > 1:
+                    res["skipped"].append({"src": p, "why": "硬链接（不释放空间）"})
+                    app.logger.warning(
+                        "[质检清理] 跳过硬链接（project=%s kind=%s reason=%s path=%s）",
+                        project, kind, reason, p)
+                    continue
+            except OSError as se:
+                res["failed"].append({"src": p, "why": f"stat 失败：{se}"})
+                continue
+            if not enabled:
+                res["skipped"].append({"src": p, "why": f"{_PURGE_REJECTED_ENV}=0（仅记日志）"})
+                app.logger.warning(
+                    "[质检清理] 开关关闭，仅记日志不移走（project=%s kind=%s reason=%s path=%s）",
+                    project, kind, reason, p)
+                continue
+            os.makedirs(trash_root, exist_ok=True)
+            base = os.path.basename(p.rstrip(os.sep)) or "artifact"
+            dst = os.path.join(trash_root, base)
+            # 同名冲突（同项目多次重试同名）→ 加序号，绝不覆盖已在回收站里的证据
+            _n = 1
+            while os.path.lexists(dst):
+                stem, ext = os.path.splitext(base)
+                dst = os.path.join(trash_root, f"{stem}__{_n}{ext}")
+                _n += 1
+            shutil.move(p, dst)
+            res["moved"].append({"src": p, "dst": dst})
+            app.logger.warning(
+                "[质检清理] 不合格产物已移入回收站（project=%s kind=%s reason=%s）：%s → %s",
+                project, kind, reason, p, dst)
+        except Exception as e:  # noqa: BLE001  清理绝不能中断生产
+            res["failed"].append({"src": str(raw), "why": f"{type(e).__name__}: {e}"})
+            app.logger.warning("[质检清理] 移入回收站失败（已忽略，不影响主流程）：%s: %s",
+                               type(e).__name__, e)
+    return res
+
+
+def _purge_rejected_artifacts(paths, project: str = "", reason: str = "", kind: str = "",
+                              history_file: str = "") -> dict:
+    """``_reject_artifact`` 的语义化包装：移走后顺手把「质检历史 file 断链」补掉。
+
+    ⚠️ 质检历史 json 是排查依据，**只把断链的 `file` 字段置 null + 打 `purged` 标记**，
+    绝不删除历史记录本身（否则事后无法查「当时为什么不合格」）。
+    """
+    out = _reject_artifact(paths, project=project, reason=reason, kind=kind)
+    moved_srcs = {os.path.normpath(m["src"]) for m in out.get("moved") or []}
+    if moved_srcs and history_file:
+        try:
+            _mark_history_file_purged(history_file, moved_srcs)
+        except Exception as e:  # noqa: BLE001
+            app.logger.warning("[质检清理] 质检历史 file 断链标记失败（忽略）：%s", e)
+    return out
+
+
+def _mark_history_file_purged(history_file: str, moved_srcs: set) -> None:
+    """把质检历史里指向**已移走路径**的 `file` / `frames_f` 记为 null 并打 `purged=true`。
+
+    历史记录本身保留 —— 它是事后排查「当时为什么不合格」的唯一依据，只是不再指向
+    已不存在的本地文件（否则前端/排障脚本按路径取会 404）。
+    """
+    if not history_file or not os.path.isfile(history_file):
+        return
+    with open(history_file, "r", encoding="utf-8") as f:
+        data = json.load(f) or {}
+    hit = False
+    for rec in (data.get("records") or []):
+        if not isinstance(rec, dict):
+            continue
+        fp = rec.get("file")
+        if fp and os.path.normpath(os.path.abspath(str(fp))) in moved_srcs:
+            rec["file"] = None
+            rec["purged"] = True
+            hit = True
+        # 抽帧图（整片质检）：整目录被移走 → 逐条把已消失的帧路径剔除
+        frames = rec.get("frames_f")
+        if isinstance(frames, list) and frames:
+            kept = [x for x in frames
+                    if os.path.normpath(os.path.abspath(str(x))) not in moved_srcs]
+            if len(kept) != len(frames):
+                rec["frames_f"] = kept
+                rec["frames_purged"] = True
+                hit = True
+    if hit:
+        atomic_write_json(history_file, data)
+        app.logger.warning("[质检清理] 已标记质检历史断链：%s", history_file)
+
+
+def _purge_prompt_records(project: str, shot_key, reason: str = "") -> dict:
+    """提示词预检不通过 → 移走该镜**唯一落盘物** `prompt_<shot>.json`（P12）。
+
+    用户决策 1：``prompt_qc.preflight`` 是生成前的文本合规检查，不通过直接阻断不生成，
+    因此没有图片/视频可删 —— 只有这份提示词历史 json 留在了本地。
+    """
+    try:
+        key = qc_client.safe_token(shot_key, "0")
+        path = os.path.join(QC_DIR, _safe_project(project or "project"), f"prompt_{key}.json")
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning("[质检清理] 提示词落盘物路径解析失败（忽略）：%s", e)
+        return {"moved": [], "skipped": [], "failed": []}
+    return _reject_artifact([path], project=project, reason=reason or "提示词预检未通过",
+                            kind="prompt")
+
+
+def _purge_sb_refs(project: str) -> dict:
+    """分镜参考图上传残留（ComfyUI output/sb_ref_*.png）按项目清理（P13）。
+
+    ⚠️ 与「不合格产物」是**两码事**：`sb_ref_*` 是分镜**参考图输入**（上传给
+    LoadImageOutput 的中间件），不是质检产物，**绝不能混进普通「不合格即删」逻辑**
+    （那会在单镜重试中途删掉当前镜头正在用的参考图）。按用户决策 4：只在**本轮分镜
+    批量生成循环全部结束后**调用一次，按项目前缀收口。
+    """
+    res = {"moved": [], "skipped": [], "failed": []}
+    try:
+        root = COMFYUI_OUTPUT_DIR
+        if not root or not os.path.isdir(root):
+            return res
+        # generate_storyboard 的命名：sb_ref_<filename_prefix 的 basename>_<idx>.png，
+        # 分镜链路 filename_prefix 形如 `comic_drama_sb/<项目>_shot_NN[...]`，
+        # 故前缀里含 `<项目>_shot_`。
+        pref = f"sb_ref_{_safe_project(project or '')}_shot_"
+        targets = []
+        for fn in os.listdir(root):
+            if fn.startswith(pref) and fn.lower().endswith(".png"):
+                targets.append(os.path.join(root, fn))
+        if not targets:
+            return res
+        res = _reject_artifact(targets, project=project,
+                               reason="分镜参考图上传残留（本轮分镜生成结束）",
+                               kind="sb_ref")
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning("[质检清理] sb_ref 清理失败（忽略，不影响生产）：%s: %s",
+                           type(e).__name__, e)
+    return res
 
 
 # B-14 P2-4：资产「取图判据」统一入口。就绪判据（_collect_asset_refs 的
@@ -2086,6 +2314,14 @@ def _storyboard_retry_shot_impl():
         "storyboard", prompt, ctx=shot, style=(shot.get("style") or _rs_style),
         ref_count=len(refs), project_name=project)
     if not _pgate.get("accept"):
+        # ★ 用户需求：质检不合格的提示词不留本地。用户决策 1：提示词预检是**生成前**的文本
+        # 合规检查，不通过直接阻断不生成 → 没有图片/视频可删，只有这份提示词历史 json 落盘
+        # （P12 `output/qc/<项目>/prompt_<shot>.json`），把它移回收站。
+        try:
+            _purge_prompt_records(project, shot_id,
+                                  reason=f"提示词预检未通过（{_pgate.get('label')}）")
+        except Exception as _pe:  # noqa: BLE001
+            app.logger.warning(f"不合格提示词清理失败（忽略）：{_pe}")
         return jsonify({"success": False, "prompt_qc_blocked": True,
                         "error": f"提示词预检未通过（{_pgate.get('label')}）：{_pgate.get('reason')}"
                                  + (f"；建议：{_pf.get('rebuild_hint')}" if _pf.get("rebuild_hint") else ""),
@@ -2124,10 +2360,17 @@ def _storyboard_retry_shot_impl():
         _qc_record_verdict(project, "image", shot_id, "单镜重跑质检",
                            1, seed, scratch, verdict, style=(shot.get("style") or _rs_style))
     if qc_on and not (gate or {}).get("accept"):
+        # ★ 用户需求：质检「判定不通过」的暂存图不留本地（含 ComfyUI 侧）。
+        # ⚠️ 只删「质检成功返回（ok=True）且判定不合格」的产物；ok=False（接口故障/超时/
+        # 鉴权失败）不是产物不合格，绝不能删（那会把好图删光）。
+        if (verdict or {}).get("ok") is True:
+            _purge_rejected_artifacts([scratch], project=project, kind="storyboard_image_retry",
+                                      reason=f"单镜重跑质检不合格（{(gate or {}).get('label')}）",
+                                      history_file=(_qc_history_file_for(project, "image", shot_id)))
         return jsonify({"success": False, "qc_blocked": True,
                         "error": f"分镜图质检阻断（{(gate or {}).get('label')}）："
                                  f"{(gate or {}).get('reason')}；未写入正式目录",
-                        "verdict": verdict, "scratch": scratch}), 200
+                        "verdict": verdict}), 200
     shutil.copy2(scratch, dst)
     # 同步更新 manifest 中该镜条目
     # B-2 收口（2026-09-22 复验）：manifest 损坏时 read_json_strict 会 fail-loud 抛错，
@@ -2331,6 +2574,12 @@ def _video_retry_shot_impl():
         project_name=project)
     seg["prompt"] = prompt
     if not _pgate_v.get("accept"):
+        # ★ 用户需求：视频提示词预检不通过 → 提示词唯一落盘物（P12）移回收站（同决策 1）。
+        try:
+            _purge_prompt_records(project, shot_id,
+                                  reason=f"视频提示词预检未通过（{_pgate_v.get('label')}）")
+        except Exception as _pe:  # noqa: BLE001
+            app.logger.warning(f"不合格提示词清理失败（忽略）：{_pe}")
         return jsonify({"success": False, "prompt_qc_blocked": True,
                         "error": f"视频提示词预检未通过（{_pgate_v.get('label')}）：{_pgate_v.get('reason')}"
                                  + (f"；建议：{_pf_v.get('rebuild_hint')}" if _pf_v.get("rebuild_hint") else ""),
@@ -2859,6 +3108,20 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                     # 把「基础图哪里不对」沉淀进教训库（供下次重生成时改写提示词）
                     if base_attempts and isinstance(base_attempts[-1], dict):
                         _record_qc_lesson(project_name, "asset", prompt_zh, base_attempts[-1])
+                    # ★ 用户需求：质检「判定不通过」的暂存基础图不留本地（含 ComfyUI 侧）。
+                    # ⚠️ 仅当最后一次尝试是「质检成功返回且不合格」（ok=True）时才删；
+                    # ok=False（接口故障）/ skipped（未开启）/ 质检接口未就绪 都不删。
+                    try:
+                        _last_b = base_attempts[-1] if (base_attempts and isinstance(base_attempts[-1], dict)) else {}
+                        if qc_on and _last_b.get("ok") is True:
+                            _purge_rejected_artifacts(
+                                [_last_b.get("file") or scratch_base],
+                                project=project_name,
+                                reason=f"资产基础图质检不合格（{(base_gate or {}).get('label')}）",
+                                kind="asset_base_image",
+                                history_file=_last_b.get("history_file") or "")
+                    except Exception as _pe:  # noqa: BLE001
+                        app.logger.warning(f"资产不合格基础图清理失败（忽略）：{_pe}")
 
                     results.append({
                         "name": name, "success": False, "dir": asset_dir, "stage": "基础图",
@@ -3541,6 +3804,14 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     item["prompt_qc_repairs"] = _pf_item.get("repairs") or []
                     if not _pgate_item.get("accept"):
                         item["prompt_qc_blocked"] = True
+                        # ★ 用户需求：不合格提示词不留本地（P12）—— 该镜不生成，
+                        # 把上一轮遗留的 `output/qc/<项目>/prompt_<shot>.json` 移回收站。
+                        try:
+                            _purge_prompt_records(
+                                project_name, shot_id,
+                                reason=f"提示词预检未通过（{_pgate_item.get('label')}）")
+                        except Exception as _pe:  # noqa: BLE001
+                            app.logger.warning(f"不合格提示词清理失败（忽略）：{_pe}")
                         raise _PromptQCBlocked(
                             f"提示词预检未通过（{_pgate_item.get('label')}）："
                             f"{_pgate_item.get('reason')}" +
@@ -3718,6 +3989,19 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                             item["qc_blocked"] = True
                             item.pop("file", None)
                             item.pop("url", None)
+                            # ★ 用户需求：质检「判定不通过」的暂存图不留本地（含 ComfyUI 侧）。
+                            # ⚠️ 只删「质检成功返回且判定不合格」的产物：ok=False（接口故障/
+                            # 超时/鉴权失败）、skipped（未开启）、qc_on=False（接口未就绪）都
+                            # 不是产物不合格，删下去会误删好图。见 _reject_artifact 红线说明。
+                            try:
+                                if qc_on and attempts and attempts[-1].get("ok") is True:
+                                    _purge_rejected_artifacts(
+                                        [scratch_png], project=project_name,
+                                        reason=f"分镜图质检不合格（{gate['label']}）" if gate else "",
+                                        kind="storyboard_image",
+                                        history_file=attempts[-1].get("history_file") or "")
+                            except Exception as _pe:  # noqa: BLE001
+                                app.logger.warning(f"分镜图不合格产物清理失败（忽略）：{_pe}")
                             item["error"] = ((f"分镜图质检阻断（{gate['label']}）：{gate['reason']}"
                                               "；未通过质检，未写入正式目录（暂存图见质检历史）")
                                              if gate else (item.get("error")
@@ -3777,6 +4061,12 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         app.logger.error(f"分镜图任务失败: {e}")
         with lock:
             generation_state[task_id].update({"status": "failed", "error": str(e)})
+    # ★ 用户决策 4：ComfyUI 侧分镜参考图上传残留（sb_ref_*）只在**本轮分镜批量生成全部
+    # 结束后**按项目清理一次 —— 不在单镜循环里调（那会在重试中途删掉当前镜头正在用的参考图）。
+    try:
+        _purge_sb_refs(project_name)
+    except Exception as _sb_ref_err:  # noqa: BLE001
+        app.logger.warning(f"sb_ref 残留清理失败（忽略）：{_sb_ref_err}")
     _maybe_reclaim_comfyui_output()   # D-11a：任务收尾滚动回收 ComfyUI 重试残留（节流+全容错）
 
 
@@ -4371,6 +4661,13 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                 app.logger.warning("镜头 %s 视频提示词预检未通过（%s）：%s",
                                    shot.get("shot_id"), _pgate_seg.get("label"),
                                    _pgate_seg.get("reason"))
+                # ★ 用户需求：不合格提示词不留本地（P12）。整集模式该段不生成，
+                # 把可能存在的上一轮 `prompt_<shot>.json` 移回收站。
+                try:
+                    _purge_prompt_records(project_name, shot.get("shot_id") or seq,
+                                          reason=f"视频提示词预检未通过（{_pgate_seg.get('label')}）")
+                except Exception as _pe:  # noqa: BLE001
+                    app.logger.warning(f"不合格提示词清理失败（忽略）：{_pe}")
             return seg, sb_local
 
         # ---------- 模式 episode：整集 N 段一次生成（H3 原生衔接）+ 整片 QC 门控 ----------
@@ -4447,9 +4744,13 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                         (verdict.get("error") or gate.get("reason") or ""))
                 if not passed and verdict.get("ok"):
                     try:
+                        # 抽帧图路径写进历史 extra.frames_f，供产物被移走后做「断链修正」
+                        # （见下方 _mark_history_file_purged）。
                         rec = _qc_record_verdict(
                             project_name, "video", episode_tag or "episode", "整片质检",
-                            _ep_qc_attempt["n"], None, video_path, verdict, style=style)
+                            _ep_qc_attempt["n"], None, video_path, verdict, style=style,
+                            extra={"frames_f": list(verdict.get("frames") or []),
+                                   "frames_dir": fr_dir})
                         # 挂上本集的段提示词集合，供下次重试时按相似度召回
                         # A-5 P1：整片模式段数可达 20~44 段，全量拼接可达数十 KB —— 全量入
                         # 教训库会撑爆/稀释检索。截断到 2000 字符（保留段边界换行，人可读）。
@@ -4468,6 +4769,19 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                         "[教训][video] project=%s mode=episode attempt=%d ok=False "
                         "passed=False verdict.ok=false → 质检异常/超时，不沉淀教训",
                         project_name, _ep_qc_attempt["n"])
+                # ★ 用户需求：整片质检「判定不通过」的抽帧图不留本地。⚠️ 仅当质检成功返回
+                # 且不合格（ok=True、passed=False）时删；ok=False（接口故障/ffmpeg 缺失）时
+                # 抽帧图保留供排障。整片成片本身按用户决策 2 保留（在调用方处理）。
+                if not passed and verdict.get("ok") and not verdict.get("unavailable"):
+                    # 抽帧图整目录移入回收站，并把质检历史里指向它的帧路径一并标记为断链
+                    _hist_f = _qc_history_file_for(project_name, "video", episode_tag or "episode")
+                    try:
+                        _purge_rejected_artifacts(
+                            [fr_dir], project=project_name,
+                            reason=f"整片质检不合格（{gate.get('label')}）抽帧图",
+                            kind="episode_frames", history_file=_hist_f)
+                    except Exception as _pe:  # noqa: BLE001
+                        app.logger.warning(f"整片抽帧图清理失败（忽略）：{_pe}")
                 return {"passed": passed, "verdict": verdict, "gate": gate}
 
             def _ep_qc_stop_cb(qc_results):
@@ -4554,6 +4868,31 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
             if os.path.abspath(src) != os.path.abspath(dst):
                 shutil.move(src, dst)
             qc_passed = not episode_failed
+            # ★ 用户决策 2：整集成片**保留现行为** —— 不通过仍写入正式目录（dst）供人工复核，
+            # 故 app.py 这里的 fail-open **不动**。但**必须清理 ComfyUI 侧历次重试的整集 mp4**
+            # （每轮 attempt 都会在 COMFYUI_OUTPUT_DIR/comic_drama/ 生成一个 `<项目>_<集>_0000N_.mp4`，
+            # 不清理就是每次重试堆一个几十分钟的成片）。qc_results[].file 是 comfyui_client
+            # 回传的**原始**产物路径（dst 已 move 走，不在其中）。
+            try:
+                if qc_on and qc_results:
+                    _comfy_retries = []
+                    for _r in qc_results:
+                        if not isinstance(_r, dict):
+                            continue
+                        _f = _r.get("file")
+                        # 只清「质检成功返回且判定不合格」的轮次。comfyui_client 写入的
+                        # qc_results 条目里：接口故障轮 unavailable=True 且 passed=None；
+                        # 正常不合格轮 passed=False（`is False` 严格判等，None 不命中）。
+                        _ok_true = _r.get("passed") is False and _r.get("unavailable") is not True
+                        if _f and _ok_true:
+                            _comfy_retries.append(_f)
+                    if _comfy_retries:
+                        _purge_rejected_artifacts(
+                            _comfy_retries, project=project_name,
+                            reason="整集视频历次质检不合格重试残留",
+                            kind="episode_video_retry")
+            except Exception as _pe:  # noqa: BLE001
+                app.logger.warning(f"整集重试残留清理失败（忽略）：{_pe}")
             # A-1 P1：整片 QC 调用异常（comfyui_client 已改「break + 追加 unavailable 条目」，
             # 不再触碰 app.py 的 _ep_qc_attempt 闭包）时，仅看闭包会漏判 → 结果/UI 会误报
             # 「QC 不通过」。这里同时看 qc_results 里是否存在 unavailable 条目，口径与闭包对齐。
@@ -4802,6 +5141,21 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                         video_item["qc_blocked"] = True
                         video_item.pop("path", None)
                         video_item.pop("url", None)
+                        # ★ 用户需求：质检「判定不通过」的暂存视频 + 抽帧图不留本地（含 ComfyUI 侧）。
+                        # ⚠️ 仅当最后一次尝试是「质检成功返回且不合格」（ok=True）时才删；
+                        # ok=False（接口故障/超时）/ skipped（未开启）不是产物不合格，绝不删。
+                        try:
+                            _last_v = attempts[-1] if (attempts and isinstance(attempts[-1], dict)) else {}
+                            if qc_on and _last_v.get("ok") is True:
+                                _purge_rejected_artifacts(
+                                    [v_scratch, frames_dir], project=project_name,                                    reason=f"视频质检不合格（{gate['label']}）" if gate else "视频质检不合格",
+                                    kind="shot_video",
+                                    history_file=_last_v.get("history_file") or "")
+                        except Exception as _pe:  # noqa: BLE001
+                            app.logger.warning(f"视频不合格产物清理失败（忽略）：{_pe}")
+                        # 摘掉响应体里的 frames URL（抽帧目录已移走，前端再取会 404），
+                        # 但保留质检历史里的 frames_local 供排障。
+                        video_item.pop("frames", None)
                         video_item["error"] = ((f"视频质检阻断（{gate['label']}）：{gate['reason']}"
                                                 "；未通过质检，未写入正式目录（暂存视频见质检历史）")
                                                if gate else (video_item.get("error")
@@ -6467,10 +6821,18 @@ def _qc_prune_attempts(scratch_dir: str, keep: int = 4) -> None:
         groups = {}   # (前缀, 扩展名) -> [尝试号]
         info = {}      # 尝试号 -> 完整路径
         for fn in os.listdir(scratch_dir):
+            # ⚠️ 单镜重跑落盘名是 `shot_NN_retry.png`（**无** `_tryN` 数字后缀），
+            # 旧正则 `^(.+)_try(\d+)(\.\w+)$` 匹配不到 → 该文件永不被滚动清理、只增不减。
+            # 这里把 `_retry` 也纳入：归到 num=0（比任何 `_tryN` 都旧 → 优先被清）。
             m = _re.match(r"^(.+)_try(\d+)(\.\w+)$", fn)
             if not m:
-                continue   # 非 try 命名（正式产物/杂项）一律不动
-            prefix, num, ext = m.group(1), int(m.group(2)), m.group(3)
+                m = _re.match(r"^(.+)_retry(\.\w+)$", fn)
+                if m:
+                    prefix, num, ext = m.group(1), 0, m.group(2)
+                else:
+                    continue   # 非 try/retry 命名（正式产物/杂项）一律不动
+            else:
+                prefix, num, ext = m.group(1), int(m.group(2)), m.group(3)
             groups.setdefault((prefix, ext), []).append(num)
             info[(prefix, ext, num)] = os.path.join(scratch_dir, fn)
         removed = 0
@@ -7078,6 +7440,19 @@ def _qc_record(project_name: str, kind: str, shot_id, payload: dict) -> str:
         return qc_client.append_history(QC_DIR, project_name, kind, shot_id, payload)
     except Exception as e:  # noqa: BLE001
         app.logger.warning(f"质检历史写入失败（忽略）：{e}")
+        return ""
+
+
+def _qc_history_file_for(project_name: str, kind: str, shot_id) -> str:
+    """推算某条质检历史的落盘路径（与 qc_client.history_path 同口径）。
+
+    用途：产物被移入回收站后，把该历史里指向已删路径的 `file` 记为 null（断链修正），
+    历史记录本身保留 —— 它是事后排查「当时为什么不合格」的唯一依据。
+    """
+    try:
+        return qc_client.history_path(QC_DIR, project_name, kind, shot_id)
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning(f"质检历史路径推算失败（忽略）：{e}")
         return ""
 
 
@@ -9252,6 +9627,21 @@ def _audio_qc_lines(project_name: str, lines: list, results: list, cfg: dict,
                 # 不沉淀，避免把「质检调用失败」记成「这句配音有问题」。
                 if verdict.get("ok", True) and ln:
                     _record_audio_qc_lesson(project_name, ln, verdict)
+                # ★ 用户需求：质检不合格的配音不留本地。⚠️ **仅在最终 failed（重配也失败）时删**：
+                # `blocked`（整段无声/空文件）已由 retry_cb 重配过一次，重配若恢复则 verdict
+                # 被替换、不会走到这里；能走到这里说明**最终结论仍不合格**。删除条件是
+                # 「质检成功返回（ok 非 False）且最终 not passed」—— ok=False（接口故障）不删。
+                # 删：该句 wav（P9）+ 其可视化目录（P10 output/qc/audio/<项目>/<stem>/）。
+                if verdict.get("ok", True) and r.get("out_path"):
+                    try:
+                        _stem = os.path.splitext(os.path.basename(r["out_path"]))[0]
+                        _purge_rejected_artifacts(
+                            [r["out_path"], os.path.join(visuals_root, _stem)],
+                            project=project_name,
+                            reason=f"配音质检不合格（{verdict.get('reason') or ''}）"[:120],
+                            kind="audio_line")
+                    except Exception as _pe:  # noqa: BLE001
+                        app.logger.warning(f"不合格配音清理失败（忽略）：{_pe}")
                 if len(stats["problems"]) < 20:
                     stats["problems"].append({
                         "line_id": r.get("line_id"), "shot_id": r.get("shot_id"),
@@ -9369,6 +9759,17 @@ def _mix_audio_qc(report: dict, cfg: dict) -> dict:
                         app.logger.debug("评分字段解析失败（忽略）：%s", e)
         except (TypeError, ValueError, ZeroDivisionError) as e:
             app.logger.debug("评分归一化计算失败（忽略）：%s", e)
+        # ★ 用户需求：质检不合格的混音不留本地（P10 可视化目录）。仅当最终「质检成功返回
+        # 且不合格」（ok 非 False 且 passed=False）时删；ok=False（接口故障）不删。
+        if verdict.get("ok") is not False and not out_v.get("passed"):
+            try:
+                _purge_rejected_artifacts(
+                    [os.path.join(QC_DIR, "audio_mix", project_name, stem)],
+                    project=project_name,
+                    reason=f"混音质检不合格（{out_v.get('reason') or ''}）"[:120],
+                    kind="audio_mix")
+            except Exception as _pe:  # noqa: BLE001
+                app.logger.warning(f"不合格混音清理失败（忽略）：{_pe}")
         return out_v
     except Exception as e:  # noqa: BLE001 - 质检失败绝不影响合成结果
         app.logger.warning(f"成片音频质检异常（已跳过）：{e}")
