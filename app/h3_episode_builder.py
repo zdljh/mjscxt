@@ -39,6 +39,7 @@ import copy
 import json
 import logging
 import math
+import uuid
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -261,6 +262,48 @@ class H3EpisodeBuilder:
         t["inputs"][ts]["link"] = link_id
         return lk
 
+    # ------------------------------------------------------------------ 子图副本
+    def _clone_rest_subgraph(self, seg_index: int, n_segments: int) -> str:
+        """为「非首段」生成一个**独立子图副本**，改写递增参数，返回新 UUID。
+
+        为什么必须做（2026-09-24 根因）：模板「H3信号10段测试001.json」的 10 个段是
+        **10 个不同子图**，每个子图内部 ``H3ContinuousSaveLatent.clip_index`` 递增
+        （1..10），且末段 ``H3ContinuousStitchOutputV14.output_mode`` 是 ``Final Clip``
+        （其余 ``Stitch Ready``）。若像旧实现那样把所有非首段都指向同一个「Clip 2」
+        子图 UUID，则：
+          - 所有段的 SaveLatent 都写 ``clip_00002.safetensors``（互相覆盖，永远没有
+            clip_00003）；
+          - 没有 ``Final Clip`` 收尾；
+          - 「from Clip 1」的 Continue 配置被错误复用到第 3..N 段 → 冻结帧共识失败
+            （stable_final_consensus_failed）→ 死循环。
+
+        正确做法：每段深拷贝「第二段」子图，生成新 UUID，把 clip_index 改成 seg_index+1，
+        末段 output_mode 改成 ``Final Clip``，并追加进 ``wf["definitions"]["subgraphs"]``。
+        """
+        src_uuid = self.nodes_by_id[self._rest_seg_id]["type"]
+        sg = copy.deepcopy(self.subgraphs[src_uuid])
+        new_uuid = str(uuid.uuid4())
+        sg["id"] = new_uuid
+        for sn in (sg.get("nodes") or []):
+            st = sn.get("type") or ""
+            if st == "H3ContinuousSaveLatent":
+                clip_idx = seg_index + 1
+                wv = sn.get("widgets_values") or []
+                if len(wv) >= 2:
+                    wv[1] = clip_idx
+                sn["widgets_values"] = wv
+                named = sn.get("widgets_values_named") or {}
+                named["clip_index"] = clip_idx
+                sn["widgets_values_named"] = named
+            elif st == "H3ContinuousStitchOutputV14":
+                mode = "Final Clip" if seg_index == n_segments - 1 else "Stitch Ready"
+                sn["widgets_values"] = [mode]
+                named = sn.get("widgets_values_named") or {}
+                named["output_mode"] = mode
+                sn["widgets_values_named"] = named
+        self._extra_subgraphs.append(sg)
+        return new_uuid
+
     # ------------------------------------------------------------------ 构建
     def build(self, n_segments: int, duration: float = 5.0,
               resolution_override: Optional[Tuple[int, int]] = None) -> Tuple[dict, dict]:
@@ -290,6 +333,9 @@ class H3EpisodeBuilder:
         first_tpl = self.nodes_by_id[seg_ids[0]]
         rest_tpl = self.nodes_by_id[seg_ids[1]] if analysis["rest_segment"] else first_tpl
         join_tpl = self.nodes_by_id[analysis["first_join"]] if analysis["first_join"] else None
+        # 供 _clone_rest_subgraph 定位「第二段」子图 UUID + 收集每段新子图副本
+        self._rest_seg_id = seg_ids[1] if analysis["rest_segment"] else seg_ids[0]
+        self._extra_subgraphs: List[dict] = []
 
         # 第 1 段的共享资源 GetNode 模板 & LoadImage 模板
         get_tpl: Dict[str, dict] = {}
@@ -326,6 +372,11 @@ class H3EpisodeBuilder:
             tpl = first_tpl if i == 0 else rest_tpl
             inst = copy.deepcopy(tpl)
             inst["id"] = self._new_node_id()
+            # ⚠️ 非首段必须换用「独立子图副本」（clip_index 递增 + 末段 Final Clip），
+            # 否则所有段共享同一个「Clip 2」子图 → SaveLatent 永远写 clip_00002、
+            # 无 Final Clip 收尾、冻结帧共识失败死循环（2026-09-24 根因）。
+            if i > 0:
+                inst["type"] = self._clone_rest_subgraph(i, n_segments)
             named = dict(inst.get("widgets_values_named") or {})
             named.update({"duration": float(duration), "prompt": ""})
             if resolution is not None:
@@ -464,6 +515,10 @@ class H3EpisodeBuilder:
         wf["last_node_id"] = self._cursor_node
         wf["last_link_id"] = self._cursor_link
         wf["groups"] = []
+        # 追加每段独立的「非首段」子图副本（clip_index 递增 / 末段 Final Clip）
+        if self._extra_subgraphs:
+            wf.setdefault("definitions", {}).setdefault("subgraphs", []).extend(
+                self._extra_subgraphs)
 
         layout = {
             "template": self.template_path,
