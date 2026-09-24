@@ -80,7 +80,6 @@ import sheet_split
 import task_store
 import gpu_task_gate
 import video_watermark
-import watermark_cleanup
 import upscale_client
 import tts_client
 import dub_mix
@@ -127,11 +126,6 @@ CORS(app)
 APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
 APP_PORT = int(os.getenv("APP_PORT", "5000"))
 APP_DEBUG = os.getenv("APP_DEBUG", "0").lower() in ("1", "true", "yes", "on")
-
-# 模型自绘文字/水印清理：工作流本身无水印节点，标识由模型权重绘制（提示词无法可靠压制），
-# 故在产物落盘前对固定画面区域（默认右下角比例区）做 ffmpeg delogo 插值修复。
-WATERMARK_CLEANUP_ENABLED = os.getenv("WATERMARK_CLEANUP", "1").lower() not in ("0", "false", "no", "off")
-WATERMARK_CLEANUP_BACKUP_DIR = os.path.join(QC_DIR, "_watermark_backup")
 
 # D-05（P1）整集视频质检抽帧上限：常量与纯逻辑见 app/qc_coverage.py
 # （独立零依赖模块，便于 verify_episode_qc_coverage.py 离线单测）。
@@ -2112,12 +2106,6 @@ def _storyboard_retry_shot_impl():
     scratch_dir = os.path.join(QC_DIR, project, "storyboard_scratch")
     os.makedirs(scratch_dir, exist_ok=True)
     scratch = os.path.join(scratch_dir, f"shot_{seq:02d}_retry.png")
-    if WATERMARK_CLEANUP_ENABLED:
-        try:
-            watermark_cleanup.clean_image(files[0], backup_dir=os.path.join(
-                WATERMARK_CLEANUP_BACKUP_DIR, project))
-        except Exception as e:  # noqa: BLE001
-            app.logger.warning(f"单镜重跑去水印未生效：{e}")
     # G8②：消费 ComfyUI output 源（与主 worker 的 move 语义对齐），不留 output 残留
     shutil.move(files[0], scratch)
     if qc_on:
@@ -3629,14 +3617,6 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                         if not result["files"]:
                             item["error"] = "ComfyUI 未返回分镜图（可能节点缺失或超时）"
                             break
-                        # 模型自绘文字/水印修复：提示词已声明禁字，此处对残留标识做区域清理
-                        if WATERMARK_CLEANUP_ENABLED:
-                            wm_rec = watermark_cleanup.clean_image(
-                                result["files"][0],
-                                backup_dir=os.path.join(WATERMARK_CLEANUP_BACKUP_DIR, project_name))
-                            item["watermark_cleanup"] = wm_rec
-                            if not wm_rec.get("ok"):
-                                app.logger.warning(f"分镜图去水印未生效: {wm_rec.get('error')}")
                         # P0：先落「质检暂存区」，质检达标后才写入正式交付目录（阻断 ⇒ 正式目录不产生该图）
                         sb_scratch_dir = os.path.join(QC_DIR, project_name, "storyboard_scratch")
                         os.makedirs(sb_scratch_dir, exist_ok=True)
@@ -4615,13 +4595,6 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                     if not os.path.isfile(src):
                         video_item["error"] = f"ComfyUI 返回的视频文件不存在: {src}"
                         break
-                    # 模型自绘文字/水印修复：逐帧区域插值，确保抽帧质检与交付一致
-                    if WATERMARK_CLEANUP_ENABLED:
-                        wm_rec = watermark_cleanup.clean_video(
-                            src, backup_dir=os.path.join(WATERMARK_CLEANUP_BACKUP_DIR, project_name))
-                        video_item["watermark_cleanup"] = wm_rec
-                        if not wm_rec.get("ok"):
-                            app.logger.warning(f"视频去水印未生效: {wm_rec.get('error')}")
                     # P0：先落「质检暂存区」，质检达标后才写入正式交付目录（阻断 ⇒ 正式目录不产生该视频）
                     v_scratch_dir = os.path.join(QC_DIR, project_name, "video_scratch")
                     os.makedirs(v_scratch_dir, exist_ok=True)
