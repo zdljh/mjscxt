@@ -1535,6 +1535,103 @@ def estimate_shots_for_chars(char_count) -> int:
     return max(SHOTS_PER_CHUNK_MIN, int(math.ceil(n / float(CHARS_PER_SHOT))))
 
 
+def estimate_episode_shots(char_count) -> int:
+    """按**章字数**预估整集镜头数（不读正文；口径必须与 convert_chapter_to_script 对齐）。
+
+    用于「这一章要不要拆成多集」的前置规划。口径不对齐就会出问题：
+    规划说「不超」，真生成却超 → 白拆；规划说「要拆」，真生成远不到 → 无谓拆碎。
+
+    真实生成的口径是：先按 CHAPTER_CHUNK_CHARS 把本章切成子块，再对**每块**取
+    `estimate_shots_for_chars(块字数)`，最后各块求和。这里用 `estimate_subchunks`
+    直接拿到子块数（它刻意与 build_chapter_chunks 的尾部并块行为对齐），
+    再按平均块长估算每块镜头数。
+    """
+    n = max(0, int(char_count or 0))
+    if not n:
+        return 0
+    n_chunks = estimate_subchunks(n) or 1
+    return n_chunks * estimate_shots_for_chars(max(1, n // n_chunks))
+
+
+#: 拆章时切点吸附的候选边界（按优先级从高到低：段落空行 → 句末 → 换行）
+_CUT_MARKERS = ("\n\n", "\n", "。", "！", "？", "；", "…", "”", "』", "」")
+
+
+def _snap_cut(text: str, ideal: int, lo: int, hi: int, prev: int) -> int:
+    """把理想切点吸附到最近的语义边界（段落空行 > 换行 > 句末标点）。
+
+    约束：返回值必须严格落在 `(prev, hi)` 内，否则跨段重叠或丢字。
+    找不到合适边界时原样返回 `ideal`（同样被夹进合法区间）。
+    """
+    ideal = int(ideal)
+    ideal = max(int(prev) + 1, min(ideal, int(hi) - 1))
+    if not text:
+        return ideal
+    span = max(1, int(hi) - int(lo))
+    window = max(80, span // 12)
+    w_lo = max(int(prev) + 1, ideal - window)
+    w_hi = min(int(hi) - 1, ideal + window)
+    if w_hi <= w_lo:
+        return ideal
+    chunk = text[w_lo:w_hi]
+    for marker in _CUT_MARKERS:
+        best = None
+        pos = chunk.find(marker)
+        while pos != -1:
+            cut = w_lo + pos + len(marker)      # 切在标记**之后**：标记留在前一段
+            if prev < cut < hi:
+                if best is None or abs(cut - ideal) < abs(best - ideal):
+                    best = cut
+            pos = chunk.find(marker, pos + 1)
+        if best is not None:
+            return best
+    return ideal
+
+
+def split_chapter_for_episodes(chapter: dict, text: str = "",
+                               max_shots: int = None) -> list:
+    """把一章按预估镜头数拆成 1..N 个「拍摄单元」（一个单元 = 一集）。
+
+    设计要点
+    --------
+    - **不拆时零影响**：预估不超过上限 → 返回单段且 `start/end` 原样不变，
+      老项目（一章一集）行为完全不变。
+    - **不丢字、不重叠**：各段首尾相接，`[start, end)` 逐段连续覆盖原章区间。
+    - **切点吸附语义边界**（段落空行 > 换行 > 句末标点，在理想切点 ±span/12 内找），
+      避免把一句话 / 一段动作劈到两集（跨集是独立生成，劈开会导致语义断裂）。
+    - `text` 为空时退化为按字数等分硬切 —— 仍然不丢字。
+
+    返回 `[{"part": 1..N, "parts": N, "start": int, "end": int, "char_count": int}]`。
+    """
+    seg_start = int(chapter.get("start") or 0)
+    seg_end = int(chapter.get("end") or 0)
+    if seg_end < seg_start:
+        seg_end = seg_start
+    n_chars = int(chapter.get("char_count") or (seg_end - seg_start) or 0)
+    cap = int(max_shots or MAX_SHOTS_PER_EPISODE)
+    if cap <= 0:
+        cap = MAX_SHOTS_PER_EPISODE
+    est = estimate_episode_shots(n_chars)
+    parts = 1 if est <= cap else max(2, int(math.ceil(est / float(cap))))
+    total = seg_end - seg_start
+    if parts <= 1 or total <= 0:
+        return [{"part": 1, "parts": 1, "start": seg_start, "end": seg_end,
+                 "char_count": n_chars}]
+
+    bounds = [seg_start]
+    for i in range(1, parts):
+        ideal = seg_start + int(round(total * i / float(parts)))
+        bounds.append(_snap_cut(text, ideal, seg_start, seg_end, bounds[-1]))
+    bounds.append(seg_end)
+
+    out = []
+    for i in range(parts):
+        s, e = bounds[i], bounds[i + 1]
+        out.append({"part": i + 1, "parts": parts, "start": s, "end": e,
+                    "char_count": max(0, e - s)})
+    return out
+
+
 def chapter_advice(char_count: int, subchunk_count: int = 0) -> dict:
     """给单章的规模提示（过短只提示不合并；全量覆盖：内容体量决定镜头数）"""
     n = int(char_count or 0)

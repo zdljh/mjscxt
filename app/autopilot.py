@@ -317,18 +317,22 @@ def _novel_meta(project_name: str, plan: dict) -> dict:
         return {}
 
 
-def chapters_of(novel_meta: dict) -> list:
-    """把小说切成章节列表（含正文切片），供逐集生产"""
+def chapters_and_text(novel_meta: dict) -> tuple:
+    """返回 (章节列表, 小说全文)。
+
+    拆章（一章拆多集）需要在**正文**上找语义切点，正文此前已在这里读过一次，
+    所以直接把全文一并带出，避免调用方二次读盘。
+    """
     A = _A()
     if not novel_meta:
-        return []
+        return [], ""
     text = ""
     try:
         text = A.read_novel_text(A.NOVELS_DIR, novel_meta.get("novel_id")) or ""
     except Exception as e:  # noqa: BLE001
         logger.warning("小说正文读取失败：%s", e)
     if not text:
-        return []
+        return [], ""
     items = []
     for c in A.split_chapters(text):
         items.append({
@@ -338,7 +342,92 @@ def chapters_of(novel_meta: dict) -> list:
             "end": c.get("end") or 0,
             "char_count": c.get("char_count") or 0,
         })
-    return items
+    return items, text
+
+
+def chapters_of(novel_meta: dict) -> list:
+    """把小说切成章节列表（含正文切片），供逐集生产"""
+    return chapters_and_text(novel_meta)[0]
+
+
+def episode_units(chapters: list, plan: dict = None, text: str = "") -> list:
+    """把选中章节展开成**拍摄单元**（一个单元 = 一集；一章可拆成多集）。
+
+    为什么需要这一层：整集视频走 H3 连续渲染，单集镜头数超过
+    ``novel_to_script.MAX_SHOTS_PER_EPISODE``（=78）就会跑到崩溃点。
+    所以「一章 = 一集」不再是硬约束 —— 字数过大的章会被
+    :func:`novel_to_script.split_chapter_for_episodes` 按语义边界切成多段，
+    每段独立成一集，各自镜头数都在上限内。
+
+    两条关键约定
+    ------------
+    1. **单元编号基于「全量章节」依次展开**，与 ``plan.episodes`` 选了哪几章**无关**。
+       否则改一次选择范围就会让同一章的集号漂移，已完成产物（``第N集.json`` /
+       成片 / 验收记录）全部对不上号。
+    2. ``plan.episodes`` 的语义**仍然是章号**（历史计划照旧可用）——
+       这里先用 :func:`target_episodes` 解出选中的章号集合，再按单元过滤。
+
+    返回 ``[{"episode_no", "chapter_index", "part", "parts", "chapter"}]``；
+    其中 ``chapter`` 是按 part **收窄了 start/end** 的副本（未拆章时原样不变），
+    可直接交给 ``pipeline.run_episode(..., chapter=...)`` —— 它也按
+    ``novel_text[start:end]`` 切片，因此下游无需任何改动。
+    """
+    if not chapters:
+        return []
+    A = _A()
+    nts = getattr(A, "novel_to_script", None)
+    if nts is None:  # 理论上不会发生（app 必然导入它）；降级为「一章一集」
+        selected = set(target_episodes(chapters, plan or {}))
+        return [{"episode_no": int(c.get("index") or 0),
+                 "chapter_index": int(c.get("index") or 0),
+                 "part": 1, "parts": 1, "chapter": c}
+                for c in chapters if int(c.get("index") or 0) in selected]
+
+    selected = set(target_episodes(chapters, plan or {}))
+    units_all = []
+    no = 0
+    for ch in chapters:
+        idx = int(ch.get("index") or 0)
+        try:
+            segs = nts.split_chapter_for_episodes(ch, text or "")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("第%s章拆章失败（按不拆处理）：%s", idx, e)
+            segs = [{"part": 1, "parts": 1, "start": ch.get("start") or 0,
+                     "end": ch.get("end") or 0, "char_count": ch.get("char_count") or 0}]
+        for seg in segs:
+            no += 1
+            narrow = dict(ch)
+            narrow["start"] = seg["start"]
+            narrow["end"] = seg["end"]
+            narrow["char_count"] = seg["char_count"]
+            if int(seg.get("parts") or 1) > 1:
+                base = str(ch.get("title") or f"第{idx}章")
+                narrow["title"] = f"{base}·第{seg['part']}部分"
+            units_all.append({
+                "episode_no": no,
+                "chapter_index": idx,
+                "part": int(seg.get("part") or 1),
+                "parts": int(seg.get("parts") or 1),
+                "chapter": narrow,
+            })
+    return [u for u in units_all if u["chapter_index"] in selected]
+
+
+def find_episode_unit(chapters: list, plan: dict, episode_no: int,
+                      text: str = "") -> dict:
+    """按集号取回该集的拍摄单元（找不到返回 {}）。
+
+    替代历史写法 ``next((c for c in chapters if c["index"] == ep), {})`` ——
+    拆章后「集号」不再等于「章号」，必须走单元表反查。
+    """
+    try:
+        want = int(episode_no)
+    except (TypeError, ValueError):
+        return {}
+    for u in episode_units(chapters, plan, text):
+        if int(u.get("episode_no") or 0) == want:
+            return u
+    return {}
 
 
 def target_episodes(chapters: list, plan: dict) -> list:
@@ -404,28 +493,36 @@ def _episode_state(project_name: str, episode_no: int, plan: dict, chapters: lis
 
 
 def project_progress(project_name: str, plan: dict = None) -> dict:
-    """单个项目的逐集进度（供前端「分集进度」视图）"""
+    """单个项目的逐集进度（供前端「分集进度」视图）
+
+    行以**拍摄单元**为单位（一章拆多集时会出现多行、集号连续、
+    ``chapter_index`` 相同而 ``part`` 不同）。
+    """
     plan = plan or get_plan(project_name)
     meta = _novel_meta(project_name, plan)
-    chapters = chapters_of(meta)
-    want = target_episodes(chapters, plan)
+    chapters, text = chapters_and_text(meta)
+    units = episode_units(chapters, plan, text)
     rows = []
     done = 0
-    for no in want:
-        ch = next((c for c in chapters if c["index"] == no), {})
+    for u in units:
+        no = int(u["episode_no"])
+        ch = u["chapter"]
         st = _episode_state(project_name, no, plan, chapters)
         if st["state"] == "done":
             done += 1
-        rows.append({"episode_no": no, "title": ch.get("title") or f"第{no}章",
+        rows.append({"episode_no": no,
+                     "chapter_index": u["chapter_index"],
+                     "part": u["part"], "parts": u["parts"],
+                     "title": ch.get("title") or f"第{no}章",
                      "char_count": ch.get("char_count") or 0, **st})
     return {
         "project": project_name,
         "novel_id": meta.get("novel_id") or "",
         "novel_title": meta.get("title") or "",
         "enabled": bool(plan.get("enabled")),
-        "total": len(want),
+        "total": len(units),
         "done": done,
-        "percent": round(done / len(want) * 100, 1) if want else 0.0,
+        "percent": round(done / len(units) * 100, 1) if units else 0.0,
         "chapters_found": len(chapters),
         "episodes": rows,
     }
@@ -707,34 +804,38 @@ def _pick_episode(project: str, plan: dict):
     if not meta:
         logger.debug("%s 未关联小说，跳过", project)
         return None
-    chapters = chapters_of(meta)
+    chapters, text = chapters_and_text(meta)
     if not chapters:
         logger.debug("%s 小说正文为空或无章节，跳过", project)
         return None
 
-    # 项目级资产：第 1 集之前必须先有资产（脚本里才有角色/场景可引用）
-    want = target_episodes(chapters, plan)
-    if not want:
+    # 拍摄单元表：一章可能拆成多集（超长章），因此循环单位是「单元」而不是「章」
+    units = episode_units(chapters, plan, text)
+    if not units:
         return None
 
     # 先看是否已有产出但被打回的集（优先重做，用户明确要求了）
     rows = {r["episode_no"]: r for r in
             (project_progress(project, plan).get("episodes") or [])}
-    for no in want:
+    for u in units:
+        no = int(u["episode_no"])
         r = rows.get(no) or {}
         if r.get("state") == "rejected" and _rerun_allowed(project, no):
-            ch = next((c for c in chapters if c["index"] == no), {})
-            return {"episode_no": no, "chapter": ch, "reason": "成片被打回，重新生产"}
+            return {"episode_no": no, "chapter": u["chapter"],
+                    "chapter_index": u["chapter_index"],
+                    "part": u["part"], "parts": u["parts"],
+                    "reason": "成片被打回，重新生产"}
 
     # 再按顺序推进第一个未完成的集
-    for no in want:
+    for u in units:
+        no = int(u["episode_no"])
         r = rows.get(no) or {}
         st = r.get("state")
         if st == "done":
             continue
         if st == "pending_human":
             continue
-        chapter = next((c for c in chapters if c["index"] == no), {})
+        chapter = u["chapter"]
         if not chapter:
             continue
         # 连续失败超限 → 挂起等人工
@@ -747,7 +848,10 @@ def _pick_episode(project: str, plan: dict):
         # 防紧凑空转：同一集刚跑过就等一个间隔（打回重做也一样，不必贴着重跑）
         if not _rerun_allowed(project, no):
             continue
-        return {"episode_no": no, "chapter": chapter, "reason": "按章节顺序推进"}
+        return {"episode_no": no, "chapter": chapter,
+                "chapter_index": u["chapter_index"],
+                "part": u["part"], "parts": u["parts"],
+                "reason": "按章节顺序推进"}
     return None
 
 

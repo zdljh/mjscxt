@@ -8431,10 +8431,41 @@ def _salvage_episode_script(path: str, episode_no: int):
     }
 
 
+def _episode_units_for_chapters(novel_meta: dict, chapters: list) -> list:
+    """把「用户选中的章」展开成**拍摄单元**（超长章会拆成多集）。
+
+    ⚠️ 单元编号必须基于**全量章节**展开（口径 = ``autopilot.episode_units``），
+    不能用传入的子集 —— 否则同一章在「手动选集生成」与「托管」两条链路上会拿到
+    不同的集号，产物（``第N集.json`` / 成片 / 验收记录）互相错位。
+    """
+    selected = [int(c.get("index") or 0) for c in (chapters or [])]
+    if not selected:
+        return []
+    try:
+        all_chapters, text = autopilot.chapters_and_text(novel_meta)
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning("章节列表读取失败（按一章一集处理）：%s", e)
+        all_chapters, text = [], ""
+    if all_chapters:
+        try:
+            units = autopilot.episode_units(all_chapters, {"episodes": selected}, text)
+            if units:
+                return units
+        except Exception as e:  # noqa: BLE001
+            app.logger.warning("拆章失败（按一章一集处理）：%s", e)
+    # 兜底：拿不到全量章节时退回「一章一集」（与历史行为一致）
+    return [{"episode_no": int(c.get("index") or i + 1),
+             "chapter_index": int(c.get("index") or i + 1),
+             "part": 1, "parts": 1, "chapter": c}
+            for i, c in enumerate(chapters or [])]
+
+
 def _episodes_worker(task_id: str, novel_meta: dict, chapters: list, style: str,
                      target_shots: int, overwrite: bool, project_key: str = None):
     key = _novel_key(novel_meta, project_key)
-    total = len(chapters)
+    # 拍摄单元：超长章按语义边界拆成多集（单集镜头数硬上限见 novel_to_script）
+    units = _episode_units_for_chapters(novel_meta, chapters)
+    total = len(units)
 
     def report(ep_ordinal, chapter, phase, message, inner_percent):
         overall = int(((ep_ordinal - 1) + (inner_percent or 0) / 100.0) / total * 100)
@@ -8454,9 +8485,10 @@ def _episodes_worker(task_id: str, novel_meta: dict, chapters: list, style: str,
             raise LLMError("尚未配置自定义 AI 接口")
 
         results = []
-        for i, chapter in enumerate(chapters):
-            ep = int(chapter.get("index"))
-            ch_title = chapter.get("title") or f"第{ep}章"
+        for i, unit in enumerate(units):
+            ep = int(unit["episode_no"])
+            chapter = unit["chapter"]
+            ch_title = chapter.get("title") or f"第{ep}集"
             out_path = novel_to_script.episode_script_path(SCRIPT_DIR, key, ep)
 
             if os.path.isfile(out_path) and not overwrite:
@@ -11087,11 +11119,14 @@ def api_autopilot_run_once():
     if not meta:
         return jsonify({"success": False,
                         "error": "该项目未关联小说，无法生产（请先在小说库上传建项目）"}), 400
-    chapters = autopilot.chapters_of(meta)
-    chapter = next((c for c in chapters if c['index'] == ep), None)
+    chapters, novel_text = autopilot.chapters_and_text(meta)
+    # 集号 ≠ 章号（超长章会拆成多集）→ 必须走单元表反查，不能按章号找
+    unit = autopilot.find_episode_unit(chapters, plan, ep, novel_text)
+    chapter = (unit or {}).get("chapter")
     if not chapter:
+        _n_units = len(autopilot.episode_units(chapters, plan, novel_text))
         return jsonify({"success": False,
-                        "error": f"小说里没有第{ep}章（共 {len(chapters)} 章）"}), 400
+                        "error": f"该小说没有第{ep}集（共 {len(chapters)} 章 / {_n_units} 集）"}), 400
     cfg = pipeline.normalize_config({**plan, 'novel_id': meta.get('novel_id')},
                                     default_project_key=project)
     # P1-5：run-once 是同步阻塞执行，此前不接 progress_cb → 前端 `current` 状态全程不更新，
