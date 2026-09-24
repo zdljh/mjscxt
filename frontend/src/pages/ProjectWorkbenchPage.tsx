@@ -389,6 +389,89 @@ function ProductionProgress({ projectKey }: { projectKey: string }) {
   );
 }
 
+/** 紧凑版生产进度条：专供「AI 总控」右侧窄面板（340px）使用。
+ *  与 OverviewTab 里的 ProductionProgress 共享同一数据源（/api/autopilot/status），
+ *  但只保留最关键的「当前步骤 + 进度条 + 百分比 + 当前消息 + 停滞告警」——
+ *  窄面板放不下完整步骤链，故用单行步骤名替代。 */
+function ChatProductionProgress({ projectKey }: { projectKey: string }) {
+  const { t } = useApp();
+  const [cur, setCur] = useState<AutopilotCurrent | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const poll = async () => {
+      try {
+        const st = await autopilotApi.status(projectKey);
+        if (!alive) return;
+        setCur((st.current as AutopilotCurrent) || null);
+      } catch {
+        // 静默：进度刷新是锦上添花，不能因一次失败打扰对话
+      }
+    };
+    poll();
+    timer = setInterval(poll, 3000);
+    return () => {
+      alive = false;
+      if (timer) clearInterval(timer);
+    };
+  }, [projectKey]);
+
+  // 无正在生产的项目 → 不占面板空间（用户纯聊天时保持干净）
+  if (!cur) return null;
+
+  const percent = Math.max(0, Math.min(100, Number(cur.percent) || 0));
+  const stepsDone = Array.isArray(cur.steps_done) ? cur.steps_done : [];
+  const currentStepId = (cur.step || '').split(':')[0];
+  const currentStep = PRODUCTION_STEPS.find((s) => s.id === currentStepId);
+  const stalled = Number(cur.step_stalled_sec) || 0;
+  const stalledMin = Math.floor(stalled / 60);
+  const stalledSec = stalled % 60;
+
+  return (
+    <div
+      className="mx-3 mt-3 p-2.5 rounded-lg border border-line bg-surface shrink-0"
+      role="status"
+      aria-live="polite"
+      aria-label={t('wb.productionProgress')}
+    >
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="text-xs font-semibold text-ink-1 flex items-center gap-1.5">
+          <span className="inline-block w-1.5 h-1.5 rounded-full bg-info animate-pulse" />
+          {t('wb.productionProgress')}
+        </span>
+        <span className="text-xs text-ink-2">
+          {t(currentStep ? currentStep.labelKey : 'wb.producing')}
+          {cur.episode != null ? ` · ${t('wb.producingEpisode', { n: cur.episode })}` : ''}
+        </span>
+      </div>
+
+      <div className="w-full bg-line rounded-full h-1.5 mb-1.5">
+        <div
+          className="bg-brand h-1.5 rounded-full transition-all"
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+
+      <div className="flex items-center justify-between text-[11px] text-ink-2">
+        <span className="truncate">{cur.message || t('wb.producing')}</span>
+        <span className="shrink-0 ml-2 tabular-nums">{percent}%</span>
+      </div>
+
+      {stalled >= 900 && (
+        <div className="flex items-start gap-1.5 mt-2 text-[11px] text-warning-strong">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+          <span>
+            {t('wb.currentStep')}
+            {currentStep ? `：${t(currentStep.labelKey)}` : ''} ·{' '}
+            {t('wb.stepStalled', { min: stalledMin, sec: stalledSec })}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function OverviewTab({
   assets,
   projectKey,
@@ -2618,6 +2701,10 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
           {error}
         </div>
       )}
+
+      {/* 生产进度（实时）：AI 总控面板内也能看到当前正在生产哪一集/步骤/百分比，
+          无需切回「总览」标签页。数据源与 OverviewTab 的进度卡一致。 */}
+      <ChatProductionProgress projectKey={projectKey} />
 
       {/* 消息区：浅色底以区别于面板头部/输入区，形成「对话」区域感。
           注意：空态与消息列表要二选一渲染 —— 若把滚动哨兵 <div> 和 h-full 的空态
