@@ -1959,7 +1959,7 @@ def video_meta(video_path: str, fallback: dict = None) -> dict:
         try:
             p = subprocess.run([fp, "-v", "error", "-show_entries", "format=duration",
                                 "-of", "default=nw=1:nk=1", video_path],
-                               capture_output=True, text=True, timeout=60)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
             s = (p.stdout or "").strip()
             if s and s.upper() != "N/A":
                 d = float(s)
@@ -2067,7 +2067,7 @@ def extract_frames(video_path: str, out_dir: str, count: int = 3,
                "-ss", f"{ts}", "-i", video_path, "-frames:v", "1",
                "-vf", "showinfo", "-q:v", "2", out]
         try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
             actual = None
             m = re.search(r"pts_time:([0-9]+(?:\.[0-9]+)?)", p.stderr or "")
             if m:

@@ -113,7 +113,7 @@ def probe_audio(path: str) -> Dict:
            "format=duration:stream=codec_name,sample_rate,channels",
            "-of", "json", path]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         if r.returncode != 0:
             info["error"] = (r.stderr or "ffprobe 失败").strip()[:200]
             return info
@@ -145,7 +145,7 @@ def concat_audio(paths: List[str], output_path: str, fmt: str = "wav") -> str:
     cmd += ["-filter_complex", filt, "-map", "[out]"]
     cmd += ["-c:a", "libmp3lame", "-q:a", "2", output_path] if fmt == "mp3" \
         else ["-c:a", "pcm_s16le", "-ar", "24000", "-ac", "1", output_path]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800)
     if r.returncode != 0:
         raise TTSError(f"音频合并失败: {(r.stderr or '').strip()[:300]}")
     return os.path.abspath(output_path)
@@ -688,7 +688,7 @@ class QwenTTSClient:
                 f.write(blob)
             cmd = ["ffmpeg", "-y", "-i", tmp, "-ar", "24000", "-ac", "1",
                    "-c:a", "pcm_s16le", out_path]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
             if r.returncode != 0:
                 raise TTSError(f"音频转码失败: {(r.stderr or '').strip()[:300]}")
         finally:

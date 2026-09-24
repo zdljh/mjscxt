@@ -294,7 +294,7 @@ def apply_watermark(src: str, dst: str = None, cfg: dict = None, out_dir: str = 
 
     t0 = time.time()
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
         result["elapsed"] = round(time.time() - t0, 2)
         if p.returncode != 0 or not (os.path.isfile(out_path) and os.path.getsize(out_path) > 0):
             result["error"] = (p.stderr or "").strip()[:800] or f"ffmpeg 返回码 {p.returncode}"

@@ -174,7 +174,7 @@ def _probe_duration(path: str) -> Optional[float]:
             out = subprocess.run(
                 ["ffprobe", "-v", "error", "-show_entries", "format=duration",
                  "-of", "default=nw=1:nk=1", path],
-                capture_output=True, text=True, timeout=30)
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
             return float(out.stdout.strip()) or None
         except Exception:  # noqa: BLE001
             return None

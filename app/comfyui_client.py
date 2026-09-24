@@ -1892,6 +1892,16 @@ class ComfyUIClient:
                 last_error = str(e)
                 logger.warning(f"[H3-episode] 生成被拒绝（不再重试）: {e}")
                 break
+            except cancellation.Cancelled:
+                # ⚠️ 中止信号（用户点暂停 / 进程退出）必须穿透整个重试循环 ——
+                # 否则「暂停」只会打断**当前这一次**提交，紧接着 attempt+1 换种子
+                # 把 84 段整片重新提交一遍（实测：暂停后日志立刻出现
+                # 「第 3 次整片重试（换种子 …）」+「段1/84 注入完成」），
+                # ComfyUI 队列又被灌满，用户看到的现象就是「暂停没停住」。
+                # 这里直接上抛，由上层（app._video_generate_worker / pipeline）落
+                # cancelled 态；已完成镜头保留，可续跑。
+                logger.warning("[H3-episode] 收到中止信号，终止整片重试循环（不再换种子重投）")
+                raise
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"[H3-episode] 第 {attempt + 1} 次生成异常: {e}")

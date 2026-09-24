@@ -274,6 +274,13 @@ def _run_task_worker(worker, args, registry_name: str, lock_name: str,
     err = ""
     try:
         worker(tid, *args)
+    except cancellation.Cancelled:
+        # ⚠️ 中止信号必须穿透：否则会被下面归一化成 status=failed，
+        # 再被 _run_step_with_retry 当成「步骤失败」重试 —— 用户点暂停后
+        # 反而触发整步（含 84 段 H3 整片）重新提交。这里清掉内部任务条目后原样上抛。
+        with lock:
+            registry.pop(tid, None)
+        raise
     except Exception as e:  # noqa: BLE001  单步异常向上抛，由重试层决定
         err = f"{type(e).__name__}: {e}"
         logger.error("流水线 worker 异常（%s）：%s\n%s", prefix, err, traceback.format_exc())
@@ -340,7 +347,7 @@ def _playable(path: str) -> bool:
     try:
         r = _sp.run(["ffprobe", "-v", "error", "-show_entries",
                      "stream=codec_type:format=duration", "-of", "json", path],
-                    capture_output=True, text=True, timeout=60)
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         if r.returncode != 0:
             return False
         d = json.loads(r.stdout or "{}")
@@ -843,7 +850,7 @@ def _probe_concat_duration(concat_video: str, segments: list) -> float:
             r = _sp.run(["ffprobe", "-v", "error", "-show_entries",
                          "format=duration", "-of", "json",
                          os.path.abspath(concat_video)],
-                        capture_output=True, text=True, timeout=60)
+                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
             if r.returncode == 0:
                 d = _json.loads(r.stdout or "{}")
                 dur = float((d.get("format") or {}).get("duration") or 0)
@@ -858,7 +865,7 @@ def _probe_concat_duration(concat_video: str, segments: list) -> float:
             r = _sp.run(["ffprobe", "-v", "error", "-show_entries",
                          "format=duration", "-of", "json",
                          os.path.abspath(seg)],
-                        capture_output=True, text=True, timeout=60)
+                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
             if r.returncode == 0:
                 d = _json.loads(r.stdout or "{}")
                 total += float((d.get("format") or {}).get("duration") or 0)
@@ -948,7 +955,7 @@ def step_final(ctx) -> dict:
                         _r = _sp2.run(["ffprobe", "-v", "error", "-show_entries",
                                        "format=duration", "-of", "json",
                                        os.path.abspath(p)],
-                                      capture_output=True, text=True, timeout=60)
+                                      capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
                         if _r.returncode == 0:
                             _d = float((_json2.loads(_r.stdout or "{}").get("format")
                                         or {}).get("duration") or 0)

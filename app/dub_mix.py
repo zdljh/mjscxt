@@ -56,7 +56,7 @@ def ffmpeg_available() -> Dict:
     out = {"available": False, "ffmpeg": "", "ffprobe": "", "reasons": []}
     for name, key in ((FFMPEG, "ffmpeg"), (FFPROBE, "ffprobe")):
         try:
-            r = subprocess.run([name, "-version"], capture_output=True, text=True, timeout=20)
+            r = subprocess.run([name, "-version"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
             if r.returncode == 0:
                 out[key] = (r.stdout or "").splitlines()[0][:120]
             else:
@@ -366,7 +366,7 @@ def mix_video_with_entries(video_path: str, entries: List[Dict], out_path: str,
 
     started = time.time()
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True,
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=int(p.get("timeout") or 900))
     except subprocess.TimeoutExpired:
         raise DubMixError(f"ffmpeg 合成超时（>{p.get('timeout')}s）")

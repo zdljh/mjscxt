@@ -111,7 +111,7 @@ def extract_audio(media_path: str, out_wav: str, sample_rate: int = 44100) -> Di
     cmd = [FFMPEG_BIN, "-y", "-v", "error", "-i", media_path, "-vn",
            "-ac", "2", "-ar", str(sample_rate), "-c:a", "pcm_s16le", out_wav]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
     except Exception as e:                                     # noqa: BLE001
         rec["error"] = f"{type(e).__name__}: {e}"
         return rec
@@ -126,7 +126,7 @@ def _to_wav(src: str, dst: str, sample_rate: int = 44100) -> bool:
     cmd = [FFMPEG_BIN, "-y", "-v", "error", "-i", src, "-ac", "2", "-ar", str(sample_rate),
            "-c:a", "pcm_s16le", dst]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
         return r.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 44
     except Exception:                                          # noqa: BLE001
         return False

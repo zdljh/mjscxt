@@ -110,7 +110,7 @@ def probe_media(path: str) -> Dict:
            "sample_rate,channels:format=duration,format_name",
            "-of", "json", path]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
         if r.returncode != 0:
             info["error"] = (r.stderr or "ffprobe 失败").strip()[:200]
             return info
@@ -208,7 +208,7 @@ def strip_audio(video_path: str, output_path: Optional[str] = None,
     ]
     last_err = ""
     for method, cmd in attempts:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800)
         if r.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 0:
             after = probe_media(tmp_out)
             if after.get("has_audio"):
@@ -291,7 +291,7 @@ def ensure_audio_track(video_path: str, sample_rate: int = 48000) -> Dict:
            "-c:a", "aac", "-b:a", "128k", "-shortest",
            "-f", "mp4", "-movflags", "+faststart", tmp_out]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800)
     except Exception as e:  # pragma: no cover - 环境相关
         report["error"] = f"{type(e).__name__}: {e}"
         return report
@@ -403,7 +403,7 @@ class VideoPostProcessor:
                 output_path
             ]
 
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
             if result.returncode == 0:
                 logger.info(f"视频合并成功（demuxer -c copy）: {output_path}")
                 os.remove(list_file)
@@ -503,7 +503,7 @@ class VideoPostProcessor:
         ]
         logger.info(f"concat filter 重编码拼接 {n} 个片段 → {output_path}")
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3600)
             if result.returncode == 0 and os.path.exists(output_path):
                 logger.info(f"视频合并成功（filter 重编码）: {output_path}")
                 return output_path
@@ -561,7 +561,7 @@ class VideoPostProcessor:
                 os.path.abspath(output_path),
             ]
 
-            result = subprocess.run(cmd, capture_output=True, text=True,
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
                                     timeout=1800, cwd=srt_dir)
             if result.returncode == 0 and os.path.isfile(output_path) \
                     and os.path.getsize(output_path) > 0:

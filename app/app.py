@@ -12,6 +12,7 @@ import shutil
 import threading
 import copy
 import uuid
+import contextvars
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, abort, redirect, send_from_directory
 from flask_cors import CORS
@@ -177,6 +178,10 @@ def _h3_audio_policy(path: str) -> dict:
 # 全局状态
 generation_state = {}
 lock = threading.Lock()
+
+# 视频 worker「是否托管（pipeline）任务」的执行期标记（contextvar，随线程上下文传递）。
+# 用于让「托管暂停」只掐断托管任务，不误杀用户手动触发的生成。见 _video_should_stop。
+_VIDEO_TASK_IS_PIPELINE = contextvars.ContextVar("video_task_is_pipeline", default=False)
 
 # P0-4 持久化任务队列：任务全生命周期落盘（SQLite），支持重启后查询与断点续跑
 # P2-3：任务完成/失败时通过 on_change 钩子写入耗时统计（成本看板数据源）
@@ -4172,6 +4177,14 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
     #   - 进程退出（autopilot._STOP / 解释器与用户交互无关的关停）→ 一并中断
     # 判定器自身异常在 cancellation.should_stop 里 fail-open 处理，不影响生产。
     _cancel_token = cancellation.push(_video_should_stop)
+    # 该任务是否由托管流水线发起（pipeline._run_task_worker 会置 state["pipeline"]=True）。
+    # 决定「托管暂停」是否应掐断本任务：手动生成不受托管开关影响。
+    _is_pipeline = False
+    with lock:
+        _st0 = generation_state.get(task_id)
+        if isinstance(_st0, dict):
+            _is_pipeline = bool(_st0.get("pipeline"))
+    _pipe_token = _VIDEO_TASK_IS_PIPELINE.set(_is_pipeline)
     try:
         _video_generate_worker_body(
             task_id, project_name, shots, character_refs, scene_refs, storyboards,
@@ -4186,24 +4199,32 @@ def _video_generate_worker(task_id, project_name, shots, character_refs,
                 _st.update({"status": "cancelled", "phase": "已停止",
                             "error": "已收到中止信号，ComfyUI 远端任务已中断（已完成镜头保留，可续跑）"})
     finally:
+        _VIDEO_TASK_IS_PIPELINE.reset(_pipe_token)
         cancellation.reset(_cancel_token)
 
 
 def _video_should_stop() -> bool:
-    """视频 worker 的中止判定器：托管暂停 或 进程退出 → 停。
+    """视频 worker 的中止判定器：**仅对托管（pipeline）任务**生效。
 
     刻意与 `autopilot._halt_requested` 同口径，但**不 import autopilot**（app.py 与
-    autopilot 相互 import 会成环）。两者判的其实是同一件事：
-    - `autopilot.is_paused()`：前端「暂停」/总控 pause 的全局开关；
-    - `autopilot._STOP`：进程退出标志（`_video_should_stop` 只读它的 set 状态）。
-    用惰性 import 规避循环依赖，且失败时 fail-open（不停），避免判定器自身把生产带停。
+    autopilot 相互 import 会成环）。用惰性 import 规避循环依赖，失败时 fail-open。
+
+    ⚠️ 2026-09-24 修正：早期实现「只要 autopilot 处于 paused 就停」，会把**用户手工
+    触发**的生成一起掐掉 —— 实测：托管暂停期间点「生成视频（手动）」，第一次轮询就
+    命中中止信号，报「ComfyUI 远端等待期间收到中止信号」（manual 任务被 pause 误杀）。
+    暂停的语义应只覆盖「托管自动生产」，不该阻断用户当前手动操作。
+    因此这里判定的前提是 `_VIDEO_TASK_IS_PIPELINE`（由 worker 外壳按任务态设置）：
+      - 托管任务（generation_state[task]["pipeline"] is True）：托管暂停 → 停；
+      - 进程退出（autopilot._STOP）：任何任务都停（关服就该全停）。
     """
     try:
         import autopilot
-        if autopilot.is_paused():
-            return True
+        # 进程退出：无论手动还是托管，都应立刻停
         stop_ev = getattr(autopilot, "_STOP", None)
         if stop_ev is not None and stop_ev.is_set():
+            return True
+        # 托管暂停：只对 pipeline 任务生效（手动任务不受托管开关影响）
+        if _VIDEO_TASK_IS_PIPELINE.get() and autopilot.is_paused():
             return True
     except Exception as e:  # noqa: BLE001  判定器故障不得影响生产
         app.logger.debug("视频中止判定器读取失败（按不中止处理）：%s", e)
