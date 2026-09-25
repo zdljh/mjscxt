@@ -700,6 +700,72 @@ def stop(timeout: float = 5.0) -> None:
         _STATE["running"] = False
 
 
+#: 生产阶段的中文人话名。`pipeline.STEP_LABELS` 是「环节」级（剧本/资产/分镜…），
+#: 这里是「环节内子阶段」级 —— phase 形如 `coverage`、`storyboard:2`（冒号后是子序号）。
+#: ⚠️ 只用于**显示**（前端进度条 / 总控汇报），**不参与任何判据**，所以缺项时
+#: 回退到环节名即可，不必穷举。
+PHASE_LABELS_ZH = {
+    "start": "准备中",
+    "outline": "提炼大纲",
+    "bible": "构建设定集",
+    "shots": "拆分镜头",
+    "coverage": "原文覆盖率校验",
+    "script": "剧本生成",
+    "assets": "生成资产（角色/物品/场景）",
+    "storyboard": "生成分镜图",
+    "keyframe": "生成尾帧",
+    "video": "生成视频",
+    "final": "合成成片",
+    "tts": "合成配音",
+    "mix": "音画对齐混音",
+    "upscale": "超分放大",
+    "qc": "质量质检",
+    "retry": "重试中",
+    "done": "已完成",
+}
+
+
+def describe_current(cur: dict) -> str:
+    """把 current 状态压成**一句话人话**，让用户一眼知道「现在在生成什么」。
+
+    背景：`current` 里的 raw 字段（`step` / `phase` / `percent`）是给机器看的 ——
+    用户在总控面板只能看到「总控执行中 · 已完成 N 步」，完全不知道后台在拍哪一集、
+    走到哪个环节。这里统一产出一句可直接展示的描述。
+
+    ⚠️ 纯展示用途，**任何判据都不得依赖本函数的输出文本**（措辞会随需求改）。
+    """
+    if not isinstance(cur, dict) or not cur:
+        return ""
+    parts = []
+    ep = cur.get("episode")
+    title = str(cur.get("title") or "").strip()
+    if ep not in (None, ""):
+        try:
+            parts.append(f"第 {int(ep)} 集")
+        except (TypeError, ValueError):
+            pass
+    if title:
+        parts.append(title)
+    # 阶段名：优先更细的 phase（去掉 `:子序号` 后缀），回退到 step
+    phase = str(cur.get("phase") or "").split(":")[0].strip()
+    step = str(cur.get("step") or "").split(":")[0].strip()
+    label = PHASE_LABELS_ZH.get(phase) or ""
+    if not label:
+        try:
+            import pipeline as _pl
+            label = _pl.STEP_LABELS.get(step) or ""
+        except Exception:  # noqa: BLE001  展示降级：拿不到名字也不影响主链路
+            label = ""
+    if not label:
+        label = step or "生产中"
+    parts.append(label)
+    try:
+        pct = int(cur.get("percent") or 0)
+    except (TypeError, ValueError):
+        pct = 0
+    return f"{' · '.join(parts)} · {pct}%"
+
+
 def _set_current(**kw) -> None:
     with _LOCK:
         cur = dict(_STATE.get("current") or {})
@@ -707,6 +773,8 @@ def _set_current(**kw) -> None:
         # 每次进度更新都刷新「最近推进时刻」（epoch 秒），供 status() 算停滞时长。
         # 用 epoch 而非格式化字符串：status() 要做 now - 该值 的减法。
         cur["step_updated_at"] = time.time()
+        # 冗余一份人话描述，前端 / 总控直接取用，不必各自维护阶段名映射表。
+        cur["describe"] = describe_current(cur)
         _STATE["current"] = cur
 
 
@@ -1085,6 +1153,13 @@ def status(project: str = "") -> dict:
                     f"{_stall % 60} 秒仍未推进，可能卡在重试/排队，建议关注。")
             else:
                 _cur["stall_warning"] = ""
+        # 人话描述在这里**重算一次**：_set_current 写入时算过一次，但那份是在进程内
+        # 记账时刻算的；status() 可能在不同时刻被调用，且上面的 stall 分支刚改过字段。
+        # 统一以「读取时刻」为准，保证前端/总控看到的是同一句话。
+        try:
+            _cur["describe"] = describe_current(_cur)
+        except Exception as e:  # noqa: BLE001  展示降级不得影响状态查询接口
+            logger.debug("生成人话进度描述失败（忽略）：%s", e)
         st["current"] = _cur
     st.update({
         # 回显作用域：调用方（含 AI 总控）必须能一眼看出这份数字属于哪个项目，

@@ -8538,6 +8538,27 @@ def _novel_convert_worker(task_id: str, novel_meta: dict, style: str, episodes: 
                 "phase": phase, "current": current, "total": total,
                 "message": message, "progress": percent,
             })
+        # ⭐ 同步镜像到 autopilot.current，让「总控面板的实时进度条」在**转剧本阶段**
+        #    也有东西可显示。此前这条链路只写 generation_state（任务态），而
+        #    /api/autopilot/status 读的是 autopilot.current —— 两者不通，导致整个
+        #    转剧本阶段（实测 ~40 分钟、40 次 LLM 调用）用户看到的进度条是空的，
+        #    恰恰是他最想知道「在生成什么」的那段时间。
+        # ⚠️ 纯展示用途：失败必须静默降级，绝不能因为进度上报拖垮转剧本主链路。
+        try:
+            _ph = str(phase or "").split(":")[0] or "script"
+            autopilot._set_current(
+                project=project_key or novel_meta.get("novel_id") or "",
+                episode=1,
+                title=(novel_meta.get("title") or novel_meta.get("novel_title")
+                       or project_key or "整本转剧本"),
+                step="script", phase=_ph,
+                percent=int(percent or 0),
+                message=str(message or ""),
+                steps_done=[],
+                started_at=autopilot._now(),
+            )
+        except Exception as _pe:  # noqa: BLE001
+            app.logger.debug("转剧本进度镜像到 autopilot.current 失败（忽略）：%s", _pe)
 
     try:
         text = read_novel_text(NOVELS_DIR, novel_meta["novel_id"])
@@ -8595,6 +8616,13 @@ def _novel_convert_worker(task_id: str, novel_meta: dict, style: str, episodes: 
         app.logger.exception("小说转剧本异常")
         with lock:
             generation_state[task_id].update({"status": "failed", "error": f"转换异常：{e}"})
+    finally:
+        # 转剧本已结束（无论成败）→ 撤掉镜像的进度，否则总控面板会一直显示
+        # 「正在生产 …」这条已经结束的进度条，用户以为还在跑。
+        try:
+            autopilot._clear_current()
+        except Exception as _ce:  # noqa: BLE001  清理失败不影响任务结论
+            app.logger.debug("清理转剧本进度镜像失败（忽略）：%s", _ce)
 
 
 @app.route('/api/novels/<novel_id>/convert', methods=['POST'])

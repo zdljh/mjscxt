@@ -2751,6 +2751,79 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
 // ========== AI总控（项目内右侧常驻面板） ==========
 // 原先它是工作台里的第 10 个标签页，排在最后、还会换行，用户反馈「进去后找不到了」。
 // 现改为右侧常驻、可折叠：与标签内容并排，切换标签页时对话不丢失。
+// 工具名 → 人话。用户在总控面板看到的应该是「生产一集」而不是 `produce_episode`。
+// `t()` 找不到键时会**原样返回 key**，所以缺映射时回退到工具名本身（不显示 `toolLabel.xxx`）。
+function toolLabel(t: (k: string, p?: Record<string, string | number>) => string, name: string): string {
+  const key = `toolLabel.${name}`;
+  const hit = t(key);
+  return hit === key ? name : hit;
+}
+
+// 生产状态轮询：让用户在总控面板里随时看到「现在在生成什么」。
+//
+// 背景：此前总控面板只显示「总控执行中 · 已完成 N 步」+ 工具名，用户完全不知道
+// 后台正在拍哪一集、走到哪个环节。后端 `current` 里其实有完整的
+// 集号 / 章节标题 / 阶段 / 百分比，这里把它拉到前端常驻展示。
+//
+// ⚠️ 只在**生产进行中**才轮询（idle 时 12s 一次慢轮询兜底恢复），避免空转打接口；
+//    组件卸载即停，不留后台定时器。
+function useProductionStatus(projectKey: string) {
+  const [current, setCurrent] = useState<any>(null);
+  useEffect(() => {
+    if (!projectKey) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      let next = 3000;
+      try {
+        const st = await autopilotApi.status(projectKey);
+        if (!alive) return;
+        const cur = st?.current || null;
+        setCurrent(cur);
+        // 有活儿 → 3s 紧轮询；没活儿 → 12s 慢轮询（等新任务起来）
+        next = cur ? 3000 : 12000;
+      } catch {
+        if (!alive) return;
+        next = 12000;
+      }
+      if (alive) timer = setTimeout(tick, next);
+    };
+    tick();
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+  }, [projectKey]);
+  return current;
+}
+
+// 正在生产的状态条：集号 + 章节 + 阶段 + 进度百分比
+function ProductionBar({ current }: { current: any }) {
+  if (!current) return null;
+  const pct = Math.max(0, Math.min(100, Number(current.percent) || 0));
+  const stalled = Number(current.step_stalled_sec) || 0;
+  const stallMin = Math.floor(stalled / 60);
+  return (
+    <div className="px-4 py-2.5 border-b border-line bg-brand-subtle/40 shrink-0 space-y-1.5">
+      <div className="flex items-center gap-2 text-[11px]">
+        <span className="w-2 h-2 rounded-full bg-brand animate-pulse shrink-0" />
+        <span className="text-ink-2 shrink-0">{t('chat.producingNow')}</span>
+        <span className="text-ink-1 font-medium truncate">
+          {current.describe || current.message || ''}
+        </span>
+      </div>
+      <div className="h-1.5 rounded-full bg-surface-2 overflow-hidden">
+        <div
+          className="h-full bg-brand transition-all duration-500 rounded-full"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      {stallMin >= 3 && (
+        <div className="text-[10px] text-warning-strong">
+          {t('chat.producingStalled', { m: stallMin })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () => void }) {
   const [messages, setMessages] = useState<any[]>([]);
   const [input, setInput] = useState('');
@@ -2762,6 +2835,8 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
   const [toolCount, setToolCount] = useState(0);
   const [killOn, setKillOn] = useState(false);
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
+  // 常驻显示「后台在生成什么」——用户不必再问「现在跑到哪了」
+  const producing = useProductionStatus(projectKey);
 
   // 加载该项目的历史对话
   const loadHistory = async () => {
@@ -2908,6 +2983,9 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
         </div>
       </div>
 
+      {/* 生产进行中：把「现在在生成哪一集 / 哪一步 / 几成」常驻摊开 */}
+      <ProductionBar current={producing} />
+
       {error && (
         <div className="mx-3 mt-3 p-2 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong text-xs shrink-0">
           {error}
@@ -2978,7 +3056,9 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
                           ? <Check className="h-3.5 w-3.5" />
                           : <X className="h-3.5 w-3.5" />}
                     </span>
-                    <span className="font-mono text-ink-2 shrink-0">{s.tool}</span>
+                    <span className="text-ink-1 shrink-0" title={s.tool}>
+                      {toolLabel(t, s.tool)}
+                    </span>
                     <span className="text-ink-2 break-all">
                       {s.summary}
                       {s.cached ? t('chat.cached') : ''}
