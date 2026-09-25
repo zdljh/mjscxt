@@ -822,6 +822,25 @@ class ComfyUIClient:
     def get_history(self, prompt_id: str) -> dict:
         return self._get(f"/history/{prompt_id}")
 
+    def clear_history(self) -> bool:
+        """清空 ComfyUI **任务历史列表**（``POST /history {"clear":true}``）。
+
+        为什么要清：ComfyUI 界面的「任务历史」面板**只增不减**，而质检每失败一次
+        重跑就多一条记录 —— 跑几轮下来面板里几百条，容易被误读成「生成了大量废图」。
+        实测某项目面板 162 条时，磁盘上真正残留的废弃分镜图 **0 张**。
+
+        ⚠️ 与磁盘产物完全无关：只清内存/磁盘上的 `history` 记录，不删任何 output 文件，
+        也不影响**正在执行或排队中**的任务（它们结束后会各自追加新记录）。
+
+        永不抛异常：失败只 warning（清历史是「可观测性优化」，不能拖垮生产）。
+        """
+        try:
+            self._post("/history", {"clear": True})
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"ComfyUI 任务历史清理失败（不影响生产）: {e}")
+            return False
+
     def interrupt(self, prompt_id: str = None) -> None:
         """S9：向 ComfyUI 发 /interrupt，打断当前正在出队的任务。
 

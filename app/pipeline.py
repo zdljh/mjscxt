@@ -1000,6 +1000,12 @@ def step_final(ctx) -> dict:
         A._maybe_reclaim_comfyui_output()
     except Exception as e:  # noqa: BLE001  回收是优化，绝不能阻断成片
         logger.debug("D-11a 成片收尾回收跳过：%s: %s", type(e).__name__, e)
+    # 成片收尾 —— 顺手清空 ComfyUI 任务历史面板（只清记录，不碰磁盘产物）。
+    # 一次成片要经过分镜/视频/配音等多次重跑，面板会累积几百条，容易被误读成废图堆积。
+    try:
+        A._maybe_clear_comfyui_history("成片步骤收尾")
+    except Exception as e:  # noqa: BLE001  可观测性优化，绝不能阻断成片
+        logger.debug("ComfyUI 任务历史清理跳过：%s: %s", type(e).__name__, e)
     return {"ok": True, "artifact": out,
             "detail": {"segments": len(files), "subtitles": bool(subbed), "size": os.path.getsize(out)}}
 

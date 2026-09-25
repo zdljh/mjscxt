@@ -226,6 +226,20 @@ def _env_bool(key: str, default: bool) -> bool:
 KEEP_MODEL_LOADED = _env_bool("MJSCXT_KEEP_MODEL_LOADED", True)
 
 
+# ===================== ComfyUI 任务历史自动清理 =====================
+# ComfyUI 界面的「任务历史」面板**只增不减**：质检每失败一次重跑就多一条记录，
+# 跑几轮下来面板里几百条，极易被误读成「生成了大量废图」（实测面板 162 条时，
+# 磁盘上真正残留的废弃分镜图 0 张）。所以在**任务收尾**（分镜/资产批量跑完、
+# 流水线成片收尾）按节流清一次历史列表。
+#
+# 只清历史记录，不碰磁盘产物，也不影响正在执行/排队中的任务。
+# 想保留完整历史用于排查：MJSCXT_CLEAR_COMFYUI_HISTORY=0
+CLEAR_COMFYUI_HISTORY = _env_bool("MJSCXT_CLEAR_COMFYUI_HISTORY", True)
+#: 两次清理之间的最小间隔（秒）。太频繁会让「刚跑完那一镜」的现场也被清掉。
+CLEAR_COMFYUI_HISTORY_INTERVAL_SEC = 300.0
+
+
+
 # ===================== 超分引擎：TE-Speed-flashVSR 加速链路（默认） =====================
 # 模板来源（只读解析，不修改 ComfyUI 原始工作流文件）：
 #   D:\ComfyUI_portable_TE_v260619\ComfyUI\ComfyUI\user\default\workflows\TE-Speed-flashVSR 视频超分放大加速工作流.json

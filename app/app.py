@@ -25,6 +25,7 @@ from config import (
     NOVELS_DIR, LLM_CONFIG_PATH, NOVEL_CHUNK_CHARS, NOVEL_MAX_CHUNKS,
     NOVEL_DEFAULT_SHOTS, NOVEL_PREVIEW_CHARS, NOVEL_BRIEF_CHARS, LLM_REQUEST_TIMEOUT,
     QC_CONFIG_PATH, QC_DIR,
+    CLEAR_COMFYUI_HISTORY, CLEAR_COMFYUI_HISTORY_INTERVAL_SEC,
     WATERMARK_CONFIG_PATH, WATERMARK_DIR,
     AI_CONFIG_PATH, AI_MODULES, AI_CHAT_HISTORY_PATH, AI_SETTINGS_PATH,
     UPSCALE_DIR, UPSCALE_DEFAULT_PARAMS, COMFYUI_OUTPUT_DIR,
@@ -3271,6 +3272,7 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                 "success_count": sum(1 for r in _partial if r.get("success")),
             })
     _maybe_reclaim_comfyui_output()   # D-11a：任务收尾滚动回收 ComfyUI 重试残留（节流+全容错）
+    _maybe_clear_comfyui_history("资产批量生成收尾")
 
 
 @app.route('/api/assets/generate', methods=['POST'])
@@ -4068,6 +4070,8 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
     except Exception as _sb_ref_err:  # noqa: BLE001
         app.logger.warning(f"sb_ref 残留清理失败（忽略）：{_sb_ref_err}")
     _maybe_reclaim_comfyui_output()   # D-11a：任务收尾滚动回收 ComfyUI 重试残留（节流+全容错）
+    # 分镜批量是本项目重跑最密集的环节（每失败一次多一条任务历史）→ 收尾顺手清历史面板。
+    _maybe_clear_comfyui_history("storyboard 批量生成收尾")
 
 
 def _project_style(project_name: str = "") -> str:
@@ -12395,6 +12399,48 @@ def spa_fallback(path):
 _COMFYUI_RECLAIM_LAST_TS = 0.0          # 上次真正扫描的时间戳（模块级节流状态）
 _COMFYUI_RECLAIM_INTERVAL_SEC = 600.0   # 同一进程 10 分钟内只真正扫描一次
 _COMFYUI_RECLAIM_LOCK = threading.Lock()
+
+# ComfyUI「任务历史」自动清理（面板只增不减 → 易被误读成「生成了大量废图」）：
+# 与上面的回收同构 —— 模块级节流 + 全容错，默认间隔取 config 值（5 分钟）。
+_COMFYUI_CLEAR_HISTORY_LAST_TS = 0.0
+_COMFYUI_CLEAR_HISTORY_LOCK = threading.Lock()
+
+
+def _maybe_clear_comfyui_history(where: str = "") -> bool:
+    """按节流清空 ComfyUI **任务历史列表**（不是磁盘产物）。
+
+    为什么要做：ComfyUI 界面「任务历史」面板只增不减，质检每失败一次重跑就多一条
+    记录，跑几轮后几百条 → 用户会以为「生成了大量废图」。实测面板 162 条时磁盘上
+    真正残留的废弃分镜图 **0 张**（清之前 /history 162 条 → 清完 0 条）。
+
+    语义边界（重要）：
+      · 只调 `POST /history {"clear":true}`，**绝不删任何 output 文件**；
+      · 不影响正在执行/排队中的任务（它们结束后会各自追加新记录）；
+      · 只应在**任务收尾**调用 —— 有任务在飞时清掉历史，会让 `wait_for_completion`
+        的轮询查不到自己那条记录而误判超时。
+
+    开关 `MJSCXT_CLEAR_COMFYUI_HISTORY=0` 可整体关闭；节流 5 分钟（见 config）。
+    永不抛异常、永不阻断生产。
+    """
+    global _COMFYUI_CLEAR_HISTORY_LAST_TS
+    if not CLEAR_COMFYUI_HISTORY:
+        return False
+    try:
+        now = time.time()
+        with _COMFYUI_CLEAR_HISTORY_LOCK:
+            if now - _COMFYUI_CLEAR_HISTORY_LAST_TS < CLEAR_COMFYUI_HISTORY_INTERVAL_SEC:
+                return False
+            # 先占用时间戳：真正清理失败也不要在同一分钟内反复重试刷屏。
+            _COMFYUI_CLEAR_HISTORY_LAST_TS = now
+        ok = comfyui_client.clear_history()
+        if ok:
+            app.logger.info("[任务历史] 已清空 ComfyUI 任务历史面板（收尾：%s）", where or "未知")
+        return ok
+    except Exception as e:  # noqa: BLE001  可观测性优化，绝不能阻断生产
+        app.logger.warning("ComfyUI 任务历史清理异常（不影响生产）：%s: %s",
+                           type(e).__name__, e)
+        return False
+
 
 
 def _comfyui_official_dirs() -> list:
