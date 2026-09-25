@@ -117,6 +117,27 @@ FRAMING_TOLERANCE_NOTE = (
     "  · 取景范围本身不影响主体与动作的清晰表达时，宁可放过也不要误杀。"
 )
 
+# 连续性判定口径（2026-09-25 需求 J / P1 补）：
+# 业界做漫剧/短剧时，单张分镜图「画得好看」只是及格线，**跨镜连续性**才是成片能否
+# 连起来的关键 —— 相邻两镜如果背景结构、光位方向、服化道细节漂移，剪在一起就是
+# 「跳戏」。此前 DEFAULT_IMAGE_PROMPT 只查单图内部质量（人物/糊化/构图/景别/风格），
+# 完全没有这一层，而 **视频侧质检反而有**（DEFAULT_VIDEO_PROMPT 第 2 条查「人物外观与
+# 场景在整段视频中保持稳定」）—— 图片侧是能力缺口，这里补齐。
+#
+# ⚠️ 只在**提供了上一镜参考**时才有效判定：调用方若未注入上一镜信息，模型无从对比，
+# 此时必须明确「不得因无法对比而判缺陷」，否则会凭空臆造一条「与上一镜不一致」。
+CONTINUITY_NOTE = (
+    "\n【跨镜连续性判定口径】若上方「镜头信息」提供了**上一镜的参考画面或场景描述**，"
+    "请额外判定本图与上一镜的连续性：\n"
+    "  · 背景结构、建筑形制、环境陈设是否与上一镜一致（同场景下不得无理由改变）；\n"
+    "  · 光照方向与色温是否一致（如上一镜是左侧月光，本镜不得变成右侧暖光）；\n"
+    "  · 角色的发型、服装配色与配饰是否与上一镜保持一致（同场景连续镜头必须一致）；\n"
+    "  · 上述任一项**明显漂移**时，在 issues 里写明「与上一镜不连续：<具体项>」并扣分；\n"
+    "  · ⚠️ 仅当场景确实发生变化（换场）时，背景与光照改变属**正常**，不得判缺陷；\n"
+    "  · ⚠️ 若「镜头信息」**未提供**上一镜参考，则**不得**判定连续性 —— "
+    "不要凭空臆造「与上一镜不一致」，直接跳过本项。"
+)
+
 # 关键缺陷硬规则（P0：收紧放行）：模型偶尔给有明显崩坏的图打高分/放行，
 # 因此在提示词里下达硬性规则，并在代码侧再加一道不可绕过的闸门（见 _finalize_verdict）。
 CRITICAL_RULE_NOTE = (
@@ -460,6 +481,8 @@ DEFAULT_IMAGE_PROMPT = (
     "6) 水印/角标/logo/字幕即使存在，也不计入缺陷、不扣分；「不得出现文字」类约束只针对"
     "上述**叠加物**，画面内容本身需要的文字（器物铭文、牌匾、面板数值等）属于画面内容，"
     "不得因画面有/无此类文字判缺陷，文字乱码/错字也不计缺陷（中文文字属模型能力边界）。\n"
+    "7) 连续性：与上一镜的背景结构、光照方向、角色服化道是否保持一致（判定口径见下方说明；"
+    "未提供上一镜信息时跳过本项，不得凭空判定）。\n"
     "目标风格：{style}\n"
     "镜头信息：{shot_desc}\n"
     "判定线：score >= {pass_score} 且无关键缺陷 → pass=true，否则 pass=false"
@@ -550,6 +573,21 @@ DEFAULT_SCRIPT_PROMPT = (
     "但如果某镜既没有台词、又没写 audio_cues，成片到该镜会既无人声也无音效，判为问题。\n"
     "17. 单个镜头的台词合计不宜超过 30 字（约 6.7 秒配音）：台词过多会溢出到后面几镜，"
     "成片尾部被截断，应拆成更多镜头\n\n"
+    "【短剧叙事节奏】（2026-09-25 新增，按短剧行业通行标准判定；这几项直接决定完播率，"
+    "请认真判定，不要因为「结构完整」就放过节奏问题）\n"
+    "18. **前三秒钩子**：第 1 镜（或前 2 镜内）必须出现强钩子 —— 冲突、悬念、反常画面、"
+    "危机或一句有冲击力的台词。若开场只是平铺直叙的场景介绍/人物走路/天气描写，"
+    "写明「首镜无钩子」并扣分。这是短剧留存的第一道生死线。\n"
+    "19. **话轮轮换密度**：连续 4 镜以上完全没有台词（纯画面/空镜）会让观众流失；"
+    "反之，连续 6 镜以上都是同一组角色在同一场景对话、没有任何画面或场景变化，"
+    "也属节奏拖沓。命中任一种都应在 issues 里写明具体镜号区间。\n"
+    "20. **冲突强度与悬念**：整集应至少有一处明确的冲突升级（对抗、揭露、反转、"
+    "危机逼近）并保持悬念。若整集都是日常铺陈、无对抗无悬念，写明「缺冲突」并扣分。\n"
+    "21. **集尾钩子（cliffhanger）**：最后 1~2 镜必须留悬念或反转，把观众推向下一集"
+    "（如危机降临、身份揭露、关键人物出现、抛出未解问题）。若结尾是平淡的收束/总结，"
+    "写明「集尾无钩子」并扣分。\n"
+    "22. **景别节奏**：不应连续 5 镜以上使用同一景别（尤其连续中景），"
+    "长短镜与远近景应交替，形成呼吸感。命中时在 issues 里写明。\n\n"
     "剧本数据：\n{script_data}\n\n"
     "请只输出一个JSON对象，格式：\n"
     '{\"score\": 0-100, \"pass\": true/false, \"reason\": \"一句话结论\", '
@@ -1878,7 +1916,8 @@ def _recheck_image_verdict(ep: dict, prompt: str, image_paths: list, cfg: dict,
 
 def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
                 override: dict = None, style: str = "",
-                ref_images: list = None) -> dict:
+                ref_images: list = None,
+                prev_shot_desc: str = "", prev_shot_ref: str = "") -> dict:
     """单张图片质检。永不抛异常：失败时返回 ok=False 并带 error。
     override 仅用于「测试连通性」临时传参，不落盘。
     style：目标风格串（用户与总控敲定），用于「风格达标」判定；为空则不做风格检测。
@@ -1886,7 +1925,11 @@ def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
       生成侧用的那几张角色 / 物品 / 场景设定图。给了就一并送检，让模型能**逐个核对
       「画面里的角色 / 物品是否与设定一致、有没有变形」**，而不是凭想象判。
       受 cfg["image_ref_compare"]（默认 True）控制；不存在的文件与重复图（同一张被多个
-      槽位复用）自动跳过。"""
+      槽位复用）自动跳过。
+    prev_shot_desc / prev_shot_ref（2026-09-25 需求 J / P1）：**上一镜**的文字描述与画面
+      路径。给了就追加「跨镜连续性」判定口径，并把上一镜画面一并送检，让模型能真正比对
+      背景结构 / 光照方向 / 服化道是否漂移。两者都为空时**完全不加这部分**（零行为变更），
+      避免模型凭「上一镜」这几个字臆造一条不一致缺陷。"""
     cfg = cfg or _empty_config()
     if not cfg.get("enabled"):
         return {"ok": False, "skipped": True, "reason": "质检总开关未开启"}
@@ -1925,9 +1968,27 @@ def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
             seen.add(ap)
             ref_list.append((label, path))
         ref_list = ref_list[:MAX_REF_IMAGES]
+    # ---- 跨镜连续性（P1，2026-09-25）：仅在提供了上一镜信息时启用 ----
+    # ⚠️ 放在 ref_list 之后：上一镜画面要作为**额外参考图**送检（模型才能真正比对），
+    #    而 ref_list 有 MAX_REF_IMAGES 上限，故先装满设定图、再追加上一镜，
+    #    且**不占用设定图名额**（设定图的一致性判定优先级更高）。
+    _prev_used = False
+    if prev_shot_desc or prev_shot_ref:
+        prompt = prompt + CONTINUITY_NOTE
+        _prev_lines = []
+        if prev_shot_desc:
+            _prev_lines.append(f"上一镜信息：{prev_shot_desc}")
+        if prev_shot_ref and os.path.isfile(prev_shot_ref):
+            _prev_lines.append("上一镜画面：见随附的「上一镜参考」图")
+            _prev_used = True
+        if _prev_lines:
+            prompt = prompt + "\n" + "\n".join(_prev_lines) + "\n"
     if ref_list:
         prompt = prompt + build_ref_consistency_note(ref_list)
     image_paths = [image_path] + [p for _l, p in ref_list]
+    if _prev_used:
+        # 上一镜画面追加在**最后**（顺序与 prompt 里「见随附的上一镜参考图」对应）
+        image_paths.append(prev_shot_ref)
     try:
         verdict = _run_vision(ep, prompt, image_paths, cfg)
     except Exception as e:  # noqa: BLE001
@@ -2877,6 +2938,12 @@ def _validate_script_prompts(script: dict) -> list:
 #: 单镜时长下限/上限，与 novel_to_script.SHOT_DURATION_MIN/MAX 对齐（3~12 秒）。
 #: 历史缺陷：这里写 1~15 秒且「镜头数 > 30 就告警」，而剧本生成端的约束是 3~12 秒、
 #: 真实剧集单集可达 56 镜 —— 约束互相打架，正常剧本反被判不可执行。
+#:
+#: ⚠️ 2026-09-25（需求 J / P0-1）：这里校验的是**剧本级**单镜时长，上限仍是 12 秒 ——
+#: 这是正确的：长镜本身不是剧本缺陷（叙事上长镜合理，且总时长守恒），
+#: **生成期**已由 ``h3_prompt_kit.segment_durations`` 自动切成 ≤4 秒的子段提交给模型
+#: （业界「AI 视频可信窗口约 4 秒」的红线在**单次生成**这一层，不是在剧本这一层）。
+#: 因此不要因为「剧本写了 12 秒」就判缺陷 —— 那会把正常剧本批量打成不可执行。
 SHOT_DURATION_MIN_OK = 3.0
 SHOT_DURATION_MAX_OK = 12.0
 SHOT_DURATION_TOLERANCE = 2.0     # 超出边界的容差（模型四舍五入 / 台词长度微调）

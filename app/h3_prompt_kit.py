@@ -47,6 +47,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -71,6 +72,21 @@ BASE_SECTIONS: Tuple[str, ...] = (
 
 #: 单镜最长时长（超过则拆成多个时间码节拍，让时间轴与目标时长对齐）
 BEAT_MAX_SEC = 6.0
+
+#: 单段视频的**时长上限**（秒）。这是生成期的硬约束，与 :data:`BEAT_MAX_SEC`
+#: （提示词节拍粒度）是两个不同层面的东西，不要混用。
+#:
+#: 为什么是 4.0：业界共识 —— AI 视频「前 4 秒可信、之后开始崩坏」（后段易出现
+#: 肢体融化、面部漂移、背景跳变）。因此**单次生成**应限制在 4 秒以内，
+#: 需要更长的镜头靠「同一提示词续写多段 + H3 原生无缝衔接」实现。
+#: 实测本项目剧本 96~100% 的镜头超此线（第1集均 7.56s / 第2集均 6.91s），
+#: 故生成期必须强制切段。
+H3_SEGMENT_MAX_SEC = 4.0
+
+#: 切段时允许的**最小段长**（秒）。切成比这更短的碎段没有意义：
+#: 模型还没站稳就切下一段，反而引入更多接缝。故段数上限为
+#: ``ceil(duration / H3_SEGMENT_MAX_SEC)`` 的基础上，把余数摊平而非留一个超短尾段。
+H3_SEGMENT_MIN_SEC = 1.5
 
 #: 无风格时的兜底（保持历史行为；有 style 时一律以 style 为准）
 _DEFAULT_STYLE = "国漫3D渲染"
@@ -524,6 +540,22 @@ _CAMERA_EN = {
     "特写": "A close-up",
     "大特写": "An extreme close-up",
     "微距": "A macro close-up",
+    # ---- 「运镜在前」的复合词（术语表里 real 存在，如 handheld close-up）----
+    # ⚠️ 必须放进来：:func:`_camera_en` 是**子串**匹配，``手持跟拍`` 里没有景别词，
+    #    不加这几条就会返回空串 → 景别整段丢失（实测 ``手持跟拍`` 曾翻成 ``''``）。
+    #    注意表内匹配按**长词优先**遍历，``手持特写`` 会比 ``特写`` 先命中。
+    "手持特写": "A handheld close-up",
+    "手持近景": "A handheld close-up",
+    "手持中景": "A handheld medium shot",
+    "手持全景": "A handheld full shot",
+    "手持远景": "A handheld wide shot",
+    "手持跟拍": "A handheld tracking shot",
+    "手持": "A handheld shot",
+    "环绕特写": "An orbiting close-up",
+    "环绕近景": "An orbiting close-up",
+    "环绕中景": "An orbiting medium shot",
+    "定格特写": "A frozen close-up",
+    "定格中景": "A frozen medium shot",
 }
 
 
@@ -541,6 +573,77 @@ def _camera_en(camera: str) -> str:
     # 已经是英文（调用方直接给了英文景别）→ 原样用
     if re.match(r"^[A-Za-z]", t):
         return t
+    return ""
+
+
+#: 运镜中文 → 英文短语（对齐 H3 模板的运镜写法：``with a slow dolly-in`` /
+#: ``the camera tracks the subject`` …）。
+#:
+#: ⚠️ 为什么必须单独做一张表（历史缺陷）：剧本质检第 13 条**强制要求**
+#: ``camera`` 字段写成「景别+运镜」（如 ``中景跟拍`` / ``特写推入``），真实剧本里
+#: 组合词占绝大多数（实测第 2 集 29 镜出现 16 种组合）。但 :func:`_camera_en`
+#: 只做**景别前缀子串匹配**，运镜部分被静默吞掉：
+#:
+#:     '中景跟拍' → 'A medium shot'    （「跟拍」丢失）
+#:     '特写推入' → 'A close-up'        （「推入」丢失）
+#:     '全景升降' → 'A full shot'       （「升降」丢失）
+#:
+#: 结果是：剧本侧生产的运镜指令**一个都进不了提示词**，模型只能自行猜运镜，
+#: 出片运镜随机。这张表把运镜补回提示词，与景别一起构成完整镜头语言。
+_CAMERA_MOVE_EN = {
+    "固定": "the camera stays locked off on a fixed tripod",
+    "定格": "the frame freezes on a held moment",
+    "推镜": "with a steady dolly-in toward the subject",
+    "推入": "with a slow dolly-in toward the subject",
+    "急推": "with a fast, forceful dolly-in on the subject",
+    "推进": "with a gradual dolly-in toward the subject",
+    "拉镜": "with a steady dolly-out away from the subject",
+    "拉远": "with a slow dolly-out away from the subject",
+    "拉": "with a slow dolly-out away from the subject",
+    "摇镜": "with a smooth horizontal pan across the scene",
+    "摇拍": "with a smooth horizontal pan across the scene",
+    "移镜": "with a lateral tracking move alongside the subject",
+    "平移": "with a lateral tracking move alongside the subject",
+    "跟镜": "the camera tracks the subject and keeps pace with the movement",
+    "跟拍": "the camera tracks the subject and keeps pace with the movement",
+    "升降": "with a vertical crane move through the space",
+    "升": "with a rising crane move upward",
+    "降": "with a descending crane move downward",
+    "环绕": "with a slow orbiting move around the subject",
+    "旋转": "with a slow orbiting move around the subject",
+    "变焦": "with a slow zoom that tightens the framing",
+    "手持": "with a subtle handheld shake that keeps the frame alive",
+    "俯冲": "with a fast downward push into the scene",
+    "仰冲": "with a fast upward push into the scene",
+    # ---- 机位/角度（与景别正交，qc_client 剧本 QC 明确要求「机位与景别正交」）----
+    "俯拍": "shot from a high angle looking down on the subject",
+    "俯视": "shot from a high angle looking down on the subject",
+    "仰拍": "shot from a low angle looking up at the subject",
+    "仰视": "shot from a low angle looking up at the subject",
+    "平视": "shot at the subject's eye level",
+    "斜角": "shot from a Dutch-tilted angle",
+    "侧面": "shot from the side of the subject",
+    "侧拍": "shot from the side of the subject",
+    "背拍": "shot from behind the subject",
+    "过肩": "shot over the subject's shoulder",
+    "主观": "shot as the character's point of view",
+}
+
+
+def _camera_move_en(camera: str) -> str:
+    """运镜 → 英文从句；认不出返回空串（宁可不说，也不瞎猜运镜）
+
+    ⚠️ 匹配顺序：**长词优先**。``升降`` 必须比 ``升``/``降`` 先命中，否则
+    「全景升降」会被 ``升`` 抢先翻成「rising crane move」而丢掉「降」。
+    同样 ``推入``/``推进`` 要先于 ``推镜`` 之外的单字 ``推`` 判定。
+    """
+    t = str(camera or "").strip()
+    if not t:
+        return ""
+    # 已经是英文（调用方直接给英文运镜）→ 原样用，避免被中文表误伤
+    for zh in sorted(_CAMERA_MOVE_EN, key=len, reverse=True):
+        if zh in t:
+            return _CAMERA_MOVE_EN[zh]
     return ""
 
 
@@ -596,9 +699,14 @@ def build_detailed_description(shot: dict, duration: float, style: str = "",
       进而把台词画成字幕；模板里每个无台词节拍都明确标注。
     - 结尾**不再追加**「画面中严禁出现任何文字、字幕…」这类中文禁令：模板里没有，
       而且它本身就在提示词里引入了「字幕/文字」这两个词，反而更容易诱发字幕。
+    - **运镜必须显式写进画面句**（2026-09-25 补）：``camera`` 字段是「景别+运镜」复合词
+      （如 ``中景跟拍`` / ``特写推入`` / ``全景升降``），旧实现只翻景别前缀、把运镜整段丢掉，
+      导致模型自行猜运镜、出片运镜随机。现在运镜**写进句首的镜头声明**（与景别同处），
+      既补回了信息，也符合模板「镜号后先写景别/机位、再写画面内容」的写法。
     """
     camera = str(shot.get("camera") or "中景").strip()
     camera_en = _camera_en(camera)
+    camera_move = _camera_move_en(camera)
     lines = dialogue_lines(shot.get("dialogue"))
     slots = speaker_slots(lines)
     picture_refs = picture_refs or {}
@@ -620,9 +728,15 @@ def build_detailed_description(shot: dict, duration: float, style: str = "",
         # 统一补句号收口（clause 已 strip 掉原句末标点，不会出现「。。」）
         clause += "."
         # 模板格式：首镜 [Shot 1]，后续镜「At 时间码, the camera cuts to」。
-        # 景别只在首镜点明，后续由画面内容承接（模板同样不逐镜重复景别词）。
+        # 景别与运镜只在首镜点明，后续由画面内容承接（模板同样不逐镜重复景别词）。
+        # ⚠️ 运镜**只在句首声明一次**，绝不在这里于句尾再补一遍 —— 同一运镜写两遍
+        #    会让提示词自相矛盾（实测会把「推入」重复两次），且浪费提示词预算。
         if idx == 1:
-            head = f"[Shot 1] {camera_en}: " if camera_en else "[Shot 1] "
+            # ``[Shot 1] A medium shot, the camera tracks the subject: …``
+            # 景别缺但运镜在（如 camera='手持跟拍'）时只写运镜，不出现空景别。
+            head_parts = [p for p in (camera_en, camera_move) if p]
+            head = (f"[Shot 1] {', '.join(head_parts)}: " if head_parts
+                    else "[Shot 1] ")
         else:
             # ⚠️ 句中位置必须压小写：``cuts to A medium shot`` 是错的。
             cam_mid = _mid_sentence(camera_en)
@@ -692,6 +806,97 @@ def _subject_definitions(picture_defs: Sequence[Tuple[str, str]],
             f"and costume must stay consistent with this reference image.")
     return "\n".join(lines) if lines else \
         "<Picture 1> is the reference image defining the appearance and composition of this shot."
+
+
+def segment_durations(duration, max_sec: float = None,
+                      min_sec: float = None) -> List[float]:
+    """把一个镜头的总时长切成若干**每段 ≤ max_sec** 的时长列表（秒）
+
+    为什么需要它（2026-09-25 需求 J）：AI 视频的可信窗口只有约 4 秒，超过后段
+    容易崩坏。本项目剧本单镜普遍 4.5~12 秒（实测第1集 27/27 超线），所以生成期
+    要把长镜拆成多段、用 H3 原生段间衔接拼成连续视频，既保住镜头语义，
+    又把**每一次生成**都压在 4 秒以内。
+
+    切法：``n = ceil(duration / max_sec)``，再把总时长**均摊**到 n 段
+    （``duration / n``），而不是「前 n-1 段满 4 秒 + 尾段塞余数」——
+    均摊避免出现「前几段 4s、最后一段 0.3s」的残缺尾段（模型演不出东西，
+    且接缝突兀）。均摊后每段必然 ≤ max_sec（因 n = ceil 保证 duration/n ≤ max_sec）。
+
+    ⚠️ 段数上限由 ``min_sec`` 兜底：若均摊后某段短于 ``min_sec``，减少段数
+    （宁可某段略超 max_sec，也不要碎段）—— 但 duration ≤ max_sec 时**恒返回单段**，
+    即「本来就不超线的镜头行为完全不变」，这是本函数最重要的向后兼容保证。
+
+    返回：``[3.75, 3.75, 3.75, 3.75]`` 这类等长列表；``duration <= max_sec`` 时返回
+    ``[duration]`` 单元素列表（**不做任何取整**，保持原时长逐位一致）。
+    """
+    try:
+        dur = float(duration or 0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    cap = float(H3_SEGMENT_MAX_SEC if max_sec is None else max_sec)
+    floor = float(H3_SEGMENT_MIN_SEC if min_sec is None else min_sec)
+
+    # 非有限值 / 非正时长 → 原样单段（让下游按自己的兜底逻辑处理，不在这里造数）
+    if dur != dur or dur in (float("inf"), float("-inf")) or dur <= 0:
+        return [dur]
+    # 未超上限 → 单段，**逐位返回原值**（不做 round，避免 5.0 被改成 4.999）
+    if cap <= 0 or dur <= cap:
+        return [dur]
+
+    n = int(math.ceil(dur / cap))
+    # min_sec 兜底：段太少会碎 → 逐步减段，直到每段都不短于 floor（n 至少为 1）
+    if floor > 0:
+        while n > 1 and (dur / n) < floor:
+            n -= 1
+    return [dur / n] * n
+
+
+def segment_shot(shot: dict, duration, max_sec: float = None) -> List[dict]:
+    """把一个镜头按 :func:`segment_durations` 切成多个「生成段」
+
+    每个子段是一个**独立的 H3 段**（自带提示词与时长），但它们同属一个镜头：
+    - ``name`` 为 ``shot_07_a`` / ``shot_07_b`` … 仅作日志与画布标识；
+    - **落盘仍是一个 ``shot_07.mp4``**（H3 段间原生无缝衔接，一次提交产出连续视频），
+      所以不需要改任何文件命名契约（``probe_video`` / ``dub_mix`` / ``_SHOT_RE`` 全不受影响）；
+    - 提示词的 ``[Shot N]`` 计数与节拍由 :func:`build_detailed_description` 按**子段时长**
+      重新生成，因此每段的节拍自然变少（4 秒 → 1 个节拍），动作不会挤在一段里；
+    - **参考图槽位形状保持一致**（同一批图片），第 2 段起不再重复「构图基准」声明
+      （``build_detailed_description`` 只在首节拍挂 ``first_ref``）。
+    - ⭐ **台词只落在最后一段**（关键）：H3 的每段都会被独立生成并出声，若每段都带台词，
+      同一句会被念 N 遍。因此首段起清空 ``dialogue``，只保留最后一段的台词 ——
+      这也符合「动作推进 → 最后开口说话」的时序直觉（与 :func:`_beats` 的收尾约定一致）。
+      同时清掉 ``narration``，避免旧剧本走「画外音延续」分支重复念白。
+
+    返回的每个 dict 供 :func:`segment_to_dicts` 转成 comfyui_client 的 segments 元素。
+    """
+    try:
+        dur = float(duration or 0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    durs = segment_durations(dur, max_sec=max_sec)
+    last = len(durs) - 1
+    out: List[dict] = []
+    for i, d in enumerate(durs):
+        sub = dict(shot or {})
+        # ⚠️ 子段的 duration 必须是**本段时长**，否则 build_detailed_description 会按
+        #    总时长铺节拍，4 秒的段被塞进 12 秒的节拍 → 段内动作空转。
+        sub["duration"] = d
+        sub["_seg_index"] = i
+        sub["_seg_count"] = len(durs)
+        if len(durs) > 1 and i != last:
+            # 非末段：不带台词（否则同一句会被 H3 在每段各念一遍）。
+            # 清空而非删除键，保持下游 ``shot.get("dialogue")`` 的类型稳定。
+            sub["dialogue"] = []
+            sub["dialogue_text"] = ""
+            sub["narration"] = ""
+            # 画面内容降调为「进程推进」：段内不需要再复述完整动作起手，
+            # 用一句承接语把动作往下一段推（与 _beats 的中间节拍同一写法）。
+            sub["description"] = (
+                "the action continues to advance from the previous moment, keeping the "
+                "characters' appearance, wardrobe and scene lighting exactly consistent")
+            sub["visual_detail"] = ""
+        out.append(sub)
+    return out
 
 
 def _retention_analysis(picture_defs: Sequence[Tuple[str, str]],
@@ -925,6 +1130,8 @@ def style_of(shot: dict, fallback: str = "") -> str:
 __all__ = [
     "REF_SECTIONS", "BASE_SECTIONS",
     "MAX_PROMPT_CHARS", "MAX_DETAIL_CHARS", "clamp_prompt", "clamp_h3_prompt",
+    "BEAT_MAX_SEC", "H3_SEGMENT_MAX_SEC", "H3_SEGMENT_MIN_SEC",
+    "segment_durations", "segment_shot",
     "fmt_ts", "lang_tag", "dialogue_lines", "speaker_slots",
     "build_soundscape", "build_music", "build_summary",
     "build_detailed_description", "build_ref2va", "build_base",

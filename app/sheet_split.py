@@ -1,23 +1,21 @@
 # -*- coding: utf-8 -*-
-"""角色「三视图整图」→ 各视角单图：本地列投影切分（零 GPU、零质检）。
+"""角色「分档设定图」→ 各视角单图：本地投影切分（零 GPU、零质检）。
 
 背景（2026-09-24 改造，勿回退到「多视角编辑」）
 --------------------------------------------------------------------------------
 角色资产原本有两类图：
 
-  · ``base.png`` —— 「正面 / 左侧面 / 背面 三张全身视图横排」的**整图**。
-    由 T2I（``角色生成_Qwen21.json``）一次出图，画幅 1:1 的由来就是它（见
-    ``style_kit.ASSET_BASE_RATIO`` 的实测注释）。
+  · ``base.png`` —— 角色设定图的**整图**（一次 T2I 出图）。
   · ``front/left/right/back.png`` —— 由「多视角编辑」工作流
     （``分镜生成_Qwen21.json``）逐视角**重渲染**得到。
 
 实测（``output/assets/characters/逆天系统/*/``，2026-09-24）：4 张「视角图」与
-``base.png`` **内容完全一致**，都是同一张三视图整图 —— 因为参考图编辑在该工作流下
+``base.png`` **内容完全一致**，都是同一张设定图 —— 因为参考图编辑在该工作流下
 KSampler ``cfg=1.0`` → ``uncond_ = None``（负向根本不评估、无引导放大）→
 参考图条件压过文字，只会 1:1 复刻参考图里**已可见**的机位，不会凭空补全没见过的面
 （机制与 8 组对照实验见 ``config.MULTIVIEW_CONFIG`` 顶部注释）。
 
-后果（本次改造要消掉的三笔账）：
+后果（2026-09-24 改造消掉的三笔账）：
   1. 每个角色白烧 **4 次 GPU 渲染 + 4 次质检**（物品/场景同理）；
   2. 多视角不达标会把**整个资产判为 failed**（旧 ``success = not blocked_views``），
      即使基础图已经达标；
@@ -27,25 +25,42 @@ KSampler ``cfg=1.0`` → ``uncond_ = None``（负向根本不评估、无引导�
 本模块的定位
 --------------------------------------------------------------------------------
 把「单视角图」从「GPU 重渲染」降级为「从整图本地切分」：整图本来就是**一次** T2I 出图，
-三个格位共享同一角色，切出来天然是同一人物的三个**真机位**，零 GPU 成本、零质检成本，
-且**不引入身份漂移**。于是同时拿到用户要的两样东西：
+各格位共享同一角色，切出来天然是同一人物的不同机位，零 GPU 成本、零质检成本，
+且**不引入身份漂移**。于是同时拿到两样东西：
 
-  · 「整图」= ``base.png``（1 张，三格横排，用于人工审阅 / 资产预览）
-  · 「单图」= ``front.png`` / ``left.png`` / ``back.png``（各 1 张真单机位，供下游当参考图）
+  · 「整图」= ``base.png``（1 张，用于人工审阅 / 资产预览）
+  · 「单图」= ``front.png`` / ``left.png`` / ``back.png`` / ``half.png``
 
-⚠️ 为什么不用硬三等分
-    实测三张整图的人物外接框**不落在等分线上**。以「羡进」为例，列投影得到的三人段是
+⚠️ 2026-09-25：版式由「三张全身横排」升级为 **2x2 分档**
+--------------------------------------------------------------------------------
+根因（实测，见 ``.workbuddy/tools/diag_framing_control.py``）：
+分镜模板 ``<image1>`` 是主画布，近方形**全身**立绘 cover 到 9:16 竖屏要左右各裁一半
+→ 模型为保住「完整的全身」只能把人物缩小 → **系统性偏全景/远景**，
+而近景/特写与立绘方向相反 → 被反向拉回、画不出来（实测 shot_24 规定近景、出图近全身）。
+业界通行做法是「**按景别分档出图**」（正脸特写 / 正脸半身 / 全身）。
+
+新版式（``config.CHARACTER_SHEET_CELLS``）：
+
+      ┌─────────┬─────────┬─────────┐
+      │ 正面全身 │ 左侧全身 │ 背面全身 │   上排 3 格
+      ├─────────┼─────────┴─────────┤
+      │ 正面半身 │      （留白）      │   下排仅左 1 格
+      └─────────┴───────────────────┘
+
+半身格给「近景/特写/中景」镜头当主画布，画幅与景别**同向**，画幅对抗即消失。
+
+⚠️ 为什么不用硬切分
+    实测人物外接框**不落在等分线上**。以「羡进」为例，列投影得到的三人段是
     ``(25,256) / (290,437) / (474,706)``，而硬三等分边界 ``x = 245 / 490`` 处**有内容**
-    —— 等分切法会切到人物的手臂。这里改用**列投影找空隙 + 取相邻段中缝**切分；
-    三张实测图都能得到 3 段，段间空隙 12~54px、外侧留白 8~43px。
+    —— 等分切法会切到人物的手臂。故 3 格横排用**列投影找空隙 + 取相邻段中缝**；
+    2 行版式再用**行投影**定上下排的水平切分线（空隙中缝），两向都不碰内容。
 
 ⚠️ 为什么切好要贴回「与原整图同尺寸的方底画布」
     ``分镜生成_Qwen21.json`` 是 ``TextEncodeQwenImage21(latent) → KSampler(latent_image)``
     的参考图编辑模板，**没有尺寸节点**（无 ``ResolutionSelector`` / ``EmptyLatentImage``），
     分镜图的输出画幅**继承第一张参考图**（见 ``comfyui_client.generate_storyboard`` 的日志分支）。
     若把切出的窄条（如 231×736）直接当参考图，分镜图会被带成 231:736 的怪画幅。
-    故每张单图都居中贴在**与整图同尺寸**的纯白画布上 —— 人物在画面中的相对占比与
-    原整图一致（整图里每人也只占约 1/3 宽），画幅口径不变。
+    故每张单图都居中贴在**与整图同尺寸**的纯白画布上 —— 画幅口径不变。
 """
 from __future__ import annotations
 
@@ -117,7 +132,7 @@ def cut_points(segs: Sequence[Tuple[int, int]], width: int) -> List[int]:
 
 
 def split_sheet(image, expected: int, pad_to_canvas: bool = True):
-    """把三视图整图切成 ``expected`` 张单视角图。
+    """把设定图切成 ``expected`` 张单视角图（**旧版式：单行横排**）。
 
     :param image: ``PIL.Image``（RGB）
     :param expected: 期望格位数量（与 ``config.CHARACTER_SHEET_VIEWS`` 等长）
@@ -135,7 +150,7 @@ def split_sheet(image, expected: int, pad_to_canvas: bool = True):
     segs = column_segments(_content_mask(rgb))
     if len(segs) != expected:
         raise SheetSplitError(
-            f"三视图整图列投影得到 {len(segs)} 段，与期望的 {expected} 段不符"
+            f"设定图列投影得到 {len(segs)} 段，与期望的 {expected} 段不符"
             f"（段={segs}，画布 {W}x{H}）—— 不做不可靠切分")
 
     pts = cut_points(segs, W)
@@ -148,6 +163,107 @@ def split_sheet(image, expected: int, pad_to_canvas: bool = True):
         canvas = Image.new("RGB", (W, H), (255, 255, 255))
         left = max(0, (W - piece.width) // 2)
         canvas.paste(piece, (left, 0))
+        out.append(canvas)
+    return out
+
+
+def row_segments(mask) -> List[Tuple[int, int]]:
+    """按**行**投影切段，返回 [(y0, y1), ...]（上闭下开），按 y 升序。
+
+    与 :func:`column_segments` 对偶，供 2x2 版式定「上下排」的水平切分线。
+    """
+    import numpy as np
+
+    rows = np.asarray(mask).sum(axis=1)
+    occupied = rows >= MIN_OCC_PX
+    segs: List[Tuple[int, int]] = []
+    start: Optional[int] = None
+    gap = 0
+    for y, occ in enumerate(occupied):
+        if occ:
+            if start is None:
+                start = y
+            gap = 0
+            continue
+        if start is None:
+            continue
+        gap += 1
+        if gap >= MIN_GAP_PX:
+            segs.append((start, y - gap + 1))
+            start = None
+            gap = 0
+    if start is not None:
+        segs.append((start, len(occupied)))
+    return [(a, b) for a, b in segs if b - a >= MIN_SEG_W]
+
+
+def split_grid_sheet(image, cells: Sequence[Tuple[int, int]],
+                     grid: Tuple[int, int], pad_to_canvas: bool = True,
+                     band_fallback: Optional[float] = None):
+    """把**多层（上排 N 格 + 下排 M 格）**设定图按 ``cells`` 切出各格内容。
+
+    与 :func:`split_sheet`（单行横排）的区别：多层版式里同一列上下都有内容，
+    只做列投影会把上下两排**粘成一段**（实测确认），故必须**先行后列**：
+      1. 行投影 → 找到「上排 / 下排」之间的水平空白带 → 切成 row_count 条横带；
+      2. 每条横带内再列投影 → 按该行的实际格数切竖格。
+
+    :param cells: ``[(row, col), ...]``，与目标视角键一一对应，0 起。
+    :param grid: ``(rows, cols)`` 版式网格，用于校验。
+    :param band_fallback: 行投影失败时，用「最后一排所占高度比例」做**确定性兜底**
+        （``config.CHARACTER_SHEET_HALF_BAND`` 同源）。设 None 则直接抛错。
+    :returns: ``[PIL.Image, ...]``，顺序与 ``cells`` 一致
+    :raises SheetSplitError: 行/列投影段数不可信且无兜底时抛错（调用方降级）
+    """
+    import numpy as np
+    from PIL import Image
+
+    im = image.convert("RGB") if image.mode != "RGB" else image
+    W, H = im.size
+    mask = _content_mask(np.asarray(im, dtype=np.int16))
+    rows_n = int(grid[0])
+
+    rsegs = row_segments(mask)
+    if len(rsegs) == rows_n:
+        rpts = cut_points(rsegs, H)
+    elif band_fallback and rows_n == 2:
+        # 兜底：上排(全身)占 1-band，下排(半身)占 band。取上排底边作为唯一分界线。
+        split_y = int(round(H * (1.0 - float(band_fallback))))
+        rpts = [0, split_y, H]
+    else:
+        raise SheetSplitError(
+            f"设定图行投影得到 {len(rsegs)} 段，与版式 {rows_n} 行不符"
+            f"（段={rsegs}，画布 {W}x{H}）—— 不做不可靠切分")
+
+    pieces: List[object] = []
+    for r in range(rows_n):
+        band = im.crop((0, rpts[r], W, rpts[r + 1]))
+        band_mask = mask[rpts[r]:rpts[r + 1], :]
+        csegs = column_segments(band_mask)
+        want = [c for (rr, c) in cells if rr == r]
+        if not want:
+            continue
+        need = max(want) + 1
+        if len(csegs) < need:
+            raise SheetSplitError(
+                f"设定图第 {r + 1} 行列投影得到 {len(csegs)} 段，"
+                f"少于该行需要的 {need} 格（段={csegs}）—— 不做不可靠切分")
+        # 只用该行实际需要的列段（多余段是噪声/装饰，忽略尾部）
+        cpts = cut_points(csegs[:need], W)
+        for c in want:
+            pieces.append(band.crop((cpts[c], 0, cpts[c + 1], band.height)))
+
+    if len(pieces) != len(cells):
+        raise SheetSplitError(
+            f"设定图切出 {len(pieces)} 格，与请求的 {len(cells)} 格不符")
+
+    if not pad_to_canvas:
+        return pieces
+    out = []
+    for piece in pieces:
+        canvas = Image.new("RGB", (W, H), (255, 255, 255))
+        left = max(0, (W - piece.width) // 2)
+        top = max(0, (H - piece.height) // 2)
+        canvas.paste(piece, (left, top))
         out.append(canvas)
     return out
 
@@ -184,9 +300,17 @@ def prune_stale_views(asset_dir: str, keep: Iterable[str],
 
 
 def split_sheet_to_files(src_path: str, out_dir: str, keys: Sequence[str],
-                         logger=None, prune: bool = True) -> Dict[str, str]:
+                         logger=None, prune: bool = True,
+                         cells: Optional[Sequence[Tuple[int, int]]] = None,
+                         grid: Optional[Tuple[int, int]] = None,
+                         band_fallback: Optional[float] = None) -> Dict[str, str]:
     """把整图 ``src_path`` 切成 ``keys`` 指定的各视角单图并落盘到 ``out_dir``。
 
+    :param cells: 各视角键对应的 ``(行, 列)`` 格位（0 起）。**给了就走多层网格切分**
+        （:func:`split_grid_sheet`，行投影 + 行内列投影）；不给则退回单行横排切分
+        （:func:`split_sheet`，列投影），保证对旧版式的 1:1 兼容。
+    :param grid: ``(rows, cols)``，仅在给了 ``cells`` 时使用。
+    :param band_fallback: 行投影失败时的确定性兜底比例（见 :func:`split_grid_sheet`）。
     :returns: ``{view_key: 绝对路径}``（全部成功才返回；任一步失败即抛 ``SheetSplitError``）
     """
     from PIL import Image
@@ -198,7 +322,10 @@ def split_sheet_to_files(src_path: str, out_dir: str, keys: Sequence[str],
         return {}
     os.makedirs(out_dir, exist_ok=True)
     with Image.open(src_path) as raw:
-        pieces = split_sheet(raw, len(keys))
+        if cells and grid and len(cells) == len(keys):
+            pieces = split_grid_sheet(raw, cells, grid, band_fallback=band_fallback)
+        else:
+            pieces = split_sheet(raw, len(keys))
 
     out: Dict[str, str] = {}
     try:

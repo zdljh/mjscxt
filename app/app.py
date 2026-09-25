@@ -35,6 +35,8 @@ from config import (
     TASKS_DB_PATH, TASK_QUEUE_CONCURRENCY, TASK_UNIT_MIN_BYTES,
     KEYFRAME_CHAIN_MODE, WORKFLOW_TEMPLATE,
     CHARACTER_SHEET_VIEWS, ASSET_VIEW_STEMS,
+    CHARACTER_SHEET_CELLS, CHARACTER_SHEET_GRID, CHARACTER_SHEET_HALF_BAND,
+    CHARACTER_HALF_VIEWS,
     PROJECT_DEFAULT_CONFIG,
 )
 from script_generator import ScriptGenerator
@@ -2536,59 +2538,75 @@ def _video_retry_shot_impl():
         if not os.path.isfile(end_p):
             return jsonify({"success": False,
                             "error": "缺少尾帧，请先执行关键帧生成（/api/keyframes/generate）"}), 400
-        prompt = comfyui_client._build_h3_prompt(
-            shot, char_refs, scene_refs, storyboard_ref={"name": f"shot_{seq}"})
-        try:
-            dur = float(shot.get('duration') or 5)
-        except (TypeError, ValueError):
-            dur = 5.0
-        seg = {"prompt": prompt, "duration": dur,
-               "reference_images": [sb_local, end_p], "name": f"shot_{seq:02d}"}
+        _seg_refs = [sb_local, end_p]
     else:
         if sb_local:
             refs = [sb_local] + main_char_img
-            prompt = comfyui_client._build_h3_prompt(
-                shot, char_refs, scene_refs, storyboard_ref={"name": f"shot_{seq}"})
         else:
             refs = ref_imgs
+        _seg_refs = refs
+    try:
+        dur = float(shot.get('duration') or 5)
+    except (TypeError, ValueError):
+        dur = 5.0
+
+    # ---- 长镜切段（P0-1，与 worker 内 _shot_segment 同口径）----
+    # 单镜重跑接口此前硬编码「一个分镜 = 一段」，与主链路的长镜切段不一致：
+    # 用户手点重跑一个 12 秒镜头时，仍会一次生成 12 秒（超出 4 秒可信窗口）。
+    # 这里改为与 _shot_segment 相同的切段 + 逐子段重建提示词逻辑。
+    _rs_sub_shots = h3_prompt_kit.segment_shot(
+        shot, dur, max_sec=h3_prompt_kit.H3_SEGMENT_MAX_SEC)
+    _rs_segs = []
+    for _rsi, _rsub in enumerate(_rs_sub_shots):
+        if mode == 'keyframe':
+            _rp = comfyui_client._build_h3_prompt(
+                _rsub, char_refs, scene_refs, storyboard_ref={"name": f"shot_{seq}"})
+        elif sb_local:
+            _rp = comfyui_client._build_h3_prompt(
+                _rsub, char_refs, scene_refs, storyboard_ref={"name": f"shot_{seq}"})
+        else:
             # 择优：既有 prompt_h3 结构合规才采用，否则用规范构建器重建
             # （历史缺陷：`shot.get('prompt_h3') or _build_h3_prompt(...)` 让
             #  剧本里那句无参考图标签的裸英文把结构化提示词整个顶掉）
-            prompt = comfyui_client.resolve_h3_prompt(shot, char_refs, scene_refs)
-        try:
-            dur = float(shot.get('duration') or 5)
-        except (TypeError, ValueError):
-            dur = 5.0
-        seg = {"prompt": prompt, "duration": dur, "reference_images": refs,
-               "name": f"shot_{seq:02d}"}
+            _rp = comfyui_client.resolve_h3_prompt(_rsub, char_refs, scene_refs)
+        _rsuf = (f"_{chr(ord('a') + _rsi)}"
+                 if len(_rs_sub_shots) > 1 and _rsi < 26 else "")
+        _rs_segs.append({"prompt": _rp,
+                         "duration": float(_rsub.get("duration") or dur),
+                         "reference_images": _seg_refs,
+                         "name": f"shot_{seq:02d}{_rsuf}"})
+    seg = _rs_segs[0]
 
     # ---- 提示词预检（生成前质检）----
     # H3 的结构缺段只有生成端能重建（必须有每张参考图的用途），所以这里做「验证 + 安全追加」，
     # 命中致命缺陷就直接拦：缺段的 H3 提示词等于出片跑偏，而一次视频生成的代价远大于一次判断。
-    prompt, _pf_v, _pgate_v = _prompt_preflight(
-        "h3", prompt, ctx=shot,
-        style=(shot.get("style") or style_kit.normalize_style(
-            (autopilot.get_plan(project) or {}).get("style"))),
-        # ⚠️ 用 seg 里的参考图数量，不要用 `refs`：关键帧分支只设 ref_images，没有 `refs`，
-        #    直接引用会 NameError（该分支走不到 else，`refs` 从未绑定）。
-        expect_refs=bool(seg.get("reference_images")),
-        project_name=project)
-    seg["prompt"] = prompt
-    if not _pgate_v.get("accept"):
-        # ★ 用户需求：视频提示词预检不通过 → 提示词唯一落盘物（P12）移回收站（同决策 1）。
-        try:
-            _purge_prompt_records(project, shot_id,
-                                  reason=f"视频提示词预检未通过（{_pgate_v.get('label')}）")
-        except Exception as _pe:  # noqa: BLE001
-            app.logger.warning(f"不合格提示词清理失败（忽略）：{_pe}")
-        return jsonify({"success": False, "prompt_qc_blocked": True,
-                        "error": f"视频提示词预检未通过（{_pgate_v.get('label')}）：{_pgate_v.get('reason')}"
-                                 + (f"；建议：{_pf_v.get('rebuild_hint')}" if _pf_v.get("rebuild_hint") else ""),
-                        "prompt_qc": _pf_v.get("verdict")}), 200
+    # ⚠️ 逐子段预检：任一子段不合格即整镜拦截（与主链路 worker 内的逐子段预检口径一致）。
+    for _ri, _rseg in enumerate(_rs_segs):
+        _rp2, _pf_v, _pgate_v = _prompt_preflight(
+            "h3", _rseg["prompt"], ctx=shot,
+            style=(shot.get("style") or style_kit.normalize_style(
+                (autopilot.get_plan(project) or {}).get("style"))),
+            # ⚠️ 用 seg 里的参考图数量，不要用 `refs`：关键帧分支只设 ref_images，没有 `refs`，
+            #    直接引用会 NameError（该分支走不到 else，`refs` 从未绑定）。
+            expect_refs=bool(_rseg.get("reference_images")),
+            project_name=project)
+        _rseg["prompt"] = _rp2
+        if not _pgate_v.get("accept"):
+            # ★ 用户需求：视频提示词预检不通过 → 提示词唯一落盘物（P12）移回收站（同决策 1）。
+            try:
+                _purge_prompt_records(project, shot_id,
+                                      reason=f"视频提示词预检未通过（{_pgate_v.get('label')}）")
+            except Exception as _pe:  # noqa: BLE001
+                app.logger.warning(f"不合格提示词清理失败（忽略）：{_pe}")
+            return jsonify({"success": False, "prompt_qc_blocked": True,
+                            "error": f"视频提示词预检未通过（{_pgate_v.get('label')}）：{_pgate_v.get('reason')}"
+                                     + (f"；建议：{_pf_v.get('rebuild_hint')}" if _pf_v.get("rebuild_hint") else ""),
+                            "prompt_qc": _pf_v.get("verdict")}), 200
 
     try:
         result = comfyui_client.generate_h3_sequence(
-            segments=[seg], filename_prefix=f"comic_drama_retry/{project}_shot_{seq:02d}",
+            segments=_rs_segs,
+            filename_prefix=f"comic_drama_retry/{project}_shot_{seq:02d}",
             seed=data.get('seed'), timeout_per_segment=int(data.get('timeout') or 900))
     except Exception as e:  # noqa: BLE001
         return jsonify({"success": False, "error": f"单镜视频重跑失败：{e}"}), 500
@@ -3169,14 +3187,19 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                 derive_error = None
                 if asset_type == "character":
                     try:
+                        # 2026-09-25：版式改为「上排 3 全身 + 下排 1 半身」分档设定图，
+                        # 故按 CHARACTER_SHEET_CELLS 做**先行后列**网格切分（行投影定上下排、
+                        # 行内列投影定格），band_fallback 给行投影失败时的确定性兜底。
                         _derived = sheet_split.split_sheet_to_files(
                             base_dst, asset_dir, CHARACTER_SHEET_VIEWS,
-                            logger=app.logger, prune=False)
+                            logger=app.logger, prune=False,
+                            cells=CHARACTER_SHEET_CELLS, grid=CHARACTER_SHEET_GRID,
+                            band_fallback=CHARACTER_SHEET_HALF_BAND)
                     except Exception as _dv_err:  # noqa: BLE001 派生失败绝不拖垮已达标的基础图
                         _derived = {}
                         derive_error = f"{type(_dv_err).__name__}: {_dv_err}"
                         app.logger.warning(
-                            "角色「%s」三视图整图切分失败，本次仅保留整图 %s"
+                            "角色「%s」设定图切分失败，本次仅保留整图 %s"
                             "（下游参考图将回退它）：%s",
                             name, os.path.basename(base_dst), _dv_err)
                     for vk, vpath in _derived.items():
@@ -3381,8 +3404,24 @@ def _build_asset_index(assets: list, project_name: str, kind: str) -> dict:
             comfyui_client.resolve_local_path(payload.get("base") or ""),
             _first_existing_asset_image(asset_dir_for_name),
         )
-        index[name] = {"name": name, "image": local,
-                       "url": f"/api/assets/{kind}s/{project_name}/{name}/front.png"}
+        entry = {"name": name, "image": local, "_dir": asset_dir_for_name,
+                 "url": f"/api/assets/{kind}s/{project_name}/{name}/front.png"}
+        # 2026-09-25 景别对档：把**逐视角**路径也挂进来，供 `_pick_char_view`
+        # 按镜头景别取「半身档 / 全身档」。角色资产自 sheet_split 改造后是
+        # front/left/right/back/half 五个独立文件（少任何一个都合法）。
+        #   ⚠️ 键只在**文件真实存在**时写入（不写空串），否则 `payload.get(k) or ""`
+        #      分辨不出「没这个档位」与「有这个档位但路径为空」。
+        #   ⚠️ `_dir` 是 `_pick_char_view` 的兜底按需推导目录（而不是批量 stat），
+        #      这样前端上报的 http URL 失效时仍能命中磁盘约定路径。
+        for _stem in ASSET_VIEW_STEMS:
+            _p = _first_existing(
+                comfyui_client.resolve_local_path(payload.get(_stem) or ""),
+                os.path.join(asset_dir_for_name, f"{_stem}.png"),
+                os.path.join(asset_dir_for_name, f"{_stem}.jpg"),
+            )
+            if _p:
+                entry[_stem] = _p
+        index[name] = entry
     return index
 
 
@@ -3433,19 +3472,90 @@ def _match_shot_chars(shot: dict, char_idx: dict) -> list:
     return out
 
 
+def _framing_wants_half(camera) -> bool:
+    """本镜的景别是否该用「半身档」参考图（近景/特写/中景 → 半身；全景/远景 → 全身）。
+
+    ## 为什么需要「景别对档」（2026-09-25）
+
+    实测根因（见 ``.workbuddy/tools/diag_framing_control.py``）：分镜模板 ``<image1>``
+    是**主画布**，角色参考图原先是 736x736 的**全身**立绘；cover 到 9:16 竖屏要
+    左右各裁一半 → 模型为保住「完整的全身」只能把人物缩小 → **系统性偏全景/远景**。
+    近景/特写要求「只拍局部」，与立绘「保全身」方向相反 → 被拉回、画不出来
+    （实测 shot_24 规定近景、出图近全身，质检却因容差放行）。
+
+    业界通行做法就是「**参考图的景别要接近目标镜头**」（要特写，参考图也尽量用特写）。
+    故：角色设定图补一格**正面半身胸像**（``half``），近景/特写/中景镜头取它当
+    ``<image1>``，画幅与景别同向，画幅对抗即消失。
+
+    ⚠️ 判据用 ``camera_key``（已能解析「特写推入」「中景跟拍」等复合写法）；
+    但**必须先挡掉空值**：``camera_key('')`` 会返回 ``'中景'``（那是给生成端用的
+    默认档，不是「本镜是中景」）—— 直接复用会把「景别未指定」误判成中景。
+    景别**未指定**时返回 False（全身档）：全身档是画幅对抗最小的默认，
+    且近景档是「新增资源」，只在明确要近景时才用（不给存量资产凭空换档）。
+    """
+    _raw = str(camera or "").strip()
+    if not _raw:
+        return False
+    k = _camera_key(_raw)
+    return k in ("特写", "近景", "中景")
+
+
+def _pick_char_view(char_payload: dict, want_half: bool) -> str:
+    """按景别从角色资产里挑一张参考图：``want_half`` 优先半身档，否则优先全身档。
+
+    ⚠️ 必须**优雅降级**：新资产才有 ``half.png``（2026-09-25 起），存量项目只有
+    ``front.png``/``base.png``。找不到想要的档位时**逐级回退**，绝不返回空
+    （返回空会让该镜头判成「无可用参考图」而 400，把「档位缺失」升级成「不能出图」）。
+    回退链：
+      · 要半身 → half → front → base（旧资产没有半身档，用全身档总比没有强）
+      · 要全身 → front → base → half（极端情况下至少给一张）
+    每一级都要求文件存在且非空（复用既有 ``_first_existing`` 口径）。
+    """
+    payload = char_payload or {}
+    # 半身档键名取自 config.CHARACTER_HALF_VIEWS（当前是 ("half",)）——不硬编码
+    # 字符串，日后加「正面半身 / 侧面半身」两档时只需改 config，这里自动跟着走。
+    order = (tuple(CHARACTER_HALF_VIEWS) + ("front", "base")) if want_half \
+        else (("front", "base") + tuple(CHARACTER_HALF_VIEWS))
+    cands = [comfyui_client.resolve_local_path(payload.get(k) or "") for k in order]
+    # 资产目录约定路径兜底（前端未上报时）
+    d = payload.get("_dir")
+    if d and os.path.isdir(d):
+        cands += [os.path.join(d, f"{k}.png") for k in order]
+    return _first_existing(*cands) or ""
+
+
 def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_idx: dict,
                                project_name: str = None) -> list:
-    """为单个镜头分配最多 3 张参考图（对应分镜工作流的 3 个参考图槽位）
+    """为单个镜头分配参考图（Qwen-Image-2.1 reference stack，最多 9 张）
 
     槽位键名随编辑节点换代而变（QwenImage2.1 的 TextEncodeQwenImage21 是
-    ``images.image_1..3``，老的 TextEncodeQwenImageEditPlus 是 ``image1..3``），
-    由 comfyui_client._find_image_slots 统一识别；本函数只负责**按序**给出这 3 张图。
+    ``images.image_1..9``，老的 TextEncodeQwenImageEditPlus 是 ``image1..3``），
+    由 comfyui_client._find_image_slots 统一识别；本函数只负责**按序**给出这些图。
 
-    槽位语义（按重要性排序）：
-      1) 主角色正视图 —— 人物外观锚点（S6：匹配不到任何角色时不再 take-first，
-         而是让调用方走 no_reference 分支 → 400 / 跳过 + 警告日志）
-      2) 次要角色正视图，缺则用镜头内物品正视图（物品/道具锚点）
-      3) 镜头场景正视图（环境氛围锚点）
+    ## 为什么改成 9 槽位（2026-09-25）
+
+    Qwen-Image-2.1 官方规格支持最多 10 张参考图，且官方 Prompt Rewriter 的核心是
+    **Attribute Disentanglement**（属性解耦）：每张参考图解决**一个明确问题**，
+    由 ``<image1>…<imageN>`` 显式编号绑定职责。官方同时强调「10 是容量不是目标」——
+    塞重复图片会让模型分不清哪张优先。
+
+    旧实现按「主角色 / 次要 / 场景」压成 3 张，导致：多角色镜头第 3 人起直接丢失、
+    服装与身份混在同一张图、道具只能挤占角色槽位 —— 这些正是质检重灾区
+    （角色/背景不一致 16+11 次）。
+
+    ## 槽位分工（固定顺序，与 build_storyboard_prompt 的 <imageN> 编号一一对应）
+
+      1. ``<image1>`` 主角色身份锚点 —— 兼作画布/构图基线（官方：image_1 是 edit target）
+      2. ``<image2>`` 次角色身份（多角色镜头才有；让模型独立保身份，禁止特征串味）
+      3. ``<image3>`` 第三角色身份（三人同框时才有）
+      4. ``<image4>`` 主角色服装（角色资产图与服装资产不同图时才有独立槽位）
+      5. ``<image5>`` 场景
+      6. ``<image6>`` 道具（镜头内物品，可多个）
+      7. ``<image7>`` 构图参考（特写镜头放头部特写锚点）
+      8. ``<image8>`` 上一镜连续性锚点（同场景承接时才有）
+
+    只填**实际需要**的前 N 个：未用到的尾部槽位在生成端被留空
+    （见 generate_storyboard 的 slot_cleared），不会塞重复图。
     """
     chars_in = _match_shot_chars(shot, char_idx)
     items_in = [n for n in (shot.get("items_in_shot") or []) if n in item_idx]
@@ -3458,35 +3568,64 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
         shot["_ref_error"] = (
             f"镜头 {shot.get('shot_id')} 的角色 {shot.get('characters_in_shot')} "
             f"在资产索引中均无匹配（别名归一化后仍无）")
-    main_name = chars_in[0] if chars_in else None
-    main_img = char_idx.get(main_name, {}).get("image") if main_name else None
-    if main_img:
-        refs.append(("主角色", f"参考图1是角色「{main_name}」的外貌、服装与发型", main_img))
 
-    second_img, second_label = None, None
-    for cand_name in chars_in[1:]:
-        img = char_idx.get(cand_name, {}).get("image")
-        if img and img != main_img:
-            second_img, second_label = img, f"参考图2是角色「{cand_name}」的外貌与服装"
-            break
-    if not second_img:
-        for cand_name in items_in:
-            img = item_idx.get(cand_name, {}).get("image")
-            if img and img != main_img:
-                second_img, second_label = img, f"参考图2是物品「{cand_name}」的形状、材质与配色"
-                break
-    if second_img:
-        refs.append(("次要参考", second_label, second_img))
+    used_paths = set()
+    # 本镜景别决定角色参考图取「半身档」还是「全身档」（画幅与景别同向，消除对抗）。
+    _want_half = _framing_wants_half(shot.get("camera"))
 
+    # ---- <image1>…<image3>：角色身份锚点（逐个独立，禁止特征串味）----
+    # 官方要点：多角色时每人一张图 + 明确「independently / Do not merge facial features」，
+    # 否则最常见的失败就是 A 的脸跑到 B、B 的衣服跑到 C。
+    for i, name in enumerate(chars_in):
+        if i >= 3:
+            break                       # 3 个角色身份槽位；第 4 人起并入构图说明
+        payload = char_idx.get(name, {}) or {}
+        # 2026-09-25 景别对档：近景/特写/中景优先取 half.png（半身胸像），
+        # 全景/远景优先取 front.png（全身）；档位缺失时逐级回退（见 _pick_char_view）。
+        img = _pick_char_view(payload, _want_half)
+        if not img or img in used_paths:
+            continue
+        used_paths.add(img)
+        _zoom = "半身近景" if _want_half else "全身"
+        if i == 0:
+            refs.append(("主角色",
+                         f"参考图1（<image1>）是角色「{name}」的身份锚点（{_zoom}视图）："
+                         f"保持其面部身份、发型与体型不变", img))
+        else:
+            refs.append(("次角色",
+                         f"参考图{i + 1}（<image{i + 1}>）是角色「{name}」的身份锚点（{_zoom}视图）："
+                         f"独立保持其面部身份与发型，不得与其他角色特征混用", img))
+
+    # ---- <imageN>：场景（角色之后，作为环境锚点）----
     loc = shot.get("location")
     scene_name = loc if loc in scene_idx else None
     scene_img = scene_idx.get(scene_name, {}).get("image") if scene_name else None
+    if scene_img and scene_img in used_paths:
+        scene_img = None
+
+    # ---- <imageN>：道具（镜头内物品，可多个但最多 2 张，避免挤占角色槽位）----
+    item_refs = []
+    for cand in items_in:
+        if len(item_refs) >= 2:
+            break
+        img = item_idx.get(cand, {}).get("image")
+        if not img or img in used_paths or img == scene_img:
+            continue
+        used_paths.add(img)
+        item_refs.append((cand, img))
+
+    slot_no = len(refs) + 1
     if scene_img:
-        used = {r[2] for r in refs}
-        if scene_img in used:
-            scene_img = None
-    if scene_img:
-        refs.append(("场景", f"参考图3是场景「{scene_name}」的环境与氛围", scene_img))
+        refs.append(("场景",
+                     f"参考图{slot_no}（<image{slot_no}>）是场景「{scene_name}」的环境与氛围锚点："
+                     f"环境的结构与氛围保持一致", scene_img))
+        used_paths.add(scene_img)
+        slot_no += 1
+    for cand, img in item_refs:
+        refs.append(("道具",
+                     f"参考图{slot_no}（<image{slot_no}>）是物品「{cand}」的形状、材质与配色锚点",
+                     img))
+        slot_no += 1
 
     return _apply_closeup_ref_strategy(refs, shot, project_name)
 
@@ -3540,14 +3679,26 @@ def _apply_closeup_ref_strategy(refs: list, shot: dict, project_name: str = None
 
     实测（4 轮 12 次生成）：混入场景/道具参考时，模型会按参考图的取景范围把画面
     铺开成中全景，并把道具画回手中；道具参考剔除后模型仍会自行"想象"出手持物。
-    因此特写镜头只给头部特写锚点（多出的槽位自动复用同一张），构图约束最强。
+    因此特写镜头只给头部特写锚点，构图约束最强。
+
+    ⚠️ 2026-09-25 口径变化（Qwen-Image-2.1 9 槽位）：
+      旧实现「多出的槽位自动复用同一张」在 9 槽模板下会把头部特写复制到 8 个槽位，
+      而官方明确「容量不是目标，重复图反而稀释注意力」。现在特写镜头**只输出 1 张**
+      （主角色头部特写，占 ``<image1>``），其余槽位由生成端留空。
+      多角色特写时保留每个角色的头部特写（各占一槽），不复制。
     """
     if "特写" not in str(shot.get("camera") or ""):
         return refs
     out = []
     for kind, label, path in refs:
-        if kind == "主角色":
-            out.append((kind, label + "（已替换为该角色头部特写，画面取景范围以此为准：仅肩部以上）",
+        if kind in ("主角色", "次角色"):
+            # 保留 <imageN> 编号锚点，让质检端能继续核对「编号 ↔ 职责」一致性。
+            _mark = ""
+            if label.startswith("参考图"):
+                _head = label.split("）", 1)[0]
+                _mark = _head.split("（", 1)[0] + "（"
+            out.append((kind,
+                        _mark + "已替换为该角色头部特写，画面取景范围以此为准：仅肩部以上",
                         _closeup_char_crop(path, project_name, shot.get("shot_id", 1))))
     return out or refs
 
@@ -3932,10 +4083,16 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                         with lock:
                             generation_state[task_id]["phase"] = f"图片质检中（镜头 {shot_id} · 第 {attempt + 1} 次）"
                             generation_state[task_id]["qc_phase"] = "checking"
-                        verdict = qc_client.check_image(scratch_png, _qc_shot_desc(shot), qc_cfg,
-                                                        style=(shot.get("style") or _sb_style),
-                                                        ref_images=_qc_ref_images(
-                                                            shot, char_idx, item_idx, scene_idx, refs))
+                        verdict = qc_client.check_image(
+                            scratch_png, _qc_shot_desc(shot), qc_cfg,
+                            style=(shot.get("style") or _sb_style),
+                            ref_images=_qc_ref_images(
+                                shot, char_idx, item_idx, scene_idx, refs),
+                            # ---- 跨镜连续性（P1，2026-09-25）----
+                            # 只在**同场景**时给上一镜信息：跨场景切换本就该换背景换光，
+                            # 拿上一镜去比会判出一堆假缺陷（与 keyframe.same_scene 同判据）。
+                            prev_shot_desc=_qc_prev_shot_desc(shots, i),
+                            prev_shot_ref=_qc_prev_shot_ref(shots, i, out_dir))
                         rec = _qc_record_verdict(project_name, "image", shot_id, "图片质检",
                                                  attempt + 1, seed, scratch_png, verdict,
                                                  style=(shot.get("style") or _sb_style))
@@ -4615,9 +4772,6 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                            or kf_start_map.get(f"shot_{seq:02d}") or sb_local)
                 end_p = kf_end_map.get(str(sid)) or kf_end_map.get(f"shot_{seq:02d}")
                 refs = [start_p] + ([end_p] if end_p else [])
-                prompt = comfyui_client._build_h3_prompt(
-                    shot, character_refs, scene_refs,
-                    storyboard_ref={"name": f"shot_{sid}"})
             elif sb_local:
                 # B-18 P1-7：参考图按 characters_in_shot 逐镜匹配，不再全段共用 main_char_img
                 # H3 参考图上限 2 张：[分镜图, 本镜主角锚点]
@@ -4633,40 +4787,76 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                 else:
                     # 兜底：逐镜匹配失败时回退到全局主角锚点（保持原行为）
                     refs = [sb_local] + main_char_img
-                prompt = comfyui_client._build_h3_prompt(
-                    shot, character_refs, scene_refs,
-                    storyboard_ref={"name": f"shot_{sid}"})
             else:
                 refs = ref_imgs
-                # 择优：合规的既有 prompt_h3 直接用，否则规范重建（见 resolve_h3_prompt 说明）
-                prompt = comfyui_client.resolve_h3_prompt(
-                    shot, character_refs, scene_refs)
             try:
                 dur = float(shot.get('duration') or 5)
             except (TypeError, ValueError):
                 dur = 5.0
-            # ---- 提示词预检（生成前质检）----
-            # ⚠️ 这里**只自愈 + 记录，不阻断**：整集模式一次提交 N 段，为一条提示词的问题把
-            #    整集生成打断，代价远大于收益；且 H3 提示词由构建器产出、结构必然齐全，
-            #    出现 fatal 只可能是构建器自身有 bug —— 那更该留下证据继续跑，
-            #    而不是让整集静默失败。单镜重跑接口（用户显式只跑一镜）才做硬阻断。
-            prompt, _pf_seg, _pgate_seg = _prompt_preflight(
-                "h3", prompt, ctx=shot,
-                style=(shot.get("style") or _style_res.get("style") or ""),
-                expect_refs=bool(refs), project_name=project_name,
-                cfg=qc_cfg)   # G13：复用 worker 级质检配置，避免逐镜再读盘+解密
-            seg = {"prompt": prompt, "duration": dur, "reference_images": refs,
-                   "name": f"shot_{seq:02d}"}
-            if _pf_seg.get("repairs") or (_pf_seg.get("verdict") or {}).get("issues"):
-                seg["prompt_qc"] = _pf_seg.get("verdict")
-                seg["prompt_qc_repairs"] = _pf_seg.get("repairs") or []
-            if not _pgate_seg.get("accept"):
-                seg["prompt_qc_blocked"] = True
-                app.logger.warning("镜头 %s 视频提示词预检未通过（%s）：%s",
-                                   shot.get("shot_id"), _pgate_seg.get("label"),
-                                   _pgate_seg.get("reason"))
-                # ★ 用户需求：不合格提示词不留本地（P12）。整集模式该段不生成，
-                # 把可能存在的上一轮 `prompt_<shot>.json` 移回收站。
+            # ---- 长镜切段（需求 J / P0-1，2026-09-25）----
+            # 业界共识：AI 视频可信窗口约 4 秒，超过后段易崩坏。本项目剧本单镜普遍
+            # 4.5~12 秒（实测第1集 27/27 超线、第2集 28/29 超线），故在**生成期**把长镜
+            # 拆成多个 ≤H3_SEGMENT_MAX_SEC 的子段，一次提交让 H3 原生段间衔接出**一条**
+            # 连续视频 —— 落盘仍是单个 shot_XX.mp4，命名契约（probe_video / dub_mix /
+            # _SHOT_RE）全部不受影响；总时长严格守恒（segment_durations 均摊且 sum 不变），
+            # 故配音时间轴与成片长度也不变。
+            # ⚠️ 每个子段要用**子段时长**重建提示词：否则 4 秒的段会被塞进 12 秒的节拍，
+            #    段内动作空转、台词位置也会整体后移。
+            _seg_shots = h3_prompt_kit.segment_shot(
+                shot, dur, max_sec=h3_prompt_kit.H3_SEGMENT_MAX_SEC)
+            _multi_seg = len(_seg_shots) > 1
+            _segs = []
+            for _si, _sub in enumerate(_seg_shots):
+                _sub_dur = float(_sub.get("duration") or dur)
+                # 提示词按子段重建（keyframe / reference 两条参考图分支共用同一构建入口）
+                if mode == 'keyframe' and sb_local:
+                    _sub_prompt = comfyui_client._build_h3_prompt(
+                        _sub, character_refs, scene_refs,
+                        storyboard_ref={"name": f"shot_{sid}"})
+                elif sb_local:
+                    _sub_prompt = comfyui_client._build_h3_prompt(
+                        _sub, character_refs, scene_refs,
+                        storyboard_ref={"name": f"shot_{sid}"})
+                else:
+                    _sub_prompt = comfyui_client.resolve_h3_prompt(
+                        _sub, character_refs, scene_refs)
+                # ---- 提示词预检（生成前质检）----
+                # ⚠️ 这里**只自愈 + 记录，不阻断**：整集模式一次提交 N 段，为一条提示词的问题把
+                #    整集生成打断，代价远大于收益；且 H3 提示词由构建器产出、结构必然齐全，
+                #    出现 fatal 只可能是构建器自身有 bug —— 那更该留下证据继续跑，
+                #    而不是让整集静默失败。单镜重跑接口（用户显式只跑一镜）才做硬阻断。
+                _sub_prompt, _pf_seg, _pgate_seg = _prompt_preflight(
+                    "h3", _sub_prompt, ctx=_sub,
+                    style=(shot.get("style") or _style_res.get("style") or ""),
+                    expect_refs=bool(refs), project_name=project_name,
+                    cfg=qc_cfg)   # G13：复用 worker 级质检配置，避免逐镜再读盘+解密
+                # 单段时名字保持旧样式 shot_07（与历史日志/画布标识一致）；
+                # 多段时标 shot_07_a/_b/_c 仅供日志辨识，**不参与落盘命名**。
+                _suffix = (f"_{chr(ord('a') + _si)}"
+                           if _multi_seg and _si < 26 else "")
+                _segs.append({"prompt": _sub_prompt, "duration": _sub_dur,
+                              "reference_images": refs,
+                              "name": f"shot_{seq:02d}{_suffix}"})
+                if _pf_seg.get("repairs") or (_pf_seg.get("verdict") or {}).get("issues"):
+                    _segs[-1]["prompt_qc"] = _pf_seg.get("verdict")
+                    _segs[-1]["prompt_qc_repairs"] = _pf_seg.get("repairs") or []
+                if not _pgate_seg.get("accept"):
+                    _segs[-1]["prompt_qc_blocked"] = True
+                    app.logger.warning("镜头 %s 视频提示词预检未通过（%s）：%s",
+                                       shot.get("shot_id"), _pgate_seg.get("label"),
+                                       _pgate_seg.get("reason"))
+            seg = _segs[0]
+            if _multi_seg:
+                app.logger.info(
+                    "[长镜切段] project=%s shot=%s %ss → %d 段 %s（每段 ≤%ss，总时长守恒）",
+                    project_name, shot.get("shot_id"), dur, len(_segs),
+                    "/".join(f"{s['duration']:.2f}" for s in _segs),
+                    h3_prompt_kit.H3_SEGMENT_MAX_SEC)
+            elif not _pgate_seg.get("accept"):
+                # ⚠️ 用户需求：不合格提示词不留本地（P12）。整集模式该段不生成，
+                #    把可能存在的上一轮 `prompt_<shot>.json` 移回收站。
+                #    多段时（_multi_seg）暂不按段清理：一条 prompt 记录对应一个 shot_id，
+                #    按子段清理会把同一镜的记录反复移动，留到质检汇总里处理。
                 try:
                     _purge_prompt_records(project_name, shot.get("shot_id") or seq,
                                           reason=f"视频提示词预检未通过（{_pgate_seg.get('label')}）")
@@ -4687,10 +4877,19 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                 shot_id = shot.get('shot_id', i + 1)
                 seq = _shot_seq(shot_id, i + 1)
                 seg, sb_local = _shot_segment(shot, seq, qc_cfg)
-                segs.append(seg)
-                shot_meta_map.append({"shot_id": shot_id, "seq": seq,
-                                      "duration": seg["duration"],
-                                      "used_storyboard": bool(sb_local)})
+                # ⚠️ 整集模式**每个分镜可能产出多个段**（长镜切段，见 _shot_segment）。
+                # 必须 extend 而非 append：H3 工作流段数 = len(segments)，少一段就等于
+                # 该镜只生成了一半时长；且段顺序即时间轴顺序，extend 保持镜头内子段连续。
+                _shot_segs = seg if isinstance(seg, list) else [seg]
+                segs.extend(_shot_segs)
+                # shot_meta_map 是**按镜头**的报表（每镜一条），时长取该镜各子段之和 ——
+                # 与切段前的 seg["duration"] 口径一致，前端/报表不会因切段而变。
+                shot_meta_map.append({
+                    "shot_id": shot_id, "seq": seq,
+                    "duration": round(sum(float(s.get("duration") or 0)
+                                          for s in _shot_segs), 3),
+                    "segment_count": len(_shot_segs),
+                    "used_storyboard": bool(sb_local)})
             # 质检开关结论已在上方 worker 级算好（与 per_shot 保持一致）
             eff_style = (shot.get("style") if shot else None) or _style_res.get("style") or ""
             # [教训][video] 诊断（§2.3.5）：qc_off = 质检总开关/类型开关/接口任一未就绪
@@ -4977,7 +5176,20 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
 
             try:
                 seg, sb_local = _shot_segment(shot, seq, qc_cfg)   # G13：传 worker 级配置
+                # ⚠️ 长镜切段（P0-1）：_shot_segment 现在返回**列表**（1 个或 N 个子段）。
+                # per_shot 模式把 N 个子段一次性提交给 H3，由其原生段间衔接产出**一条**
+                # 连续视频 → 落盘仍是单个 shot_XX.mp4，命名与质检契约完全不变。
+                segs_list = seg if isinstance(seg, list) else [seg]
+                seg = segs_list[0]
                 prompt = seg["prompt"]
+                _shot_total_dur = round(sum(float(s.get("duration") or 0)
+                                            for s in segs_list), 3)
+                if len(segs_list) > 1:
+                    app.logger.info(
+                        "[长镜切段] project=%s shot=%s %d 段总 %ss %s（每段 ≤%ss）",
+                        project_name, shot_id, len(segs_list), _shot_total_dur,
+                        "/".join(f"{s['duration']:.2f}" for s in segs_list),
+                        h3_prompt_kit.H3_SEGMENT_MAX_SEC)
 
                 # ---------- 视频 AI 质检（抽帧送检，不达标自动重生成） ----------
                 # G13：qc_cfg/qc_on/qc_declared/max_retries 已在 per_shot worker 级读一次（见上方），
@@ -4994,8 +5206,8 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                 seed = random.randint(1, 2 ** 31 - 1)
                 dst = os.path.join(videos_dir, f"shot_{seq:02d}.mp4")
                 video_item = {"shot_id": shot_id, "success": False,
-                              "mode": "per_shot", "segment_count": 1,
-                              "duration": seg.get("duration"),
+                              "mode": "per_shot", "segment_count": len(segs_list),
+                              "duration": _shot_total_dur,
                               "used_storyboard": bool(sb_local)}
                 orig_video_prompt = prompt     # 教训库稳定键（改写后的提示词不参与指纹）
 
@@ -5030,9 +5242,12 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                     with lock:
                         if attempt == 0:
                             generation_state[task_id]["phase"] = f"视频生成中（镜头 {shot_id}）"
-                    # 一个分镜 = 一段：按分镜数动态构建工作流，此处段数固定为 1
+                    # 一个分镜 = 一段或多段（长镜切段，P0-1）：段数 = len(segs_list)，
+                    # 由 H3 原生段间衔接产出**一条**连续视频，故落盘仍是单个 shot_XX.mp4。
+                    # ⚠️ 重试时只改写**首段**提示词（教训库键基于整镜提示词），
+                    #    其余子段按原样重提交，保持镜头内动作连贯。
                     result = comfyui_client.generate_h3_sequence(
-                        segments=[seg],
+                        segments=segs_list,
                         filename_prefix=f"comic_drama/{project_name}_shot_{seq:02d}",
                         seed=seed,
                         timeout_per_segment=timeout_per_segment,
@@ -7276,6 +7491,65 @@ def _qc_shot_desc(shot: dict) -> str:
     if shot.get("dialogue"):
         parts.append(f"台词：{str(shot['dialogue']).strip()[:80]}")
     return "；".join(parts)[:900] or "（无镜头描述）"
+
+
+def _qc_prev_shot_desc(shots: list, idx: int) -> str:
+    """取「上一镜」的文字描述，供图片质检做跨镜连续性比对（P1，2026-09-25）
+
+    ⚠️ 只在**同场景**时返回：跨场景切换本就该换背景、换光位，拿上一镜去比会判出
+    一堆假缺陷（与 ``keyframe.same_scene`` 同一判据，口径保持一致）。
+    首镜、或上一镜不同场景 → 返回空串，``check_image`` 便完全不加连续性口径
+    （零行为变更，也不会诱发模型凭「上一镜」三个字臆造缺陷）。
+    """
+    try:
+        i = int(idx)
+    except (TypeError, ValueError):
+        return ""
+    if i <= 0 or i >= len(shots or []):
+        return ""
+    prev = shots[i - 1] if isinstance(shots[i - 1], dict) else {}
+    cur = shots[i] if isinstance(shots[i], dict) else {}
+    _same = False
+    for k in ("location", "scene_id", "scene", "scene_name"):
+        a = str(prev.get(k) or "").strip()
+        b = str(cur.get(k) or "").strip()
+        if a and b:
+            _same = (a == b)
+            break
+    else:
+        # 两边都没写场景信息 → 无法判定「是否换场」。宁可**不启用**连续性判定
+        # （不给描述比给错描述安全：错描述会让模型把正常换场判成缺陷）。
+        _same = False
+    if not _same:
+        return ""
+    bits = []
+    if prev.get("camera"):
+        bits.append(f"景别 {str(prev['camera']).strip()}")
+    if prev.get("description"):
+        bits.append(str(prev["description"]).strip()[:200])
+    return "；".join(bits)[:300]
+
+
+def _qc_prev_shot_ref(shots: list, idx: int, out_dir: str) -> str:
+    """取「上一镜」已入库的分镜图路径，供图片质检真正做画面级比对（P1）
+
+    与 :func:`_qc_prev_shot_desc` 同判据（仅同场景）。**只取正式目录里已通过的图**
+    （``out_dir/shot_NN.png``）—— 不达标的图留在暂存区，拿它当基准会把缺陷传播下去。
+    首镜 / 跨场景 / 上一镜尚未入库 → 返回空串。
+    """
+    if not _qc_prev_shot_desc(shots, idx):
+        return ""
+    try:
+        i = int(idx)
+    except (TypeError, ValueError):
+        return ""
+    prev = shots[i - 1] if isinstance(shots[i - 1], dict) else {}
+    try:
+        pseq = _shot_seq(prev.get("shot_id"), i)
+    except Exception:  # noqa: BLE001
+        return ""
+    p = os.path.join(out_dir, f"shot_{pseq:02d}.png")
+    return p if os.path.isfile(p) else ""
 
 
 def _qc_ref_images(shot: dict, char_idx: dict, item_idx: dict, scene_idx: dict,

@@ -66,11 +66,53 @@ DEFAULT_MODE = "repair"
 # --------------------------------------------------------------------------- #
 # 分镜图提示词：骨架标记（与 build_storyboard_prompt 一一对应）
 # --------------------------------------------------------------------------- #
-SB_MARK_FRAMING = "景别（必须严格遵守）"
-SB_MARK_CONTENT = "动作与画面内容"
-SB_MARK_REF_USAGE = "参考图用途"
-SB_MARK_STYLE = "画面风格"
-SB_MARK_NO_TEXT = "不得出现任何文字、字幕、台词文本、水印"
+# ⚠️ 2026-09-25：图片链路切到 QwenImage2.1 后，提示词协议从中文分节（【取景】…）
+# 改为官方 Prompt Rewriter 的英文 <imageN> 协议（TASK / PRIMARY CANVAS / IDENTITY /
+# REFERENCE ROLES / PRESERVE，见 comfyui_client.build_storyboard_prompt 的 docstring）。
+# 本层的判据必须与生成端**同源**，否则会出现「生成端一个标准、质检端另一个标准」的
+# 历史坑（景别判定曾因两端标准不同，把 43% 的镜头误判为不合格）。
+SB_MARK_TASK = "TASK:"
+#: 景别硬约束（旧版标记，保留兼容存量数据：2026-09-25 之前生成的提示词里是中文）
+SB_MARK_FRAMING_LEGACY = "景别（必须严格遵守）"
+SB_MARK_FRAMING_NEW = "FRAMING (must be strictly followed)"
+#: 景别**未指定**时的显式声明（camera 只给了机位/运镜）
+#: ⚠️ 此时提示词里不含任何景别词，若仍按「必须有 FRAMING 硬约束」判，会整批假红。
+SB_MARK_FRAMING_UNSPEC = "FRAMING (not specified"
+#: 画面内容段（新旧两种写法）
+SB_MARK_CONTENT = "SCENE AND ACTION:"
+SB_MARK_CONTENT_LEGACY = "【画面内容】"
+#: 参考图职责段（官方协议要求每张图有唯一职责）
+SB_MARK_REF_USAGE = "REFERENCE ROLES:"
+SB_MARK_REF_USAGE_LEGACY = "参考图用途"
+#: 画布/身份锚点段
+SB_MARK_CANVAS = "PRIMARY CANVAS:"
+SB_MARK_IDENTITY = "IDENTITY:"
+#: 保留子句（官方 Preservation Clause）
+SB_MARK_PRESERVE = "PRESERVE:"
+SB_MARK_PRESERVE_LEGACY = "【禁令】"
+#: 保留子句的 blanket 写法（官方推荐，避免逐项罗列反复触发生成）
+SB_PRESERVE_BLANKET = "Keep all untargeted content unchanged"
+#: 风格段（新旧两种写法）
+SB_MARK_STYLE = "STYLE:"
+SB_MARK_STYLE_LEGACY = "【风格】"
+#: 无参考图时的显式声明
+SB_MARK_NO_REF = "No reference image is provided for this shot"
+SB_MARK_NO_REF_LEGACY = "本镜无参考图"
+#: 身份必须指向参考图（官方要点：不要用文字重述五官）
+SB_MARK_IDENTITY_FROM_REF = "Preserve the exact identity from"
+#: 无文字禁令（新旧两种措辞）
+SB_MARK_NO_TEXT = "must not contain any text"
+SB_MARK_NO_TEXT_LEGACY = "不得出现任何文字、字幕、台词文本、水印"
+#: 参考图编号标记：官方协议的核心，提示词里**必须**用 <imageN> 而非自然语言指代
+SB_IMAGE_TAG_RE = re.compile(r"<image\s*(\d+)\s*>", re.IGNORECASE)
+#: 自然语言指代参考图（官方明确禁用，会产生歧义）
+SB_VAGUE_REF_RE = re.compile(
+    r"(?:第一张图|第二张图|第三张图|图\s*[ABC1-9]|左边那张|右边那张|人物参考图|"
+    r"the first image|the second image|image\s+[A-C]\b)",
+    re.IGNORECASE)
+
+#: 分镜图「取景段」判定用：景别中文词（新协议里 FRAMING 行仍写中文景别词）
+SB_FRAMING_KEYS: Tuple[str, ...] = ("特写", "近景", "中景", "全景", "远景")
 
 #: H3 提示词里的无文字声明（build_detailed_description 结尾固定句）
 H3_NO_TEXT = "严禁出现任何文字、字幕、台词文本、水印"
@@ -207,16 +249,31 @@ def style_declared(text: str, style) -> bool:
 
     按**词**比对而不是整句比对：模型/历史数据常写「…，中国古风玄幻漫剧风格。」
     这种漏冒号的写法，整句比对会把已有的风格判成缺失，进而重复追加（双重风格）。
+
+    ⚠️ 2026-09-25：QwenImage2.1 分镜提示词改为**英文**（``STYLE: Style: Chinese
+    animated style, 3D.``），而 ``_style_clause`` 给的是中文 token（「国漫3D渲染」）。
+    若仍只比中文 token，英文提示词会 100% 被判「未声明风格」→ 触发自愈重复追加中文
+    风格句（中英风格双写）。故增加英文 token 比对（``style_kit.style_suffix_en``）。
     """
     clause = _style_clause(style)
     if not clause:
         return True
-    body = clause.split("：", 1)[-1]
-    toks = [t.strip() for t in body.split("，") if t.strip()]
+    toks = [t.strip() for t in clause.split("：", 1)[-1].split("，") if t.strip()]
     if not toks:
         return True
     hay = text.lower()
-    return any(t.lower() in hay for t in toks)
+    if any(t.lower() in hay for t in toks):
+        return True
+    # 英文写法：把同一风格串的英文 token 也纳入比对
+    en_toks: List[str] = []
+    try:
+        en_clause = style_kit.style_suffix_en(style, with_tail=False)
+        if en_clause:
+            body = en_clause.split(":", 1)[-1]
+            en_toks = [t.strip().lower() for t in body.split(",") if t.strip()]
+    except Exception:  # noqa: BLE001
+        en_toks = []
+    return any(t in hay for t in en_toks)
 
 
 def _section_body(prompt: str, name: str) -> str:
@@ -282,6 +339,41 @@ def _has_shot_content(ctx) -> bool:
 # 分镜图提示词检查
 # --------------------------------------------------------------------------- #
 
+def _has_section(text: str, name: str) -> bool:
+    """提示词里是否存在**真正的**段标题（行首的 ``NAME:``）
+
+    ⚠️ 不能用 ``name in text``：段名是另一个单词的尾串时会被误判存在
+    （``PRESERVE:`` 是 ``XPRESERVE:`` 的子串；``IDENTITY:`` 也可能出现在正文里）。
+    行首锚定 + 允许前置空白，与 build_storyboard_prompt 的输出格式一致。
+    """
+    if not text or not name:
+        return False
+    pat = re.compile(r"^[ \t]*" + re.escape(name), re.MULTILINE | re.IGNORECASE)
+    return bool(pat.search(text))
+
+
+def _has_any(text: str, *marks: str) -> bool:
+    """任一标记命中（用于兼容新旧两种协议写法的段落判存在）"""
+    return any(m in (text or "") for m in marks if m)
+
+
+def _new_protocol(text: str) -> bool:
+    """提示词是否用 Qwen-Image-2.1 官方 <imageN> 协议生成
+
+    判据用 ``TASK:`` + ``PRESERVE:`` 两个只在官方协议里出现的段名 —— 存量项目按旧中文
+    分节生成，若按新标准去要求它们，会整批假红（生成端未改、质检端先改）。
+    因此本层的「结构类」判定按协议分流：新协议按新骨架判、旧协议按旧骨架判。
+    """
+    t = text or ""
+    return SB_MARK_TASK in t or SB_MARK_PRESERVE in t
+
+
+def _ref_tag_indices(text: str) -> List[int]:
+    """提示词里出现的 <imageN> 编号（去重升序）"""
+    got = sorted({int(m.group(1)) for m in SB_IMAGE_TAG_RE.finditer(text or "")})
+    return got
+
+
 def _check_storyboard(prompt: str, ctx, style, ref_count: Optional[int] = None,
                       **_kw) -> Dict[str, Any]:
     issues: List[str] = []
@@ -294,16 +386,79 @@ def _check_storyboard(prompt: str, ctx, style, ref_count: Optional[int] = None,
     if not _has_shot_content(ctx):
         fatal.append("镜头缺少画面描述（description / visual_detail / storyboard_prompt_zh 均为空）")
 
-    if SB_MARK_CONTENT not in prompt:
-        issues.append("缺少「动作与画面内容」段：模型只能自行想象画面")
-    if SB_MARK_FRAMING not in prompt:
-        issues.append("缺少「景别（必须严格遵守）」段：景别不受控，容易跑偏成中景")
-    if ref_count and SB_MARK_REF_USAGE not in prompt:
-        issues.append("给了参考图但未声明「参考图用途」：模型不知道每张图该参考什么")
-    if SB_MARK_NO_TEXT not in prompt:
+    new_proto = _new_protocol(prompt)
+
+    if new_proto:
+        # ---------- Qwen-Image-2.1 官方 <imageN> 协议 ----------
+        if not _has_section(prompt, SB_MARK_PRESERVE) \
+                and SB_MARK_PRESERVE_LEGACY not in prompt:
+            issues.append("缺少 PRESERVE 段：未声明「未指定内容保持不变」，画面易整体重画")
+        elif SB_PRESERVE_BLANKET not in prompt:
+            issues.append("PRESERVE 段缺少 blanket 保留子句（Keep all untargeted content "
+                          "unchanged）：逐项罗列会重复触发生成")
+        if not _has_section(prompt, SB_MARK_TASK):
+            issues.append("缺少 TASK 段：景别/机位硬约束不受控，容易跑偏成中景")
+        # ⚠️ 「本镜未指定景别」是**合法的第三种状态**（camera 只给了机位/运镜，如
+        #    「俯拍缓推」）：此时提示词里不应有任何景别词，交还画面描述决定取景。
+        #    若按「必须有景别硬约束」判，这类镜头会整批假红（历史：曾把 43% 误判不合格）。
+        if not _has_any(prompt, SB_MARK_FRAMING_NEW, SB_MARK_FRAMING_LEGACY) \
+                and SB_MARK_FRAMING_UNSPEC not in prompt:
+            issues.append("缺少 FRAMING 硬约束：景别不受控，容易跑偏成中景")
+        if SB_MARK_CONTENT not in prompt:
+            issues.append("缺少 SCENE AND ACTION 段：模型只能自行想象画面")
+        if not _has_any(prompt, SB_MARK_STYLE, SB_MARK_STYLE_LEGACY):
+            issues.append("缺少 STYLE 段：画风会漂移到参考图或模型默认风格")
+        elif not style_declared(prompt, style) and SB_MARK_STYLE in prompt:
+            issues.append("未声明画面风格：画风会漂移到参考图或模型默认风格")
+
+        # 参考图协议：官方要求 <imageN> 显式编号 + 每张图唯一职责
+        if ref_count:
+            if SB_MARK_CANVAS not in prompt:
+                issues.append("缺少 PRIMARY CANVAS 段：未指定哪张参考图作主要画布")
+            tags = _ref_tag_indices(prompt)
+            if not tags:
+                issues.append("参考图未用 <imageN> 编号引用：官方明确要求显式编号，"
+                              "自然语言指代（如「第一张图」）会产生歧义")
+            else:
+                bad = [n for n in tags if n < 1 or n > ref_count]
+                if bad:
+                    issues.append(
+                        f"提示词引用了不存在的参考图编号 {bad}（本镜实际只有 {ref_count} 张）："
+                        f"模型找不到对应参考图，该条约束会静默失效")
+                if SB_MARK_IDENTITY in prompt and SB_MARK_IDENTITY_FROM_REF not in prompt:
+                    issues.append("IDENTITY 段未把身份指向参考图（缺少 "
+                                  "「Preserve the exact identity from <imageN>」）："
+                                  "模型会重新生成一张脸，降低 likeness")
+            if not _has_any(prompt, SB_MARK_REF_USAGE, SB_MARK_REF_USAGE_LEGACY):
+                issues.append("给了参考图但未声明各图职责（REFERENCE ROLES）："
+                              "模型不知道每张图该参考什么")
+        elif SB_MARK_NO_REF not in prompt and SB_MARK_NO_REF_LEGACY not in prompt:
+            issues.append("未声明「本镜无参考图」：模型可能凭空套用模板里的参考图")
+
+        # 官方禁令：禁止用文字重述五官（重述会让模型「重新画一个符合描述的人」）
+        if SB_MARK_IDENTITY in prompt and re.search(
+                r"(脸型|五官|鼻子|眼睛|双眼皮|颧骨|下巴)", prompt):
+            issues.append("提示词用文字重述了五官细节：官方明确要求身份直接指向参考图，"
+                          "重述面部会降低 likeness（应写 Preserve the exact identity from <imageN>）")
+
+        # 自然语言指代参考图（官方禁用）
+        vague = SB_VAGUE_REF_RE.search(prompt)
+        if vague:
+            issues.append(f"用自然语言指代参考图「{vague.group(0)}」："
+                          f"官方要求改用 <imageN> 显式编号")
+    else:
+        # ---------- 存量：旧中文分节协议（不按新标准判，避免整批假红）----------
+        if SB_MARK_CONTENT_LEGACY not in prompt:
+            issues.append("缺少「动作与画面内容」段：模型只能自行想象画面")
+        if SB_MARK_FRAMING_LEGACY not in prompt:
+            issues.append("缺少「景别（必须严格遵守）」段：景别不受控，容易跑偏成中景")
+        if ref_count and SB_MARK_REF_USAGE_LEGACY not in prompt:
+            issues.append("给了参考图但未声明「参考图用途」：模型不知道每张图该参考什么")
+        if SB_MARK_STYLE_LEGACY not in prompt and not style_declared(prompt, style):
+            issues.append("未声明画面风格：画风会漂移到参考图或模型默认风格")
+
+    if not _has_any(prompt, SB_MARK_NO_TEXT, SB_MARK_NO_TEXT_LEGACY):
         issues.append("缺少「不得出现文字/字幕/水印」约束：生成图易带字幕或水印")
-    if not style_declared(prompt, style):
-        issues.append("未声明画面风格：画风会漂移到参考图或模型默认风格")
 
     # 台词被写进画面提示词 —— 模型会把台词当字幕画出来（硬缺陷，可自愈）
     for t in _dialogue_texts(ctx):
@@ -332,6 +487,13 @@ def _repair_storyboard(prompt: str, ctx, style) -> Tuple[str, List[str]]:
         if w.lower() in out.lower():
             out = re.sub(re.escape(w), "", out, flags=re.IGNORECASE)
             repairs.append("移除质量类空词")
+
+    # 官方协议：自然语言指代参考图 → 统一改写成 <imageN> 编号。
+    # 只在「新协议」提示词上做（旧协议没编号语义，硬改反而错位）。
+    if _new_protocol(out) and SB_VAGUE_REF_RE.search(out):
+        out = SB_VAGUE_REF_RE.sub("<image1>", out)
+        repairs.append("自然语言指代参考图统一改写为 <imageN> 编号")
+
     out = _tidy(out)
 
     if not style_declared(out, style):
@@ -340,10 +502,14 @@ def _repair_storyboard(prompt: str, ctx, style) -> Tuple[str, List[str]]:
             out = new
             repairs.append("补写画面风格声明")
 
-    if SB_MARK_NO_TEXT not in out:
+    if not _has_any(out, SB_MARK_NO_TEXT, SB_MARK_NO_TEXT_LEGACY):
         out = out.rstrip()
-        sep = "" if out.endswith(("。", "！", "？", "；")) else "。"
-        out = f"{out}{sep}画面中不得出现任何文字、字幕、台词文本、水印、logo 或标识。"
+        if _new_protocol(out):
+            out = f"{out}\nThe image must not contain any text, subtitles, dialogue " \
+                  f"text, watermark, logo or sign."
+        else:
+            sep = "" if out.endswith(("。", "！", "？", "；")) else "。"
+            out = f"{out}{sep}画面中不得出现任何文字、字幕、台词文本、水印、logo 或标识。"
         repairs.append("补写「不得出现文字/字幕/水印」约束")
     return out, repairs
 
@@ -951,7 +1117,10 @@ def _rebuild_hint(kind: str, verdict: dict, text: str = "") -> str:
                     "shot.dialogue；本系统不产出旁白，台词是唯一人声来源）")
         return ""
     if kind == "storyboard":
-        if any(m in joined for m in (SB_MARK_CONTENT, SB_MARK_FRAMING, SB_MARK_REF_USAGE)):
+        if any(m in joined for m in (SB_MARK_CONTENT, SB_MARK_CONTENT_LEGACY,
+                                     SB_MARK_FRAMING_LEGACY, SB_MARK_FRAMING_NEW,
+                                     SB_MARK_REF_USAGE, SB_MARK_REF_USAGE_LEGACY,
+                                     SB_MARK_CANVAS, SB_MARK_TASK)):
             return "comfyui_client.build_storyboard_prompt（用镜头上下文重建分镜图提示词）"
     if kind == "h3":
         if verdict.get("critical_issues") or "时间码" in joined:

@@ -701,11 +701,45 @@ class PromptMemory:
     # 严格遵守）…场景：…动作与画面内容：…」这套套话在每条提示词里都出现。直接用它算
     # 相似度 → 每条教训都能命中大量 4-gram → 全部封顶 → 相似度失去区分度。
     # 先剥离这些套话，再比较**真正有区分度的部分**（角色 / 场景 / 动作 / 景别措辞）。
+    #
+    # ⚠️ 2026-09-25：图片链路切到 QwenImage2.1 后，分镜提示词骨架换成了官方 <imageN>
+    # 英文协议（TASK / PRIMARY CANVAS / IDENTITY / REFERENCE ROLES / PRESERVE…）。
+    # 旧中文套话已不再出现，若只留旧条目 → 新提示词**一句都剥离不掉** → 相似度重新
+    # 退化回「全部封顶 0.95」的历史缺陷（会给远景镜头召到要求特写的教训）。
+    # 因此新旧两套套话都登记（存量教训仍按旧骨架存库，新教训按新骨架存库）。
     _BOILERPLATE = (
+        # ---- 新协议（Qwen-Image-2.1 <imageN>，英文骨架）----
+        "TASK:", "Generate a single storyboard frame",
+        "FRAMING (must be strictly followed)", "FRAMING (not specified",
+        "CAMERA ANGLE (must be strictly followed)",
+        "PRIMARY CANVAS:", "Use <image1> as the primary canvas",
+        "and identity anchor", "No reference image is provided for this shot",
+        "Generate the frame purely from the SCENE AND ACTION and STYLE descriptions below",
+        "IDENTITY:", "Preserve the exact identity from",
+        "Keep the original facial structure, hairstyle and body proportions of",
+        "do NOT redraw or re-describe the face",
+        "REFERENCE ROLES:", "only for", "Do not merge or transfer attributes",
+        "Each referenced character must keep its own individual identity",
+        "SCENE AND ACTION:", "Location:", "Action and content:",
+        "Speaking state:", "is quietly saying one short line",
+        "shown only as natural lip movement and subtle expression changes",
+        "Emotion and mood:", "LIGHTING:", "STYLE:", "PRESERVE:",
+        "Keep all untargeted content unchanged",
+        "Keep the framing and camera angle exactly as specified in",
+        "Keep the identity of every referenced character unchanged",
+        "Keep the shape, material and colour of every referenced prop unchanged",
+        "Keep the environment and atmosphere consistent with the scene reference",
+        "must not contain any text", "The image must not contain any text",
+        # ---- 存量：旧中文分节协议 ----
         "根据参考图生成漫剧分镜画面", "参考图用途", "参考图1是角色", "参考图2是角色",
         "参考图3是场景", "的外貌、服装与发型", "的外貌与服装", "的环境与氛围",
         "镜头（必须严格遵守）", "景别（必须严格遵守）", "动作与画面内容",
         "画面要求", "人物造型一致", "无畸变", "画面清晰",
+        # ---- 参考图职责套话（新旧共用的中文表述）----
+        "的身份锚点", "的面部身份", "保持其面部身份、发型与体型不变",
+        "独立保持其面部身份与发型，不得与其他角色特征混用",
+        "的环境与氛围锚点", "的结构与氛围保持一致",
+        "的形状、材质与配色锚点",
     )
 
     @classmethod

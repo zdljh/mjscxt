@@ -338,6 +338,60 @@ def camera_spec(camera) -> str:
 SHOT_ACTION_SUFFIX = ("；上述动作必须完整、明确地表现出来（动作结果一眼可辨，如道具已收起、已离开手部），"
                       "不得省略、弱化或只做出起始姿态")
 
+
+# ===================== 参考图标签 → Qwen-Image-2.1 官方句式 =====================
+# 生成端（app._allocate_storyboard_refs）产出的 label 形如：
+#   「参考图1（<image1>）是角色「方源」的身份锚点：保持其面部身份、发型与体型不变」
+#   「参考图4（<image4>）是物品「青霜剑」的形状、材质与配色锚点」
+# 官方协议要求把「谁提供什么」写成 <imageN> 显式编号 + 单一职责，故这里做一次
+# 确定性的句式转换（不调用模型）。转换失败时返回空串，由调用方跳过该条 —— 宁可少一条
+# 职责声明，也不要写一句模型读不懂的模糊指代。
+
+#: 标签里「参考图N（<imageN>）」前缀的匹配（兼容生成端两种写法）
+_REF_LABEL_PREFIX_RE = re.compile(r"^参考图\s*\d+\s*[（(]\s*<image\s*\d+>\s*[)）]\s*")
+#: 「<imageN>」标记本身
+_REF_IMAGE_TAG_RE = re.compile(r"<image\s*(\d+)>", re.IGNORECASE)
+#: 标签里的中文职责词 → 官方英文职责短语
+_REF_ROLE_ZH2EN = (
+    ("身份锚点", "character identity"),
+    ("环境与氛围锚点", "the environment and atmosphere"),
+    ("形状、材质与配色锚点", "the shape, material and colour"),
+    ("形状、材质与配色", "the shape, material and colour"),
+    ("外貌与服装", "appearance and costume"),
+    ("外貌、服装与发型", "appearance, costume and hairstyle"),
+    ("头部特写", "a head close-up as the framing anchor"),
+)
+
+
+def _ref_label_body(raw, index: int) -> str:
+    """剥掉「参考图N（<imageN>）」前缀，返回职责正文（无有效正文 → 返回 ""）"""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    text = _REF_LABEL_PREFIX_RE.sub("", text).strip()
+    # 兼容不带括号的历史写法：「参考图1是角色「X」的外貌…」
+    text = re.sub(r"^参考图\s*\d+\s*是?", "", text).strip()
+    return text
+
+
+def _ref_label_purpose(body: str) -> str:
+    """把中文职责正文转成官方英文职责短语（识别不到就原样保留，由模型自行理解）"""
+    text = str(body or "").strip()
+    if not text:
+        return ""
+    for zh, en in _REF_ROLE_ZH2EN:
+        if zh in text:
+            # 角色/物品/场景名从「「…」」里取出，拼成可读的英文职责
+            m = re.search(r"「([^」]+)」", text)
+            who = m.group(1) if m else ""
+            if who and en in ("character identity", "appearance and costume",
+                              "appearance, costume and hairstyle"):
+                return f"the identity of \"{who}\" ({en})"
+            if who:
+                return f"{en} of \"{who}\""
+            return en
+    return text
+
 # 提示词所在字段：
 #   CLIPTextEncode.text / TextEncodeQwenImageEditPlus.prompt
 #   TextEncodeQwenImage21.prompt(正向) + TextEncodeQwenImage21.negative_prompt(负向)
@@ -1208,7 +1262,7 @@ class ComfyUIClient:
 
     @staticmethod
     def _ensure_fullbody_prompt(prompt_zh: str, style: str = "") -> str:
-        """给角色参考图提示词确定性地补「全身三视图」版式约束（幂等）
+        """给角色参考图提示词确定性地补「2x2 分档多视图」版式约束（幂等）
 
         2026-09-23 补强：除「三人同比例」外，再显式要求**间距均匀互不遮挡**、
         **脚底落在同一条水平线**、**纯白背景**。前两项直接对应实测里最容易
@@ -1218,19 +1272,45 @@ class ComfyUIClient:
         收紧为明确的「纯白背景」，避免模型自由发挥出渐变/场景/贴图。
         画幅已同步改为 1:1（见 style_kit.ASSET_BASE_RATIO 的角色项），
         「三人横排」版式与「竖幅画幅」的冲突已解除。
+
+        ⚠️ 2026-09-25（景别对档，**重要**）：「三张全身横排」→「上排全身 + 下排半身」
+        ---------------------------------------------------------------
+        根因（实测，见 .workbuddy/tools/diag_framing_control.py 与工作日志需求 H）：
+        分镜模板 `<image1>` 是主画布，近方形全身立绘 cover 到 9:16 竖屏要
+        **左右各裁一半** → 模型为保住立绘里「完整的全身」只能把人物缩小 →
+        **系统性偏全景/远景**，而近景/特写与立绘方向相反 → 被反向拉回、画不出来
+        （实测 shot_24 规定近景、出图近全身）。
+        业界通行做法是「**按景别分档出图**」（正脸特写 / 正脸半身 / 全身），
+        因此这里补一格**正面半身胸像**：近景/特写/中景镜头取它当 `<image1>`，
+        画幅与景别同向，画幅对抗即消失。
+        版式：**上排** 3 格全身（正面/左侧/背面）横排；**下排**独占一条横带，
+        只画 1 格正面半身胸像、居中，两侧留白。
+        ⚠️ 半身必须放**独立下排**、不能塞进上排的空隙 —— 上排塞第 4 格会把每格压窄
+        25%（全身变细长条）；且下排独占横带后行投影才能稳定把上下排分开（切分依赖此）。
+        ⚠️ 格位顺序必须与 config.CHARACTER_SHEET_LAYOUT_ZH / CHARACTER_SHEET_VIEWS 同序。
         """
         text = str(prompt_zh or "").strip()
         # 幂等判断必须在 with_style 之前做（同 style_kit._style_suffix 的坑）
-        marker = "全身三视图"
+        # 判据用新标记「上下两排分档」：旧图里是「全身三视图」，命中旧标记不算已补新版式。
+        # ⚠️ marker 必须是 suffix 的**字面子串**，否则二次调用永远判不出「已补」而重复追加
+        #    （2026-09-25 实测踩过：marker 写作「上下两排分档设定图」而 suffix 里是
+        #      「上下两排分档版式」→ 幂等失效，提示词被无限追加）。
+        #    这里取两者的**公共前缀**「上下两排分档」作 marker，两边都含它。
+        marker = "上下两排分档"
         base = text if marker in text else style_kit.with_style(text, style) if style else text
         if marker in base:
             return base
-        suffix = ("，全身三视图设定图：正面、左侧面、背面三张全身视图从左到右横排、"
-                  "间距均匀互不遮挡，同一角色同一比例，人物身高占比一致，"
-                  "三人脚底落在同一条水平线上，"
-                  "画面完整呈现从头到脚的全身，头顶上方与脚部下方留少量边距，"
+        suffix = ("，角色设定图采用上下两排分档设定图版式："
+                  "上排为正面、左侧面、背面三张全身视图，从左到右横排、间距均匀互不遮挡、"
+                  "同一角色同一比例、三人脚底落在同一条水平线上，"
+                  "每格完整呈现从头到脚的全身；"
+                  "下排单独一行只画一格**正面半身胸像特写**，居中放置、左右留白，"
+                  "取景自胸部以上至头顶、面部细节清晰，"
+                  "与上排全身视图为同一角色的同款发型发色、瞳色、服装配色与配饰，"
+                  "仅取景范围不同，不得改变五官与服装；"
+                  "上排三格与下排一格之间留出明显空白分隔；"
                   "纯白背景，不要场景、道具、投影与任何背景纹理")
-        # 剧本层提示词常以「三视图。」收尾，直接拼会得到「三视图。，全身三视图…」的脏标点
+        # 剧本层提示词常以「三视图。」收尾，直接拼会得到「三视图。，…」的脏标点
         base = base.rstrip("。，,.;； ")
         return (base + suffix) if base else suffix.lstrip("，")
 
@@ -1568,21 +1648,45 @@ class ComfyUIClient:
 
     @staticmethod
     def build_storyboard_prompt(shot: dict, ref_labels: List[str] = None) -> str:
-        """按镜头剧情描述构建分镜图（Qwen Edit 多参考图）中文提示词。
+        """按镜头剧情描述构建分镜图（Qwen-Image-2.1 多参考图编辑）提示词。
 
-        ⚠️ **结构化分节规范（2026-09-24，目标「从源头减少重跑」）**：
-        提示词按固定顺序输出为独立小节，每节用「【节名】」开头、句末用「。」收尾，
-        使模型能逐节定位约束、不再把硬约束淹没在一大段扁平文字里。
-        顺序（见 :ref:`docs/prompt-spec.md`，守卫 verify_storyboard_prompt_spec.py 锁定）：
-          ① 【取景】景别/机位硬约束（最靠前，必须严格遵守）
-          ② 【参考图】各参考图绑定什么（角色/物品/场景，逐条对应）
-          ③ 【画面内容】动作与画面内容 + 说话状态 + 情绪氛围
-          ④ 【光影】光影氛围
-          ⑤ 【风格】画面风格声明
-          ⑥ 【禁令】一致性 + 无文字/水印硬禁令
+        ## 为什么改成官方 <imageN> 协议（2026-09-25）
+
+        2026-09-23 起图片链路整体切到 QwenImage2.1（TE-Speed 加速链），而 Qwen-Image-2.1
+        官方的多图提示词协议与旧 Qwen-Edit 有**本质差别**（依据官方 Prompt Rewriter /
+        PE-I2I system prompt / ComfyUI 官方 Image Edit workflow）：
+
+        1. **必须用 ``<image1>…<imageN>`` 显式编号**引用参考图。官方明确禁用
+           「第一张图 / 图 A / 左边那张」这类自然语言指代 —— 容易产生歧义。
+           编号即输入顺序：``<image1>`` 通常作主要画布 / 编辑目标（edit target），
+           输出画幅也跟随它。
+        2. **属性解耦（Attribute Disentanglement）**：把「谁是画布 / 谁提供身份 /
+           这次唯一要改什么 / 其他哪些必须保持不变」拆成各自独立的句子。官方给出的
+           结构是 ``IDENTITY → CHANGE → SOURCE → PRESERVE``。
+        3. ⚠️ **身份一律指向参考图，禁止用文字重述五官**。官方明确指出：一旦重新描述
+           脸型/眼睛/鼻子，任务就从「保持这个人」变成「重新画一张符合这些描述的人」，
+           反而**降低 likeness**。这是与旧版最大的行为差异 —— 旧的【禁令】段写的是
+           「人物的脸型、发型、服装、配饰与角色参考图完全一致」，把属性又列了一遍。
+        4. **Preservation Clause 用 blanket 写法**：``Keep all untargeted content
+           unchanged.`` 而不是逐项罗列（每重新描述一次都可能重新触发生成）。
+        5. **Resolution / aspect ratio 不写进提示词正文** —— 它属于 generation
+           parameter（官方 Rewriter 单独返回 ``wh_ratio`` / ``ratio_follow``）。
+           画幅由工作流的尺寸节点与参考图画幅决定（见 generate_storyboard 的 size）。
+
+        ## 分节顺序（固定）
+
+          TASK            → 这一镜要生成的画面（含景别/机位硬约束，最靠前）
+          PRIMARY CANVAS  → <image1> 作主要画布
+          IDENTITY        → 身份锚点（指向 <imageN>，不复述五官）
+          REFERENCE ROLES → 每张参考图各自的职责（<image2> 只提供 X）
+          SCENE / ACTION  → 场景、动作、说话状态、情绪
+          LIGHTING        → 光影氛围（可选，幂等）
+          STYLE           → 画面风格声明
+          PRESERVE        → 保留子句 + 无文字硬禁令（兜底）
+
         历史教训：分镜图是质检重跑重灾区（教训库 68/73 条），其中「景别」占 45 条——
         扁平长提示词里景别约束被画面内容稀释。景别/机位是**取景级硬约束**，
-        必须最靠前、独立成段、加粗强调，绝不能混在画面内容之后。
+        必须最靠前、独立成句。
         """
         camera = str(shot.get("camera") or "中景").strip()
         cam_key = camera_key(camera)        # "" = 本镜没给景别（camera 只有机位/运镜）
@@ -1591,33 +1695,78 @@ class ComfyUIClient:
 
         sections = []
 
-        # ①【取景】景别/机位硬约束（最靠前）。**没给景别时绝不能编一个**硬塞进去。
-        # 实测《蛊真人》ep02 shot_13 camera="俯拍缓推"（description 是脚部俯拍），
-        # 旧实现猜成「中景：取景自腰部或膝部以上」→ 与画面描述的脚部俯拍**互斥**，
-        # 模型在两条矛盾指令间摇摆，6 次重试出的全是「全景 + 平视」，而质检端又按
-        # 中景判它「景别不符」→ 该镜永远过不了。改为把取景交还给画面描述。
+        # ---------- TASK：景别/机位硬约束（最靠前）----------
+        # **没给景别时绝不能编一个**硬塞进去。实测《蛊真人》ep02 shot_13
+        # camera="俯拍缓推"（description 是脚部俯拍），旧实现猜成「中景：取景自腰部或
+        # 膝部以上」→ 与画面描述的脚部俯拍**互斥**，模型在两条矛盾指令间摇摆，6 次重试
+        # 出的全是「全景 + 平视」，而质检端又按中景判它「景别不符」→ 该镜永远过不了。
+        # 改为把取景交还给画面描述。
         framing_lines = []
         if cam_key:
-            framing_lines.append(f"景别（必须严格遵守）：{cam_key}——{cam_spec}。")
+            # ⚠️ 必须带上 cam_spec（`camera_spec` 的显式构图规范），别只写景别两个字：
+            #    只写「特写」时模型容易退化为中景/近景（实测），且 cam_spec 是**生成端
+            #    与质检端共用的同一份标准**（历史坑：两端标准不同曾把 43% 判为不合格）。
+            framing_lines.append(f"FRAMING (must be strictly followed): {cam_key} — {cam_spec}.")
         else:
             framing_lines.append(
-                f"取景（本镜未指定景别）：严格以【画面内容】里的取景描述为准"
-                f"（camera 原值「{camera}」只给了机位/运镜，"
-                f"不要擅自套用中景/全景等固定景别，也不要把它撑成全景）。"
-            )
+                "FRAMING (not specified for this shot): follow the framing "
+                "implied by SCENE AND ACTION below; do NOT default to a medium "
+                "shot or wide shot.")
         if cam_angle:
-            framing_lines.append(f"机位（必须严格遵守）：{_CAMERA_ANGLE_SPECS[cam_angle]}。")
-        sections.append("【取景】" + "".join(framing_lines))
+            framing_lines.append(
+                f"CAMERA ANGLE (must be strictly followed): {cam_angle} — "
+                f"{_CAMERA_ANGLE_SPECS[cam_angle]}.")
+        sections.append("TASK: Generate a single storyboard frame.\n"
+                        + "\n".join(framing_lines))
 
-        # ②【参考图】参考图绑定：把每类参考图该锁什么写具体（角色/物品/场景分别对应）。
-        # 历史教训：「角色」「背景」「一致」合计 27 条重跑，根因是参考图用途一句话带过，
-        # 模型分不清「这张图该参考哪个角色的哪部分」。这里改成逐类逐条。
+        # ---------- PRIMARY CANVAS + IDENTITY + REFERENCE ROLES ----------
+        # 官方要点：每张参考图都必须被赋予**明确且唯一**的职责，并把身份/修改目标/
+        # 保留内容分开写。这里把生成端传入的 ref_labels（形如
+        # 「参考图1（<image1>）是角色「X」的身份锚点：…」）直接落成官方句式。
         if ref_labels:
-            sections.append("【参考图】参考图用途：" + "；".join(ref_labels) + "。")
+            identity_lines = []
+            role_lines = []
+            # ⚠️ **必须按位置重新编号**：官方协议里 ``<imageN>`` 的 N 就是「输入顺序」
+            # （``images.image_N`` 槽位序号），不是 label 里写的那个数字。label 由
+            # app._allocate_storyboard_refs 生成时可能带「预留槽位号」（例如角色占 1-3、
+            # 场景本应排第 4 位，但该镜只有 1 个角色 → 实际落在第 2 槽），若照抄 label 的
+            # 数字，提示词会引用一个**根本没连图**的槽位 → 模型找不到对应参考图，
+            # 身份/场景约束全部失效，且不报错。
+            for pos, raw in enumerate(ref_labels, start=1):
+                lab = _ref_label_body(raw, pos)
+                if not lab:
+                    continue
+                # 身份锚点：官方句式 “Preserve the exact identity from <imageN>.”
+                if "身份锚点" in lab:
+                    identity_lines.append(
+                        f"Preserve the exact identity from <image{pos}>: "
+                        f"{_ref_label_purpose(lab)}. "
+                        f"Keep the original facial structure, hairstyle and body "
+                        f"proportions of <image{pos}> — do NOT redraw or re-describe "
+                        f"the face.")
+                else:
+                    role_lines.append(
+                        f"Use <image{pos}> only for {_ref_label_purpose(lab)}.")
+            body = [f"PRIMARY CANVAS: Use <image1> as the primary canvas"
+                    f"{' and identity anchor' if identity_lines else ''}."]
+            if identity_lines:
+                body.append("IDENTITY: " + " ".join(identity_lines))
+            if role_lines:
+                body.append("REFERENCE ROLES: " + " ".join(role_lines)
+                            + " Do not merge or transfer attributes between the reference "
+                              "images: each reference is responsible only for its own role.")
+            if len(identity_lines) > 1:
+                body.append(
+                    "Each referenced character must keep its own individual identity; "
+                    "do not merge facial features, hairstyles or costumes between them.")
+            sections.append("\n".join(body))
         else:
-            sections.append("【参考图】本镜无参考图，画面主体与风格仅依据下方【画面内容】与【风格】生成。")
+            sections.append(
+                "PRIMARY CANVAS: No reference image is provided for this shot. "
+                "Generate the frame purely from the SCENE AND ACTION and STYLE "
+                "descriptions below.")
 
-        # ③【画面内容】动作与画面内容 + 说话状态 + 情绪氛围。
+        # ---------- SCENE AND ACTION ----------
         # 画面内容优先级：
         # 1) storyboard_prompt_zh —— 提示词分析器**专门为该镜分镜图**写的中文提示词。
         #    历史缺陷：这个字段只写不读，用户花了 token 生成却从未生效（白花钱）。
@@ -1632,51 +1781,63 @@ class ComfyUIClient:
             desc = ComfyUIClient._merge_visual_detail(desc, detail)
         location = shot.get("location", "")
         content_lines = []
-        content_lines.append(f"镜头{shot.get('shot_id', 1)}")
         if location:
-            content_lines.append(f"场景：{location}")
+            content_lines.append(f"Location: {location}.")
         if desc:
-            content_lines.append(f"动作与画面内容：{desc}{SHOT_ACTION_SUFFIX}")
+            content_lines.append(f"Action and content: {desc}{SHOT_ACTION_SUFFIX}")
         if _dlg_text(shot.get("dialogue")):
             # 只给说话状态与口型提示，严禁把台词文本写进提示词（模型会把台词当画面字幕画出来）
             content_lines.append(
-                f"说话状态：{_dlg_speaker(shot.get('dialogue')) or '人物'}正在低声说一句短句，"
-                f"只表现为自然的口型开合与细微表情变化"
-            )
+                f"Speaking state: {_dlg_speaker(shot.get('dialogue')) or 'the character'} "
+                f"is quietly saying one short line, shown only as natural lip movement "
+                f"and subtle expression changes.")
         if shot.get("emotion"):
-            content_lines.append(f"情绪氛围：{shot['emotion']}")
+            content_lines.append(f"Emotion and mood: {shot['emotion']}.")
         if content_lines:
-            sections.append("【画面内容】" + "；".join(content_lines) + "。")
+            sections.append("SCENE AND ACTION:\n" + "\n".join(content_lines))
 
-        # ④【光影】时间/天气/光源引导。
+        # ---------- LIGHTING（可选）----------
         # ⚠️ `_extract_light_hint` 是本类的 @staticmethod，在另一个 staticmethod 里
         # **必须用类名调用**；写成裸名 `_extract_light_hint(shot)` 会去模块作用域找，
         # 直接 NameError → 整集分镜图 100% 生成失败（实测雨夜归人 ep2 连续失败 2 次）。
         light_hint = ComfyUIClient._extract_light_hint(shot)
         if light_hint:
-            sections.append(f"【光影】光影氛围：{light_hint}。")
+            sections.append(f"LIGHTING: {light_hint}.")
 
-        # ⑤【风格】风格与画幅：一律以镜头自带 style 为准（不硬编码国漫）。
+        # ---------- STYLE ----------
+        # 风格与画幅：一律以镜头自带 style 为准（不硬编码国漫）。
+        # ⚠️ 画幅（aspect ratio）**不进正文** —— 属于 generation parameter，由工作流
+        #    尺寸节点与参考图画幅落实（官方 Rewriter 也把 wh_ratio 单独返回）。
         shot_style = style_kit.normalize_style(shot.get("style"))
+        style_clause = ""
         if shot_style:
-            clause = style_kit.style_suffix(shot_style, head="画面风格", with_tail=False)
-            style_clause = clause if clause else ""
+            style_clause = style_kit.style_suffix_en(
+                shot_style, with_tail=False) if hasattr(style_kit, "style_suffix_en") else ""
+        if style_clause:
+            sections.append(f"STYLE: {style_clause}.")
         else:
-            style_clause = "画面风格以参考图为准，不得自行改变画风"
+            sections.append("STYLE: Follow the visual style of the reference images; "
+                            "do not change the art style on your own.")
             logger.warning("镜头 %s 缺少 style（分镜图提示词将不声明风格，建议补齐剧本 style）",
                            shot.get("shot_id"))
-        sections.append(f"【风格】{style_clause}。")
 
-        # ⑥【禁令】一致性 + 无文字/水印硬禁令（最后一段兜底，措辞最强硬）。
-        sections.append(
-            "【禁令】画面中人物的脸型、发型、服装、配饰与角色参考图完全一致；"
-            "物品的形状、材质、颜色与物品参考图一致；环境氛围与场景参考图一致；"
-            "光影细腻，构图清晰；镜头景别、机位必须与【取景】规定严格一致；"
-            "画面中不得出现任何文字、字幕、台词文本、水印、logo 或标识"
-            "（尤其不得在右下角出现「AI生成」等生成标识）。"
-        )
+        # ---------- PRESERVE（兜底，最强措辞）----------
+        preserve = [
+            "PRESERVE:",
+            "Keep all untargeted content unchanged.",
+            "Keep the framing and camera angle exactly as specified in TASK.",
+            "Keep the identity of every referenced character unchanged "
+            "(facial identity, hairstyle, body proportions).",
+            "Keep the shape, material and colour of every referenced prop unchanged.",
+            "Keep the environment and atmosphere consistent with the scene reference.",
+        ]
+        preserve.append(
+            "The image must not contain any text, subtitles, dialogue text, watermark, "
+            "logo or sign (in particular no \"AI generated\" mark in the bottom-right "
+            "corner).")
+        sections.append("\n".join(preserve))
 
-        return "".join(sections)
+        return "\n\n".join(sections)
 
     # ===================== H3 音轨控制（生成阶段不出声，配音统一交给 QwenTTS） =====================
 
@@ -1740,9 +1901,13 @@ class ComfyUIClient:
                             size=None) -> dict:
         """使用 分镜生成_Qwen21.json（QwenImage2.1 参考图编辑）生成单张分镜图
 
-        ref_images: 参考图列表（本地绝对路径或 /api/... HTTP 资源路径），最多 3 张，
-                    按顺序对应正向编辑节点的参考图槽位
-                    （QwenImage2.1 是 images.image_1..3；老模板是 image1..3）。
+        ref_images: 参考图列表（本地绝对路径或 /api/... HTTP 资源路径）。
+                    2026-09-25 起模板扩到 **9 个槽位**（Qwen-Image-2.1 reference
+                    stack，官方容量上限 10），按顺序对应 ``images.image_1..9``
+                    （老模板 TextEncodeQwenImageEditPlus / Qwen-Edit 2511 是
+                    ``image1..3``，槽位数由模板决定，本方法不假设固定值）。
+                    ⚠️ 只填**实际需要**的前 N 个槽位：官方明确「10 是容量不是目标」，
+                    多余槽位必须留空，塞无关图片会让模型分不清哪张该优先。
         seed:       可选随机种子（质检不达标重生成时传入，保证产出与上一次不同）。
         size:       可选 (宽, 高)，按用户敲定的画幅覆写尺寸节点（竖屏 9:16 落地）。
         """
@@ -1772,8 +1937,11 @@ class ComfyUIClient:
                             "—— 由基础资产图尺寸决定", size[0], size[1])
 
         # 2) 参考图上传到 ComfyUI output 目录（LoadImageOutput 只认 output 目录 + [output] 标注）
+        #    ⚠️ 槽位数从模板读，不写死：老模板 3 槽、Qwen21 模板 9 槽，同一份代码都要能用。
+        slots = self._find_image_slots(api_prompt, node_id)
+        slot_cap = len(slots) or 3
         uploaded: List[str] = []
-        for idx, p in enumerate((ref_images or [])[:3]):
+        for idx, p in enumerate((ref_images or [])[:slot_cap]):
             local = self.resolve_local_path(p) if isinstance(p, str) else None
             if not local or not os.path.exists(local):
                 logger.warning(f"分镜参考图不可用，已跳过: {p}")
@@ -1789,27 +1957,42 @@ class ComfyUIClient:
         #    时 image3 变成第二张场景图，等于告诉模型"第三主体是场景"，造成主体错位/画面错乱。
         #    现改为：参考图与槽位按序一一对应；槽位多于参考图时，多余槽位复用**第一张
         #    （主角锚点）**，并在 slot_duplicates 中显式登记 + 日志告警，杜绝静默重复场景图。
-        slots = self._find_image_slots(api_prompt, node_id)
+        #
+        #    ⚠️ 2026-09-25 补充：Qwen-Image-2.1 官方明确「参考图 10 张是容量不是目标，多余
+        #    槽位塞重复图反而稀释注意力」。因此**超过参考图数量的尾部槽位不再复用锚点图**，
+        #    改为**清空**（image=""，该路 LoadImageOutput 不产出 IMAGE，服务端按缺失处理）
+        #    —— 只有「老模板 3 槽 / 参考图 2 张」这类**槽位本就很少**的场景才保留复用行为
+        #    （否则老模板会因空槽位报缺图）。判据：槽位数 <= 4 视为紧凑模板，沿用复用。
+        _COMPACT_SLOT_CAP = 4
         ref_values = []
         slot_duplicates: List[str] = []
+        slot_cleared: List[str] = []
         for idx, (key, load_id) in enumerate(slots):
             if load_id is None:
                 continue
             if idx < len(uploaded):
                 src = uploaded[idx]
-            else:
+            elif slot_cap <= _COMPACT_SLOT_CAP:
                 src = uploaded[0]
                 slot_duplicates.append(f"{key}(slot{idx + 1})={src}")
                 logger.warning(
                     f"分镜参考图槽位多于参考图（{len(slots)} 槽 / {len(uploaded)} 张）："
                     f"{key} 复用主角锚点图 {src}（已登记 slot_duplicates）")
+            else:
+                # 大槽位模板（Qwen-Image-2.1 9 槽）：尾部空槽位留空，不复用、不塞图。
+                api_prompt[load_id]["inputs"]["image"] = ""
+                slot_cleared.append(key)
+                continue
             ctype = api_prompt[load_id].get("class_type")
             value = self.annotate_file_ref(src, ctype)
             api_prompt[load_id]["inputs"]["image"] = value
             ref_values.append(f"{key}->{load_id}({ctype})={value}")
         if slot_duplicates:
             logger.warning(f"分镜参考图存在槽位复用 {len(slot_duplicates)} 处: {slot_duplicates}")
-        logger.info(f"分镜参考图已注入 {len(ref_values)} 个槽位: {ref_values}")
+        if slot_cleared:
+            logger.info(f"分镜参考图空槽位已留空 {len(slot_cleared)} 处（Qwen-Image-2.1 "
+                        f"「容量非目标」，不塞重复图）: {slot_cleared}")
+        logger.info(f"分镜参考图已注入 {len(ref_values)} 个槽位（共 {len(slots)} 槽）: {ref_values}")
 
         # 4) 输出文件名前缀
         for _nid, n in api_prompt.items():
@@ -1825,7 +2008,8 @@ class ComfyUIClient:
         files = self.get_output_files(history, ".png")
         return {"prompt_id": prompt_id, "files": files, "history": history,
                 "refs_used": uploaded, "prompt_node": node_id, "seed": seed,
-                "slot_duplicates": slot_duplicates}
+                "slot_duplicates": slot_duplicates, "slot_cleared": slot_cleared,
+                "slot_count": len(slots)}
 
     # ===================== 视频生成（MiniMax H3） =====================
     # D-08（P2）：原先此处有一个 [LEGACY · 已停用] 的固定「10 段模板单次生成」方法，
