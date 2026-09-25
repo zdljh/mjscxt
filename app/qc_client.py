@@ -588,6 +588,8 @@ CONFIG_KEYS = (
     "keyframe_qc_enabled",
     # 图片质检是否附带「本镜出现的角色/物品/场景」设定图做一致性核对（2026-09-20 新增）
     "image_ref_compare",
+    # 图片质检「二次复核」：首次判不过时同图再判一次，任一判过即放行（2026-09-25 新增）
+    "image_qc_recheck",
     # G9/O1 图片/视频客观层阈值（2026-09-20 新增）
     "image_pixel_std_min", "video_max_drift",
     # 提示词预检（生成前质检，见 prompt_qc.py）。⚠️ 它不依赖质检接口，默认开启
@@ -624,6 +626,14 @@ def _empty_config() -> dict:
         # 这类问题只能靠猜。开启后按 shot.characters_in_shot / items_in_shot 顺序附带
         # 最多 MAX_REF_IMAGES 张设定图，并要求逐张核对是否变形、与设定是否一致。
         "image_ref_compare": True,
+        # ★ 图片质检「二次复核」（判官自洽性检查），默认开：
+        #   实测同一张图 + 同一组设定图 + temperature=0 重复送检，score 可为
+        #   45 / 78 / 85 / 92（同一张图通过率 2/4），还会出现「景别完美符合」与
+        #   「景别严重不符」两个相反结论 —— 判官自身抖动会让每次「判不过」都真烧一次
+        #   GPU 重画（1-2 分钟），而复核一次只要 2-5 秒。故：首次判不过时用**同一张图**
+        #   再判一次，任一判过即放行；两次都判不过才真重跑。
+        #   ⚠️ 客观层致命（黑图/纯色，确定性证据）不复核；⚠️ 接口故障不复核。
+        "image_qc_recheck": True,
         # G9/O1 客观层确定性闸门（图片黑图 stddev 下限 / 视频时长偏差上限）
         "image_pixel_std_min": 8.0,  # 像素 stddev < 8 → 黑图/纯色图 fatal
         "video_max_drift": 0.30,      # 视频 |实测-期望|/期望 > 30% → fatal
@@ -841,7 +851,8 @@ def _save_config_impl(config_path: str, patch: dict, keep_key_if_blank: bool = T
             cfg["api_key"] = ""
             new_key = v
             continue
-        if k in ("enabled", "image_enabled", "video_enabled", "image_ref_compare"):
+        if k in ("enabled", "image_enabled", "video_enabled", "image_ref_compare",
+                 "image_qc_recheck"):
             # ⚠️ 审计 G2：这里原本是 `bool(v)` —— 字符串 "false"/"0"/"no"/"off"/"none"
             #    都是**非空字符串**，`bool()` 一律判 True。用户在页面或第三方脚本里把开关
             #    存成 "false"，读回来反而是「开」，开关形同虚设。
@@ -929,6 +940,8 @@ def _normalize(cfg: dict) -> dict:
     cfg["prompt_enabled"] = _as_bool(cfg.get("prompt_enabled"), True)
     # 图片质检是否附带设定图（save_config 的布尔组里也有它，读取侧必须同口径归一化）
     cfg["image_ref_compare"] = _as_bool(cfg.get("image_ref_compare"), True)
+    # 图片质检二次复核（默认开；同上：字符串 "false" 必须能真正关掉）
+    cfg["image_qc_recheck"] = _as_bool(cfg.get("image_qc_recheck"), True)
     _pmode = str(cfg.get("prompt_mode") or "repair").strip().lower()
     cfg["prompt_mode"] = _pmode if _pmode in ("warn", "repair", "block") else "repair"
     cfg["endpoint_override"] = _normalize_override(cfg.get("endpoint_override"))
@@ -1771,6 +1784,98 @@ def parse_json_loose(content: str) -> dict:
 
 # ===================== 图片质检 =====================
 
+def _apply_image_objective(verdict: dict, image_path: str, cfg: dict) -> dict:
+    """G9/O1 图片客观层（零模型依赖，与视频/音频客观层同构）。
+
+    全黑/全白/纯色（像素 stddev < 阈值）→ fatal 计入 critical_issues、blocked=True；
+    长宽比异常 → 非 fatal 计入 issues。AI 层失败也会透出（不因 AI 不可用漏掉黑图）。
+
+    **幂等**：二次复核会对「第二份 AI 结论」再跑一次本函数，因此这里先摘掉上一次
+    追加过的客观层 issues 再重新追加（否则重复调用会让 issues 越加越多）。
+    抽成独立函数的原因就是复核链路要复用同一份客观判定口径。
+    """
+    verdict = verdict or {}
+    try:
+        obj = image_objective(image_path, cfg)
+    except Exception as e:  # noqa: BLE001  客观层失败不阻断质检主流程
+        logger.warning("图片客观层执行失败（忽略）：%s: %s", type(e).__name__, e)
+        return verdict
+    obj_fatal = list(obj.get("critical_issues") or [])
+    obj_issues = list(obj.get("issues") or [])
+    verdict["objective"] = obj
+    verdict["objective_fatal"] = obj_fatal
+    verdict["objective_issues"] = obj_issues
+    base_issues = [x for x in (verdict.get("issues") or []) if x not in obj_issues]
+    if obj_issues:
+        verdict["issues"] = base_issues + obj_issues
+    else:
+        verdict["issues"] = base_issues
+    if obj_fatal:
+        base_crit = [x for x in (verdict.get("critical_issues") or []) if x not in obj_fatal]
+        verdict["critical_issues"] = base_crit + obj_fatal
+        verdict["blocked"] = True
+        verdict["passed"] = False
+        verdict["score"] = min(int(verdict.get("score") or 0), 50)
+    return verdict
+
+
+def _image_verdict_accepted(verdict: dict) -> bool:
+    """内容层是否「通过」。⚠️ 只看 ok/accepted —— skipped（质检未开启）不算通过。"""
+    return bool(verdict) and bool(verdict.get("ok")) and bool(verdict.get("accepted"))
+
+
+def _recheck_image_verdict(ep: dict, prompt: str, image_paths: list, cfg: dict,
+                           first: dict, image_path: str, style_norm: str) -> dict:
+    """图片质检「二次复核」：同一张图再判一次，任一判过即放行。
+
+    背景（实测）：同一张分镜图 + 同一组设定图 + temperature=0，重复 4 次送检得到
+    score = 85 / 78 / 45 / 92（通过率 2/4）；同一轮还会出现「景别完美符合」
+    与「景别严重不符（接近全景）」两个互斥结论。判官抖动**会直接变成一次 GPU 重画**
+    （1-2 分钟），而复核只用 2-5 秒 —— 交换比约 1:20，故默认开启。
+
+    决策（单向放宽，只在「首次判不过」时触发）：
+      · 客观层致命（黑图/纯色）→ **不复核**（确定性证据，复核无意义）；
+      · 复核调用抛异常 → 沿用首次结论（绝不把接口抖动变成放行）；
+      · 复核判过 → 返回复核结论（并在 recheck 里留档首次结论，便于复盘）；
+      · 两次都判不过 → 返回首次结论（保持「只有一处结论」的原有行为）。
+    """
+    info = {"used": True, "first_score": first.get("score"),
+            "first_accepted": bool(first.get("accepted"))}
+    if first.get("objective_fatal"):
+        info["used"] = False
+        info["skip_reason"] = "客观层致命（黑图/纯色）为确定性证据，无需复核"
+        first["recheck"] = info
+        return first
+    try:
+        second = _run_vision(ep, prompt, image_paths, cfg)
+    except Exception as e:  # noqa: BLE001  复核失败绝不能把「判不过」变成「判过」
+        logger.warning("图片二次复核调用失败，沿用首次结论：%s: %s", type(e).__name__, e)
+        info["error"] = str(e)
+        first["recheck"] = info
+        return first
+    second = _apply_style_gate(second, style_norm)
+    second = _apply_image_objective(second, image_path, cfg)
+    info["second_score"] = second.get("score")
+    info["second_accepted"] = bool(second.get("accepted"))
+    info["disagreed"] = bool(first.get("accepted")) != bool(second.get("accepted"))
+    if _image_verdict_accepted(second):
+        info["outcome"] = "复核放行（首次判不过判定为判官抖动）"
+        logger.info("图片质检二次复核放行：首次 score=%s(%s) → 复核 score=%s(%s)",
+                    first.get("score"), first.get("reason"),
+                    second.get("score"), second.get("reason"))
+        # 首次结论留档：复核放行不代表首次说的问题不存在，排查时仍需可见
+        second["recheck_first"] = {
+            "score": first.get("score"), "reason": first.get("reason"),
+            "issues": (first.get("issues") or [])[:3],
+            "critical_issues": (first.get("critical_issues") or [])[:3],
+        }
+        second["recheck"] = info
+        return second
+    info["outcome"] = "两次均判不通过"
+    first["recheck"] = info
+    return first
+
+
 def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
                 override: dict = None, style: str = "",
                 ref_images: list = None) -> dict:
@@ -1842,19 +1947,13 @@ def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
     # G9/O1 图片客观层（零模型依赖，与视频/音频客观层同构）：
     # 全黑/全白/纯色（像素 stddev < 阈值）→ fatal 计入 critical_issues、blocked=True；
     # 长宽比异常 → 非 fatal 计入 issues。AI 层失败也会透出（不因 AI 不可用漏掉黑图）。
-    obj = image_objective(image_path, cfg)
-    obj_fatal = list(obj.get("critical_issues") or [])
-    obj_issues = list(obj.get("issues") or [])
-    verdict["objective"] = obj
-    verdict["objective_fatal"] = obj_fatal
-    verdict["objective_issues"] = obj_issues
-    if obj_issues:
-        verdict["issues"] = list(verdict.get("issues") or []) + obj_issues
-    if obj_fatal:
-        verdict["critical_issues"] = list(verdict.get("critical_issues") or []) + obj_fatal
-        verdict["blocked"] = True
-        verdict["passed"] = False
-        verdict["score"] = min(int(verdict.get("score") or 0), 50)
+    verdict = _apply_image_objective(verdict, image_path, cfg)
+    # ★ 二次复核（判官自洽性检查）：首次判不过时用**同一张图**再判一次，任一判过即放行。
+    #   实测判官自身抖动极大（同一张图 score 45/78/85/92），而每次「判不过」都会触发
+    #   一次 GPU 重画 —— 复核成本 2-5 秒 vs 重画 1-2 分钟。开关 cfg["image_qc_recheck"]。
+    if not _image_verdict_accepted(verdict) and cfg.get("image_qc_recheck", True):
+        verdict = _recheck_image_verdict(ep, prompt, image_paths, cfg, verdict,
+                                         image_path, style_norm)
     return verdict
 
 

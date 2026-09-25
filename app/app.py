@@ -7010,7 +7010,11 @@ def _qc_record_verdict(project_name: str, kind: str, shot_key, stage: str,
            "style": style_kit.normalize_style(style),
            "error": verdict.get("error"), "latency_ms": verdict.get("latency_ms"),
            # P0-2：接口级故障（鉴权/超时/网络）标记，供 _qc_summary 区分「故障放行」与「内容不合格」
-           "interface_fault": bool(verdict.get("interface_fault"))}
+           "interface_fault": bool(verdict.get("interface_fault")),
+           # ★ 二次复核留档：首次判不过时用同一张图再判一次（判官抖动实测极大）。
+           #   落盘后可直接统计「多少重跑是被复核拦下来的」，用于评估该机制收益。
+           "recheck": verdict.get("recheck") or None,
+           "recheck_first": verdict.get("recheck_first") or None}
     if extra:
         rec.update(extra)
     rec["history_file"] = _qc_record(project_name, kind, shot_key, rec)
