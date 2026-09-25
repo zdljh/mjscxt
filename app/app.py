@@ -3845,6 +3845,19 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
     """
     out_dir = _ep_dir(os.path.join(STORYBOARDS_DIR, project_name), episode_no)
     os.makedirs(out_dir, exist_ok=True)
+    # ---- 分镜图 URL 的集前缀（P1 修复，2026-09-25）----
+    # ⚠️ 旧 bug：本 worker 落盘在 `_ep_dir(...)`（第 2 集起是 <项目>/epNN/），
+    #    但 manifest 里的 url 却**硬编码**成 `/api/storyboards/file/<项目>/shot_NN.png`
+    #    —— 少了 epNN 段 → 第 2 集起所有分镜图在界面上 404（文件明明存在）。
+    # ⚠️ 参照物是**同文件里的 `_update_storyboard_manifest_shot`**（单镜重跑那条路）
+    #    与视频 worker 的 `_vurl`：两者都按下标算前缀，所以单镜重跑后 URL 变对、
+    #    整批重跑后又变错 —— 这正是「同一张图时好时坏」的根因。
+    # 口径：第 1 集平铺（无前缀），第 2 集起 `epNN/`。
+    # 用 `_ep_of_script` 而非裸 `int(episode_no)`：兼容历史调用传 None / "" 的情况，
+    # 与 `_ep_dir` 的兜底（<=1 → 平铺）保持一致。
+    _sb_ep = episode_no if episode_no not in (None, "") else 1
+    _sb_sub = (f"ep{int(_sb_ep):02d}/" if int(_sb_ep) > 1 else "")
+    _sb_url_base = f"/api/storyboards/file/{project_name}/{_sb_sub}"
     # 风格/画幅：整批分镜共用
     # G19：风格串未含画幅关键词时以默认 9:16 为底，不再静默回落模板 16:9
     _sb_style_res = style_kit.resolve(style, default_ratio=style_kit.DEFAULT_RATIO)
@@ -3900,7 +3913,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                 item = dict(prev) if prev else {}
                 item.update({"shot_id": shot_id, "success": True, "skipped": True,
                              "file": dst, "error": "",
-                             "url": f"/api/storyboards/file/{project_name}/shot_{seq:02d}.png"})
+                             "url": f"{_sb_url_base}shot_{seq:02d}.png"})
                 item.setdefault("qc", {"enabled": False, "status": "skipped",
                                        "label": "沿用已达标图", "attempts": 0, "regenerated": 0})
                 item.pop("qc_blocked", None)
@@ -4061,7 +4074,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                         item.update({
                             "success": True,
                             "file": dst,
-                            "url": f"/api/storyboards/file/{project_name}/shot_{seq:02d}.png",
+                            "url": f"{_sb_url_base}shot_{seq:02d}.png",
                             "ref_count": len(refs),
                         })
                         item.pop("error", None)
@@ -4459,7 +4472,8 @@ def api_generate_storyboards():
 def api_storyboard_manifest(project_name):
     """读取已生成的分镜图清单（用于页面回看）"""
     project = _safe_project(os.path.basename(project_name.rstrip('/')))
-    out_dir = _ep_read_dir(STORYBOARDS_DIR, project, request.args.get('episode_no'))
+    _mf_ep = request.args.get('episode_no')
+    out_dir = _ep_read_dir(STORYBOARDS_DIR, project, _mf_ep)
     manifest_path = os.path.join(out_dir, "storyboard_manifest.json")
     if os.path.exists(manifest_path):
         with open(manifest_path, "r", encoding="utf-8") as f:
@@ -4468,6 +4482,9 @@ def api_storyboard_manifest(project_name):
                         "manifest": manifest})
 
     # 无清单时按磁盘文件兜底（项目可能由其他会话生成）
+    # ⚠️ URL 必须带集前缀：out_dir 是集级目录（第 2 集起 <项目>/epNN/），
+    #    漏掉 epNN 段会让第 2 集起的所有图 404（同 _storyboard_worker 的旧 bug）。
+    _mf_sub = f"ep{int(_mf_ep):02d}/" if _mf_ep and int(_mf_ep) > 1 else ""
     shots = []
     if os.path.isdir(out_dir):
         for fn in sorted(os.listdir(out_dir)):
@@ -4477,7 +4494,7 @@ def api_storyboard_manifest(project_name):
                     "shot_id": int(sid) if sid.isdigit() else sid,
                     "success": True,
                     "file": os.path.join(out_dir, fn),
-                    "url": f"/api/storyboards/file/{project}/{fn}",
+                    "url": f"/api/storyboards/file/{project}/{_mf_sub}{fn}",
                 })
     return jsonify({"success": True, "exists": bool(shots), "project_name": project,
                     "manifest": {"project_name": project, "shots": shots,
@@ -4559,21 +4576,44 @@ def api_generate_videos():
     episode_stats = _episode_schema_defaults(project_name, shots)
 
     task_id = f"video_{project_name}_{uuid.uuid4().hex[:12]}"
+    # 集号：作为入口幂等键的一部分（见下），也写进 generation_state 供状态回显。
+    # 裸 int(episode_no) 会抛 —— 历史前端可能传 "" / null / "2"，统一走 _ep_of_script 同口径的容错。
+    _vid_ep = data.get('episode_no')
+    try:
+        _vid_ep = int(_vid_ep) if str(_vid_ep or "").strip() else 1
+    except (TypeError, ValueError):
+        _vid_ep = 1
     with lock:
-        # G5：同项目已有 running 的视频任务 → 复用（匹配 step="video"，与分镜任务互不误伤）
+        # G5 + B-11 P1-8：同项目**同集**已有 running 的视频任务 → 复用。
+        # ⚠️ 修复（2026-09-25）：旧键只匹配 project_name + step=="video"，**不含集号** ——
+        #    用户在第 2 集点「生成视频」，若第 1 集的视频任务还在跑，会被直接吞掉：
+        #    返回 reused=True 且 task_id 指向第 1 集的任务，第 2 集永远不生成，
+        #    而界面显示「已开始」。分镜侧早已加 episode_no（见 api_generate_storyboards），
+        #    视频侧漏了 —— 两条链路口径不一致。
+        # 用 `==` 精确比集号（而非 `!=` 排除），历史任务无 episode_no 字段时按 1 处理，
+        # 与 `_ep_dir` 的「第 1 集平铺」口径一致。
+        def _st_ep(st):
+            try:
+                return int(st.get("episode_no") or 1)
+            except (TypeError, ValueError):
+                return 1
+
         _existing_vid = next((tid for tid, st in generation_state.items()
                               if st.get("status") == "running"
                               and st.get("project_name") == project_name
-                              and st.get("step") == "video"), None)
+                              and st.get("step") == "video"
+                              and _st_ep(st) == _vid_ep), None)
         if _existing_vid:
             return jsonify({"success": True, "task_id": _existing_vid, "status": "started",
                             "reused": True, "total": len(shots),
-                            "mode": mode, "project_name": project_name})
+                            "mode": mode, "project_name": project_name,
+                            "episode_no": _vid_ep})
         generation_state[task_id] = {
             "status": "running", "progress": 0,
             "total": len(shots), "current": 0, "results": [],
             "phase": "视频生成", "qc": _qc_brief("video"),
             "project_name": project_name, "step": "video",
+            "episode_no": _vid_ep,
             "episode_stats": episode_stats,
         }
 
@@ -4586,7 +4626,9 @@ def api_generate_videos():
             _video_generate_worker(
                 task_id, project_name, shots, character_refs, scene_refs,
                 storyboards, use_storyboard, mode, timeout_per_segment,
-                episode_tag, data.get('episode_no'),
+                # 传规范化后的 _vid_ep（与上面幂等键 / 状态里的集号同源），
+                # 而不是原始 data['episode_no'] —— 否则 "" / None 会让落盘目录与状态不一致。
+                episode_tag, _vid_ep,
                 chain_mode=chain_mode,
                 style=(data.get('style') or _project_style(project_name)),
                 overwrite=bool(data.get('overwrite')))
@@ -8500,10 +8542,20 @@ def _novel_convert_worker(task_id: str, novel_meta: dict, style: str, episodes: 
     try:
         text = read_novel_text(NOVELS_DIR, novel_meta["novel_id"])
         client = _current_llm_client()
+        # 整本路径的断点缓存目录（按 novel_id + 项目隔离）：命中即跳过模型调用。
+        # ⚠️ 没有它时，42 章提炼要跑 40 次调用、约 40 分钟，网关一抖整步重试就要从头再烧 ——
+        #    这正是 shots_cache 的设计初衷，此前只接到了「按章分集」路径。
+        _nc_cache = ""
+        try:
+            _nc_cache = novel_to_script._shots_cache_root(
+                CONTINUITY_DIR, project_key or novel_meta.get("novel_id"))
+        except Exception as _ce:  # noqa: BLE001  缓存不可用不得阻断主链路
+            app.logger.warning("整本路径缓存目录解析失败（本次不落缓存）：%s", _ce)
         script = novel_to_script.convert_novel_to_script(
             client, novel_meta, text, style=style, episodes=episodes,
             target_shots=target_shots, progress_cb=cb,
             continuity_dir=CONTINUITY_DIR, project_key=project_key,
+            cache_dir=_nc_cache,
         )
         path = novel_to_script.save_generated_script(script, SCRIPT_DIR, project_key=project_key)
         if project_key:
@@ -8626,14 +8678,10 @@ def _resolve_novel_project(data: dict, novel_meta: dict) -> dict:
     return rec
 
 
-def _episode_map(novel_meta: dict, project_ref: str = None) -> dict:
-    """章节序号 -> 已生成剧集信息"""
-    eps = novel_to_script.list_episodes(SCRIPT_DIR, _novel_key(novel_meta, project_ref))
-    out = {}
-    for e in eps:
-        key = e.get("chapter_index")
-        out[int(key if key is not None else e.get("episode_no"))] = e
-    return out
+# 注：`_episode_map(novel_meta, project_ref)`（章节序号 → 已生成剧集）已移除。
+# 它的键是 `chapter_index`，一章拆多集时只能保留最后一集（静默丢数据），
+# 且与 `_episode_units_for_chapters` 的「集号」口径冲突。新代码一律用
+# 「集号 → 产物」索引（见 api_novel_chapters 里的 `_gen_by_ep`）。
 
 
 @app.route('/api/novels/<novel_id>/chapters', methods=['GET'])
@@ -8648,25 +8696,59 @@ def api_novel_chapters(novel_id):
     proj = project_store.get_project(pref) if pref else project_store.find_by_novel(novel_id)
     pkey = proj["dir_key"] if proj else None
     key = _novel_key(meta, pkey)
-    ep_map = _episode_map(meta, pkey)
     raw = meta.get("chapters") or []
+    # ⭐ 集号口径统一（2026-09-25）：本路由原先硬写「集号 = 章序号」，
+    #    而托管与 /episodes/generate 走的是 `autopilot.episode_units`（超长章会拆，
+    #    集号 ≠ 章号）。同一部小说在「章节列表」与「成片/进度」两处显示不同集号，
+    #    用户按章节列表的集号去点生产，实际打到了另一集。
+    #    统一到 `_episode_units_for_chapters`（其编号基于**全量章节**展开，
+    #    与托管口径逐字一致，见该函数注释）。
+    # 注意：这里按**全量章节**展开后回填，因此列表里的 episode_no 是「该章第一个单元的集号」，
+    #       多单元时并给出 episode_nos 完整列表；`episode`（已生成产物的状态）也改按单元找。
+    _units_by_chapter: dict = {}
+    try:
+        _all_units = _episode_units_for_chapters(meta, raw)
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning("章节列表分集展开失败（按一章一集回显）：%s", e)
+        _all_units = []
+    for u in (_all_units or []):
+        _ci = int(u.get("chapter_index") or 0)
+        _units_by_chapter.setdefault(_ci, []).append(int(u.get("episode_no") or 0))
+    # 单元 → 产物：list_episodes 的 chapter_index 在多单元时同一章会有多行，
+    # 这里按集号再索引一份，供每个单元精确命中自己那一集的产物。
+    _gen_by_ep = {int(e.get("episode_no") or 0): e for e in
+                  novel_to_script.list_episodes(SCRIPT_DIR, key)}
+
+    def _units_of(idx: int) -> list:
+        """该章对应的集号列表；拿不到单元表时退回「一章一集」（历史行为）"""
+        return _units_by_chapter.get(idx) or [idx]
+
     chapters = []
     for c in raw:
         idx = int(c.get("index") or (len(chapters) + 1))
         cnt = int(c.get("char_count") or 0)
         sub = _estimate_subchunks(cnt)
-        gen = ep_map.get(idx)
+        _eps = _units_of(idx)
+        _gen = [_gen_by_ep[e] for e in _eps if e in _gen_by_ep]
         chapters.append({
             "index": idx,
-            "episode_no": idx,          # 每章一集：集号 = 章序号
+            # 集号 = 该章**第一个单元**的集号（未拆章时即等于章号，与历史一致）
+            "episode_no": _eps[0],
+            # 该章拆出的全部集号（未拆章时只有 1 个）—— 前端据此提示「本章 N 集」
+            "episode_nos": _eps,
+            "episode_count": len(_eps),
             "title": c.get("title") or f"第{idx}章",
             "char_count": cnt,
             "start": c.get("start"), "end": c.get("end"),
             "est_subchunks": sub,
+            "est_shots": novel_to_script.estimate_episode_shots(cnt),
             "too_short": cnt < novel_to_script.CHAPTER_MIN_CHARS,
             "advice": novel_to_script.chapter_advice(cnt, sub)["message"],
-            "generated": bool(gen),
-            "episode": gen or None,
+            "generated": bool(_gen),
+            # 兼容旧前端：episode 仍是「单个已生成剧集」；多集时取第一个
+            "episode": (_gen[0] if _gen else None),
+            "episodes": _gen,
+            "generated_count": len(_gen),
         })
 
     return jsonify({
@@ -8685,7 +8767,11 @@ def api_novel_chapters(novel_id):
         "chunk_chars": novel_to_script.CHAPTER_CHUNK_CHARS,
         "max_subchunks": novel_to_script.CHAPTER_MAX_SUBCHUNKS,
         "batch_limit": EPISODE_BATCH_LIMIT,
-        "generated_count": len(ep_map),
+        # 已生成剧集数：按**产物文件**计数（口径与 /api/episodes 一致）。
+        # 旧代码用 `len(ep_map)`（以 chapter_index 为键去重）—— 一章拆多集时会少算。
+        "generated_count": len([e for e in _gen_by_ep.values() if e.get("shots")]),
+        "unit_total": sum(len(_units_of(int(c.get("index") or 0))) for c in raw),
+        "split_mode": "content",   # 分集策略：纯按内容体量自动判断（见 novel_to_script）
         "chapters": chapters,
     })
 

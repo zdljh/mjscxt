@@ -1224,6 +1224,9 @@
     "redoVideo": "Redo video",
     "subStoryboardHint": "Full shot list",
     "subNinegridHint": "Shot composition drafts",
-    "subKeyframesHint": "Shot start/end frames"
+    "subKeyframesHint": "Shot start/end frames",
+    "episode": "Episode",
+    "episodeN": "Ep {n}",
+    "chapterN": "Ch. {n}"
   }
 }

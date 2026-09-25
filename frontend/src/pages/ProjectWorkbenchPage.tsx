@@ -201,7 +201,7 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
               />
             )}
             {activeTab === 'storyboard' && (
-              <StoryboardHubTab projectKey={projectKey} />
+              <StoryboardHubTab projectKey={projectKey} novelId={project.novel_id} />
             )}
             {activeTab === 'qc' && (
               <QcTab projectKey={projectKey} />
@@ -1700,9 +1700,90 @@ function QcTab({ projectKey }: { projectKey: string }) {
 // ========== 分镜管理（九宫格 + 关键帧 + 分镜序列 三合一） ==========
 // 三者本是同一工序的三个阶段：先出构图草案 → 再定首尾关键帧 → 最后成型分镜序列。
 // 拆成 3 个顶级标签会让用户在标签间来回跳，这里收成一个标签页 + 3 个子标签。
-function StoryboardHubTab({ projectKey }: { projectKey: string }) {
+//
+// ⭐ 集级隔离（2026-09-25）：同一部小说会产多集，而分镜图/尾帧/视频**按集落盘**
+// （第 1 集平铺，第 2 集起 `epNN/`）。此前这里**完全不选集** ——
+// `storyboardApi.canvas(projectKey)` 不带 episode_no，后端 `_load_script_for` 就
+// 只看「已生成的集里最新的那集」，于是无论用户在哪一集，看到的永远是最近一集的分镜；
+// 关键帧同理。这里统一加一个集切换器，把选中集号透传给下面三个子页。
+function useEpisodeList(novelId?: string) {
+  const [episodes, setEpisodes] = useState<any[]>([]);
+  useEffect(() => {
+    if (!novelId) {
+      setEpisodes([]);
+      return;
+    }
+    let alive = true;
+    episodesApi.list(novelId)
+      .then((d) => { if (alive) setEpisodes(d.episodes || []); })
+      .catch(() => { if (alive) setEpisodes([]); });
+    return () => { alive = false; };
+  }, [novelId]);
+  return episodes;
+}
+
+function EpisodeSwitcher({
+  episodes,
+  value,
+  onChange,
+}: {
+  episodes: any[];
+  value: number | null;
+  onChange: (ep: number) => void;
+}) {
+  const { t } = useApp();
+  if (episodes.length === 0) return null;
+  const cur = episodes.find((e) => e.episode_no === value);
+  return (
+    <div className="flex flex-wrap items-center gap-2 bg-surface-2 rounded-lg px-3 py-2">
+      <span className="text-sm text-ink-2 shrink-0">{t('sb.episode')}</span>
+      <div className="flex flex-wrap gap-1.5">
+        {episodes.map((e) => {
+          const active = e.episode_no === value;
+          const shots = e.shots ?? e.shot_count ?? 0;
+          return (
+            <button
+              key={e.episode_no}
+              onClick={() => onChange(e.episode_no)}
+              title={`${e.episode_title || e.title || ''}${e.chapter_index ? ` · ${t('sb.chapterN', { n: e.chapter_index })}` : ''}`}
+              className={`px-2.5 py-1 rounded-md text-xs transition-all ${FOCUS_RING} ${
+                active ? 'bg-brand text-white shadow' : 'bg-surface text-ink-2 hover:bg-line hover:text-ink-1 border border-line'
+              }`}
+            >
+              {t('sb.episodeN', { n: e.episode_no })}
+              <span className={active ? ' text-white/80' : ' text-ink-3'}>{` · ${shots}`}</span>
+            </button>
+          );
+        })}
+      </div>
+      {cur && (
+        <span className="text-xs text-ink-3 ml-auto truncate max-w-[16rem]">
+          {cur.episode_title || cur.title || ''}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function StoryboardHubTab({ projectKey, novelId }: { projectKey: string; novelId?: string }) {
   const { t } = useApp();
   const [sub, setSub] = useState<'storyboard' | 'ninegrid' | 'keyframes'>('storyboard');
+  // 选中集号：null = 未指定（沿用后端「最新一集」的兜底，兼容无剧集数据的纯项目）
+  const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null);
+  const episodes = useEpisodeList(novelId);
+
+  // 剧集列表到位后默认落到第 1 集：必须显式传集号，否则后端会漂到「最新一集」，
+  // 与用户在概览页看到的选集不一致（同一部小说不同页显示不同集）。
+  useEffect(() => {
+    if (episodes.length > 0 && selectedEpisode === null) {
+      setSelectedEpisode(episodes[0].episode_no);
+    }
+    // 选集被删（重跑时清过产物）时回落到第一个可用集
+    if (episodes.length > 0 && selectedEpisode !== null
+        && !episodes.some((e) => e.episode_no === selectedEpisode)) {
+      setSelectedEpisode(episodes[0].episode_no);
+    }
+  }, [episodes, selectedEpisode]);
 
   const subs: { id: 'storyboard' | 'ninegrid' | 'keyframes'; icon: React.ReactNode; label: string; hint: string }[] = [
     { id: 'storyboard', icon: <Clapperboard className="h-4 w-4" />, label: t('wb.subStoryboard'), hint: t('sb.subStoryboardHint') },
@@ -1731,15 +1812,24 @@ function StoryboardHubTab({ projectKey }: { projectKey: string }) {
         ))}
       </div>
 
-      {sub === 'storyboard' && <StoryboardTab projectKey={projectKey} />}
+      {/* 集切换器：分镜 / 关键帧两类产物按集隔离，必须先在集之间分流 */}
+      {sub !== 'ninegrid' && (
+        <EpisodeSwitcher
+          episodes={episodes}
+          value={selectedEpisode}
+          onChange={setSelectedEpisode}
+        />
+      )}
+
+      {sub === 'storyboard' && <StoryboardTab projectKey={projectKey} episodeNo={selectedEpisode} />}
       {sub === 'ninegrid' && <GridPage projectKey={projectKey} />}
-      {sub === 'keyframes' && <KeyframesTab projectKey={projectKey} />}
+      {sub === 'keyframes' && <KeyframesTab projectKey={projectKey} episodeNo={selectedEpisode} />}
     </div>
   );
 }
 
 // ========== Keyframes Tab ==========
-function KeyframesTab({ projectKey }: { projectKey: string }) {
+function KeyframesTab({ projectKey, episodeNo }: { projectKey: string; episodeNo?: number | null }) {
   const { t } = useApp();
   const toast = useToast();
   const [plan, setPlan] = useState<any>(null);
@@ -1752,7 +1842,7 @@ function KeyframesTab({ projectKey }: { projectKey: string }) {
     setLoading(true);
     setError('');
     try {
-      const data = await keyframesApi.plan(projectKey);
+      const data = await keyframesApi.plan(projectKey, episodeNo ?? undefined);
       setPlan(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : t('sb.fetchFailed'));
@@ -1766,7 +1856,10 @@ function KeyframesTab({ projectKey }: { projectKey: string }) {
     setGenerating(true);
     setError('');
     try {
-      const result = await keyframesApi.generate({ project_name: projectKey });
+      const result = await keyframesApi.generate({
+        project_name: projectKey,
+        episode_no: episodeNo ?? undefined,
+      });
       toast.success(`${t('keyframes.generateStarted')}：${result.task_id}`);
       setTimeout(fetchPlan, 3000);
     } catch (err) {
@@ -1778,7 +1871,8 @@ function KeyframesTab({ projectKey }: { projectKey: string }) {
     }
   };
 
-  useEffect(() => { fetchPlan(); }, [projectKey]);
+  // 切集必须重新拉取：否则会一直显示上一集的尾帧计划（同一项目多集共用 projectKey）
+  useEffect(() => { fetchPlan(); }, [projectKey, episodeNo]);
 
   return (
     <div className="space-y-6">
@@ -1876,7 +1970,7 @@ function KeyframesTab({ projectKey }: { projectKey: string }) {
 // 单镜重做闭环：后端 /api/storyboard/retry-shot（分镜图）与 /api/video/retry-shot（视频）
 // 早已实现，但前端此前**零入口** —— 用户对某一镜不满意只能整集重跑。
 // 这里把两个入口放到每张分镜卡上，并在视频重做成功后提示「同集成片已过期」。
-function StoryboardTab({ projectKey }: { projectKey: string }) {
+function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeNo?: number | null }) {
   const { t } = useApp();
   const [cards, setCards] = useState<any[]>([]);
   const [summary, setSummary] = useState<any>(null);
@@ -1894,7 +1988,9 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
     setLoading(true);
     setError('');
     try {
-      const data = await storyboardApi.canvas(projectKey);
+      // ⭐ 必须带集号：不带时后端只认「已生成集里最新的那集」，
+      //    用户切到第 2 集却看到第 N 集的分镜（与集切换器显示的集不一致）。
+      const data = await storyboardApi.canvas(projectKey, episodeNo ?? undefined);
       setCards(data.cards || []);
       setSummary((data as any).summary || null);
     } catch (err) {
@@ -1909,7 +2005,8 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
     }
   };
 
-  useEffect(() => { fetchCanvas(); }, [projectKey]);
+  // 换集必须重拉：cards 是按集落盘的分镜图/视频，混用会张冠李戴
+  useEffect(() => { fetchCanvas(); }, [projectKey, episodeNo]);
 
   const handleRetryImage = async (card: any) => {
     const key = `${card.shot_id}:image`;
@@ -1917,7 +2014,13 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
     setShotError('');
     setNotice('');
     try {
-      await storyboardApi.retryShot({ project_name: projectKey, shot_id: String(card.shot_id) });
+      await storyboardApi.retryShot({
+        project_name: projectKey,
+        shot_id: String(card.shot_id),
+        // 单镜重跑也带集号：后端据此决定写 <项目>/ 还是 <项目>/epNN/，
+        // 漏传会把第 2 集的图写进第 1 集目录（覆盖第 1 集同号镜头的图）。
+        episode_no: episodeNo ?? undefined,
+      });
       setNotice(t('sb.imageRedone', { seq: card.seq }));
       await fetchCanvas();
     } catch (e) {
@@ -1942,6 +2045,7 @@ function StoryboardTab({ projectKey }: { projectKey: string }) {
         project_name: projectKey,
         shot_id: card.shot_id,
         mode,
+        episode_no: episodeNo ?? undefined,
       });
       setNotice(
         t('sb.videoRedone', {

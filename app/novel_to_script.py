@@ -95,20 +95,46 @@ SHOTS_PER_CHUNK_MIN = 6       # 单块分镜数下限（再短的块也至少这
 # 全部子块仍然逐块送模型、原文覆盖率不受影响，只是镜头密度变稀。
 MAX_SHOTS_PER_EPISODE = 78
 
-# ---- 每章固定拆成的集数（用户要求：一章拆成 2 集）----
-# MAX_SHOTS_PER_EPISODE 只是「兜底硬上限」—— 章节短（如 2500 字 / 预估 20 镜）时它根本
-# 不触发，一章仍然只出一集。用户明确要求「一章拆成 2 集」，所以这里再加一条**固定份数**
-# 规则：无论章节长短，都按语义边界均分成 EPISODES_PER_CHAPTER 集。
-#
-# 两个规则取**更碎的那个**（parts = max(固定份数, 超限算出的份数)），
-# 因此短章也会拆，超长章会更碎 —— 两种情况下每段都不会超过硬上限。
-#
-# 设为 1 = 关闭固定拆分，退回「只有预估镜头超 MAX_SHOTS_PER_EPISODE 才拆」的旧行为。
-# 环境变量：MJSCXT_EPISODES_PER_CHAPTER
+# ---- 单块镜头数上限（LLM 响应体红线，2026-09-25 实测）----
+# ⚠️ 与 MAX_SHOTS_PER_EPISODE 是**两条独立的红线**，别混：
+#   · MAX_SHOTS_PER_EPISODE = H3 连续渲染的资源红线（78 段会崩，见上）；
+#   · 本常量 = **单次 LLM 调用的响应体红线**。
+# ⚠️ 背景（实测）：一次调用要出 49 镜时，agnes 网关 ReadTimeout ——
+#     ReadTimeout: host='api.agnes-ai.cn' read timeout=1200
+#     等了整整 20 分钟读不完响应，整块失败。
+# 根因：`CHARS_PER_SHOT=120` + `CHUNK_CHARS=3000` → 一块 ~25 镜；两章聚合即 49 镜。
+# 而 `shots_cap = min(120, target*2+3)` 让模型**被允许**输出到 101 镜 → 响应体更大。
+# 处置：单块目标镜数超过本阈值时，**先二分再送模型**（原文字字不丢，只是拆成多次调用）。
+# 之所以要「预劈半」而不是「等出错再二分」：劈半原本只挂在 LLMTruncatedError 上，
+# 而超时抛的是 LLMError/LLMGatewayUnavailable → **不触发劈半**，直接整块失败（本次即此坑）。
+# 设为 0 = 关闭（退回旧行为，只靠截断兜底）。
 try:
-    EPISODES_PER_CHAPTER = max(1, int(os.environ.get("MJSCXT_EPISODES_PER_CHAPTER", "2") or 2))
+    MAX_SHOTS_PER_CHUNK = max(0, int(os.environ.get("MJSCXT_MAX_SHOTS_PER_CHUNK", "24") or 24))
 except (TypeError, ValueError):
-    EPISODES_PER_CHAPTER = 2
+    MAX_SHOTS_PER_CHUNK = 24
+
+# ---- 每章**至少**拆成的集数（默认 1 = 不强制拆，纯按内容判断）----
+# ⚠️ 2026-09-25 策略变更：由「一章固定拆 2 集」改为**纯按内容自动判断**。
+#
+# 旧行为（=2）：MAX_SHOTS_PER_EPISODE 只是「兜底硬上限」，章节短时它根本不触发，
+#   所以曾再加一条固定份数规则强行拆开。实测后果：本项目 42 章平均 1766 字、
+#   预估 15 镜/章，**远低于 78 镜上限**，却在旧规则下被硬拆成 2 集 ——
+#   每集只剩 7~8 镜（约 35 秒），集与集之间还在句中断开，
+#   既不是「一集」该有的体量，也破坏了叙事完整性（用户实测反馈）。
+#
+# 新行为（=1）：集数**完全由内容体量决定** ——
+#   `parts = ceil(预估镜头数 / MAX_SHOTS_PER_EPISODE)`，
+#   只有预估镜头数真的超过单集硬上限时才拆，且拆出的每段都不超上限。
+#   这与业界漫剧/短剧项目的通行做法一致（一集 = 一个完整叙事单元，
+#   约 1.5~3 分钟；内容不够就不硬凑集数）。
+#
+# 本常量现在退化为**「每章至少拆 N 集」的下限**，仅供需要「无论长短都拆」的场景
+# 通过 env 显式开启（MJSCXT_EPISODES_PER_CHAPTER=2）。
+# 取更碎的那个：parts = max(本下限, 内容算出的份数)，因此调大它只可能更碎，不会更碎不动。
+try:
+    EPISODES_PER_CHAPTER = max(1, int(os.environ.get("MJSCXT_EPISODES_PER_CHAPTER", "1") or 1))
+except (TypeError, ValueError):
+    EPISODES_PER_CHAPTER = 1
 
 # ---- 分镜阶段的 token 预算（必须给「思考」留预留量）----
 # ⚠️ always-on reasoning 模型（agnes-3.0-flash / GLM 系）在写分镜前会先输出一大段思考，
@@ -145,6 +171,27 @@ def _cache_file(cache_dir: str, kind: str, prompt: str) -> str:
     """内容寻址缓存路径：文件名 = sha1(kind + prompt) 前 20 位。"""
     digest = hashlib.sha1(f"{kind}\x00{prompt}".encode("utf-8")).hexdigest()[:20]
     return os.path.join(cache_dir, f"{kind}_{digest}.json")
+
+
+def _shots_cache_root(continuity_dir: str, key: str) -> str:
+    """**整本路径**的断点缓存目录（``<continuity>/<项目>/shots_cache/whole``）。
+
+    ⚠️ 与「按章分集」路径的 ``continuity.shots_cache_dir(...)``（``.../shots_cache/epNN``）
+    刻意分开放：两条路径的 prompt 体量、块划分、shots_target 完全不同，
+    混在一个目录里虽然因内容寻址不会串味，但排查「这次为什么没命中」时无法区分来源。
+
+    缓存是纯加速手段：目录不可用（权限/磁盘）时返回 ""，调用方按「不落缓存」继续跑，
+    **绝不让缓存问题阻断主链路**（与 `_shots_cache_enabled` 的取舍一致）。
+    """
+    if not continuity_dir or not key:
+        return ""
+    try:
+        root = os.path.join(continuity_dir, safe_project_name(key), "shots_cache", "whole")
+        os.makedirs(root, exist_ok=True)
+        return root
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"整本路径缓存目录不可用（本次不落缓存）：{e}")
+        return ""
 
 
 def _cache_read(path: str):
@@ -666,7 +713,45 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
     cache_dir 非空时启用断点缓存：命中即跳过模型调用（见文件上方缓存说明）。
     shots_hard_cap > 0 时收紧本块镜头数上限（单集硬上限 MAX_SHOTS_PER_EPISODE 的分配额度）——
     只压上限、不动下限，避免与 SHOTS_PER_CHUNK_MIN 打架（下限由调用方按预算调低）。
+
+    ⚠️ 单块镜数超过 MAX_SHOTS_PER_CHUNK 时**先二分再送模型**（见该常量注释）：
+    一次性要几十镜会让响应体大到读超时（实测 49 镜 ReadTimeout 1200s）。
+    这里必须在**调用前**劈半 —— 劈半原本只挂在 LLMTruncatedError 上，而超时抛的是
+    LLMError/LLMGatewayUnavailable，**不会**触发劈半，直接整块失败。
     """
+    # ---- 预劈半：单块镜数过大 → 先拆成子块，避免单次响应体过大导致读超时 ----
+    if (MAX_SHOTS_PER_CHUNK and int(shots_target) > MAX_SHOTS_PER_CHUNK
+            and depth < CHAPTER_SPLIT_MAX_DEPTH):
+        _subs = _split_chunk_in_half(chunk)
+        if _subs:
+            logger.warning(
+                "块 %s 目标 %d 镜超过单块上限 %d，预拆为 %d 个子块（原文不丢，改为多次调用）",
+                chunk.get("title"), int(shots_target), MAX_SHOTS_PER_CHUNK, len(_subs))
+            if events is not None:
+                events.append({"label": f"shots#{chunk.get('index')}",
+                               "event": "pre_split", "depth": depth,
+                               "target": int(shots_target),
+                               "parts": [len(s.get("text") or "") for s in _subs]})
+            # 镜数按原文字数比例分配（不是均分）—— 短的那半不该拿同样的镜数
+            _lens = [max(1, len(s.get("text") or "")) for s in _subs]
+            _tot = float(sum(_lens))
+            _out = []
+            _beats = list(outline.get("key_beats") or [])
+            for _i, _s in enumerate(_subs):
+                _target_i = max(1, int(round(int(shots_target) * _lens[_i] / _tot)))
+                _sub_outline = dict(outline)
+                if _beats:
+                    _n = len(_beats)
+                    _a = _i * _n // len(_subs)
+                    _b = max(_a + 1, (_i + 1) * _n // len(_subs))
+                    _sub_outline["key_beats"] = _beats[_a:_b]
+                _out.extend(build_shots_for_chunk(
+                    client, bible, _sub_outline, _s, _target_i,
+                    events=events, depth=depth + 1,
+                    continuity_ctx=continuity_ctx, cache_dir=cache_dir,
+                    shots_hard_cap=shots_hard_cap))
+            return _out
+
     char_brief = [
         {"name": c.get("name"), "appearance": (c.get("appearance") or "")[:40]}
         for c in (bible.get("characters") or [])[:6] if isinstance(c, dict)
@@ -718,15 +803,30 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
                             events=events, label=label,
                             max_attempts=4,
                             token_ladder=(16384, 24576, 32768))
-    except LLMTruncatedError:
+    except (LLMTruncatedError, LLMError) as _e:
+        # ⚠️ 不只截断要二分：**超时/网关故障也要**。
+        # 实测坑：一次要 49 镜 → 网关 ReadTimeout 1200s，抛的是 LLMError（非截断）
+        #  → 旧代码不二分 → 整块失败、整集中断。既然「镜数太多」正是病因，
+        #  二分后每块镜数减半、响应体也减半，大概率能过。
+        # 但 LLMGatewayUnavailable（上游没算力/熔断）要**原样上抛** ——
+        # 那是网关整体挂了，二分多少次都没用，正确处置是立刻停下告诉用户。
+        if isinstance(_e, LLMGatewayUnavailable):
+            raise
+        _tag = "输出被截断" if isinstance(_e, LLMTruncatedError) else "调用失败"
         subs = _split_chunk_in_half(chunk) if depth < CHAPTER_SPLIT_MAX_DEPTH else []
         if not subs or int(shots_target) <= 1:
-            raise LLMTruncatedError(
-                f"{label}（{chunk.get('title')}，{len(chunk.get('text') or '')} 字，目标 {shots_target} 镜）"
-                f"在自动提高 max_tokens 后仍被截断，且已无法继续二分（depth={depth}）") from None
-        logger.warning(f"{label} 分镜输出被截断，自动二分为 {len(subs)} 个子块重试（depth={depth}）")
+            if isinstance(_e, LLMTruncatedError):
+                raise LLMTruncatedError(
+                    f"{label}（{chunk.get('title')}，{len(chunk.get('text') or '')} 字，目标 {shots_target} 镜）"
+                    f"在自动提高 max_tokens 后仍被截断，且已无法继续二分（depth={depth}）") from None
+            # 非截断且无法再二分 → 保留原异常类型与原错误信息（含网关诊断），别吞成 Unknown
+            raise
+        logger.warning(
+            "%s 分镜%s，自动二分为 %d 个子块重试（depth=%d，原错误：%s）",
+            label, _tag, len(subs), depth, str(_e)[:160])
         if events is not None:
             events.append({"label": label, "event": "sub_split", "depth": depth,
+                           "reason": _tag,
                            "parts": [len(s.get("text") or "") for s in subs]})
         per = max(1, int(round(int(shots_target) / float(len(subs)))))
         beats = list(outline.get("key_beats") or [])
@@ -1282,12 +1382,19 @@ def _run_full_coverage_check(client, novel_text: str, script: dict, reports=None
 def convert_novel_to_script(client, novel_meta: dict, novel_text: str, style: str = "3D动漫渲染",
                             episodes: int = 1, target_shots: int = 12, progress_cb=None,
                             check_coverage: bool = True, continuity_dir: str = None,
-                            project_key: str = None,
+                            project_key: str = None, cache_dir: str = "",
                             coverage_max_rounds: int = COVERAGE_MAX_ROUNDS) -> dict:
     """完整转换流程，返回 A 版剧本 dict（含 metadata）
 
     check_coverage=True（默认）时，整本路径同样执行「原文覆盖率校验 → 遗漏自动补生成 →
     复检 → 报告落盘」，保证长篇小说既不删减原文，也不因分块而丢内容。
+
+    ⚠️ cache_dir（2026-09-25 补）：整本路径此前**完全不落缓存** ——
+    提炼 42 章要跑 40 次调用、约 40 分钟，只要有一次网关抖动，
+    pipeline 的 script 步骤整体重试就要**从头再烧一遍**。
+    这正是 `shots_cache_dir` 注释里写的那个坑，但当时只接到「按章分集」路径
+    （convert_chapter_to_script），整本路径漏了。现补上：口径与分集路径一致
+    （内容寻址 sha1(prompt)，命中即跳过模型调用）。
     """
     def report(phase, current, total, message, percent):
         if progress_cb:
@@ -1297,6 +1404,7 @@ def convert_novel_to_script(client, novel_meta: dict, novel_text: str, style: st
                 logger.warning(f"进度回调异常：{e}")
 
     t0 = time.time()
+    cache_events = []          # 缓存命中轨迹（写入 metadata，便于排查「为什么这么快」）
     novel_title = novel_meta.get("title") or novel_meta.get("name") or "未命名小说"
     chapters = novel_meta.get("chapters") or []
     chunks = build_chunks(novel_text, chapters)
@@ -1318,7 +1426,8 @@ def convert_novel_to_script(client, novel_meta: dict, novel_text: str, style: st
         report("outline", i + 1, total_steps, f"提炼第 {chunk['index']} 块（{chunk.get('title')}）…",
                int(5 + (i + 1) / total_steps * 55))
         try:
-            outlines[i] = extract_chunk_outline(client, chunk, novel_title)
+            outlines[i] = extract_chunk_outline(client, chunk, novel_title,
+                                                events=cache_events, cache_dir=cache_dir)
         except LLMError as e:
             # 大纲仅用于辅助提示，失败不丢原文（分镜阶段仍全量送该块正文）
             warnings.append(f"第 {chunk['index']} 块大纲提炼失败（改用空大纲，原文仍全量送模型）：{e}")
@@ -1328,7 +1437,8 @@ def convert_novel_to_script(client, novel_meta: dict, novel_text: str, style: st
 
     # ② 汇总设定
     report("bible", len(sampled) + 1, total_steps, "汇总全剧人物 / 物品 / 场景设定…", 65)
-    bible = _as_dict(build_bible(client, outlines, novel_title, style, episodes, target_shots))
+    bible = _as_dict(build_bible(client, outlines, novel_title, style, episodes, target_shots,
+                                 events=cache_events, cache_dir=cache_dir))
 
     characters = _norm_list(bible.get("characters"), 8,
                             ["name", "age", "appearance", "personality", "voice_style",
@@ -1364,7 +1474,8 @@ def convert_novel_to_script(client, novel_meta: dict, novel_text: str, style: st
                int(70 + (i + 1) / total_steps * 25))
         try:
             all_shots.extend(build_shots_for_chunk(client, bible, outlines[i] or {"summary": "", "key_beats": []},
-                                                   chunk, per_chunk))
+                                                   chunk, per_chunk,
+                                                   events=cache_events, cache_dir=cache_dir))
         except LLMGatewayUnavailable as e:
             # 网关问题不是「这一块运气不好」，重试无用 —— 见 _gateway_down_fallback 说明
             fb = _gateway_down_fallback(e, chunk, per_chunk, bible, all_shots)
@@ -1426,6 +1537,10 @@ def convert_novel_to_script(client, novel_meta: dict, novel_text: str, style: st
             "base_url": client.base_url,
             "elapsed_sec": round(time.time() - t0, 1),
             "warnings": warnings,
+            # 断点缓存命中轨迹：重跑时据此判断「这次为什么这么快 / 哪几步还在烧模型」
+            "cache_enabled": _shots_cache_enabled(),
+            "cache_hits": sum(1 for e in cache_events if e.get("event") == "cache_hit"),
+            "cache_events": cache_events[:200],
             "generated_at": datetime.now().isoformat(timespec="seconds"),
         },
     }
@@ -1609,20 +1724,20 @@ def split_chapter_for_episodes(chapter: dict, text: str = "",
                                fixed_parts: int = None) -> list:
     """把一章拆成 1..N 个「拍摄单元」（一个单元 = 一集）。
 
-    两条拆分规则，**取更碎的那个**
-    ------------------------------
-    1. **固定份数** ``fixed_parts``（默认取全局 ``EPISODES_PER_CHAPTER``，当前 =2）：
-       用户要求「一章拆成 2 集」，所以**不管章节长短都拆**。章节短（预估 20 镜）时
-       ``MAX_SHOTS_PER_EPISODE`` 那条规则根本不触发，只有这条能保证一定拆开。
-    2. **超限份数**：按 ``estimate_episode_shots`` 的预估镜头数除以 ``max_shots``
-       （默认 ``MAX_SHOTS_PER_EPISODE``=78）向上取整，保证每段不跑到 H3 崩溃点。
-
-    ``parts = max(固定份数, 超限份数)`` —— 短章拆成 2 集，超长章自然更碎。
+    拆分规则：**纯按内容体量自动判断**（2026-09-25 起）
+    ---------------------------------------------------
+    1. **内容份数（主规则）**：按 ``estimate_episode_shots`` 的预估镜头数除以
+       ``max_shots``（默认 ``MAX_SHOTS_PER_EPISODE``=78）向上取整 ——
+       预估不超限就是 1 集，超限才拆，且保证每段不跑到 H3 崩溃点。
+       集数因此**完全由内容体量决定**：短章一集、超长章自然更碎。
+    2. **固定下限（可选）**：``fixed_parts``（默认取全局 ``EPISODES_PER_CHAPTER``，
+       当前 =1 即关闭）作为「每章至少拆 N 集」的兜底下限。设为 2 可强制短章也拆；
+       取 ``max(本下限, 内容份数)``，因此调大它只可能更碎，绝不会更碎不动。
 
     设计要点
     --------
-    - **关闭固定拆分时零影响**：``fixed_parts=1`` 且预估不超限 → 返回单段且
-      `start/end` 原样不变，老项目（一章一集）行为完全不变。
+    - **不拆时零影响**：预估不超限且下限为 1 → 返回单段且 `start/end` 原样不变，
+      老项目（一章一集）行为完全不变。
     - **过短章不拆**：章字数 < ``CHAPTER_MIN_CHARS``（300）时拆开没有意义（每段
       只剩一两百字），直接退回 1 集。
     - **不丢字、不重叠**：各段首尾相接，`[start, end)` 逐段连续覆盖原章区间。
@@ -1641,9 +1756,10 @@ def split_chapter_for_episodes(chapter: dict, text: str = "",
     if cap <= 0:
         cap = MAX_SHOTS_PER_EPISODE
     est = estimate_episode_shots(n_chars)
+    # 主规则：纯按内容体量。预估 ≤ cap 就是 1 集（不硬拆）。
     parts = 1 if est <= cap else max(2, int(math.ceil(est / float(cap))))
-    # 「每章固定 N 集」：短章也要拆（超限规则在短章上不触发）。
-    # 取更碎的那个，超长章自然比 N 更碎，仍然保证每段 ≤ cap。
+    # 可选下限（默认 1 = 关闭）：仅当显式要求「每章至少 N 集」时才抬高。
+    # 取更碎的那个，保证每段仍 ≤ cap。
     n_fixed = EPISODES_PER_CHAPTER if fixed_parts is None else int(fixed_parts or 0)
     if n_fixed > 1 and n_chars >= CHAPTER_MIN_CHARS:
         parts = max(parts, n_fixed)

@@ -1224,6 +1224,9 @@
     "redoVideo": "重做视频",
     "subStoryboardHint": "完整镜头列表",
     "subNinegridHint": "镜头构图草案",
-    "subKeyframesHint": "镜头首尾帧"
+    "subKeyframesHint": "镜头首尾帧",
+    "episode": "集次",
+    "episodeN": "第 {n} 集",
+    "chapterN": "第 {n} 章"
   }
 }

@@ -360,9 +360,10 @@ def episode_units(chapters: list, plan: dict = None, text: str = "",
     :func:`novel_to_script.split_chapter_for_episodes` 按语义边界切成多段，
     每段独立成一集，各自镜头数都在上限内。
 
-    ⚠️ 另外还有一条**固定份数**规则（``novel_to_script.EPISODES_PER_CHAPTER``，当前 =2）：
-    用户要求「一章拆成 2 集」，所以**短章也拆**（超限规则在短章上不触发）。
-    两条规则取更碎的那个，因此「一章 = 一集」不再成立，**集号 ≠ 章号**。
+    ⚠️ 集数由**内容体量**决定（``novel_to_script.EPISODES_PER_CHAPTER`` 当前 =1，
+    即不强制拆）——「一章 = 一集」在**预估镜头数不超上限时成立**，超长章才拆。
+    短章不硬凑集数（旧行为曾强制「一章 2 集」，实测把 1766 字/15 镜的章拆成
+    每集 7~8 镜、约 35 秒，既非一集体量又破坏叙事，已废弃）。
 
     两条关键约定
     ------------
